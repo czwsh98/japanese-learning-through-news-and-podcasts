@@ -1,6 +1,6 @@
 """Transcribe Japanese audio via local mlx-whisper (default) or OpenAI API.
 
-Set USE_OPENAI_WHISPER=1 in the environment to fall back to the OpenAI API.
+Default: OpenAI Whisper API. Set USE_LOCAL_WHISPER=1 to use local mlx-whisper instead.
 Set MLX_WHISPER_MODEL to override the local model (default: mlx-community/whisper-large-v3-mlx).
 """
 import collections
@@ -10,7 +10,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-_USE_API = os.environ.get("USE_OPENAI_WHISPER", "").strip() not in ("", "0")
+_USE_API = os.environ.get("USE_LOCAL_WHISPER", "").strip() in ("", "0")
 _MLX_MODEL = os.environ.get("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-mlx")
 
 _MIN_CHARS = 3      # minimum meaningful characters
