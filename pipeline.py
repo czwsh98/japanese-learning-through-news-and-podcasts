@@ -36,8 +36,11 @@ from lib.transcriber import transcribe_audio
 from lib.translator import translate_segments
 from lib.writer import write_episode_files
 
-EPISODES_DIR = Path(os.environ.get("EPISODES_DIR", "episodes"))
-SOURCES_FILE = Path("sources.json")
+_PROJECT_ROOT = Path(__file__).parent
+_episodes_env = os.environ.get("EPISODES_DIR", "")
+EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
+                else _PROJECT_ROOT / (_episodes_env or "episodes"))
+SOURCES_FILE = _PROJECT_ROOT / "sources.json"
 
 logging.basicConfig(
     level=logging.INFO,

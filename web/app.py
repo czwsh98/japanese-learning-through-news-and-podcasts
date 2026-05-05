@@ -27,7 +27,9 @@ load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _PROJECT_ROOT = Path(__file__).parent.parent
-EPISODES_DIR = Path(os.environ.get("EPISODES_DIR", _PROJECT_ROOT / "episodes"))
+_episodes_env = os.environ.get("EPISODES_DIR", "")
+EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
+                else _PROJECT_ROOT / (_episodes_env or "episodes"))
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
