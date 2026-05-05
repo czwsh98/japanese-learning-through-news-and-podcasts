@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-for _var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+for _var in ("OPENAI_API_KEY", "GOOGLE_TRANSLATE_API_KEY"):
     if not os.environ.get(_var):
         print(f"ERROR: {_var} not set. Copy .env.example → .env and fill in your keys.")
         sys.exit(1)
