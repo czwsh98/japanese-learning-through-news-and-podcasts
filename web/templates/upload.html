@@ -1,12 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Upload Audio — 日本語 Pipeline{% endblock %}
+{% block title %}Upload — 日本語 Pipeline{% endblock %}
 
 {% block content %}
 <div class="max-w-lg">
-  <h1 class="text-2xl font-bold mb-1">Upload Audio</h1>
+  <h1 class="text-2xl font-bold mb-1">Add Episode</h1>
   <p class="text-sm text-gray-500 mb-6">
-    Transcribe, translate, and analyse any Japanese audio file.
-    Supported: mp3, m4a, wav, ogg, flac, webm, aac, opus, mp4
+    Paste a YouTube or podcast URL, or upload an audio file directly.
   </p>
 
   {% if error %}
@@ -25,29 +24,61 @@
 
   <form id="upload-form" method="post" enctype="multipart/form-data" action="/upload">
 
-    <!-- Drop zone -->
-    <div id="drop-zone"
-         class="border-2 border-dashed border-gray-700 rounded-xl p-10 text-center
-                cursor-pointer hover:border-gray-500 transition-colors mb-4"
-         onclick="document.getElementById('file-input').click()">
-      <div id="drop-label">
-        <div class="text-3xl mb-3">🎧</div>
-        <p class="text-gray-300 font-medium">Drop audio file here</p>
-        <p class="text-gray-600 text-sm mt-1">or click to browse</p>
-      </div>
-      <div id="file-selected" class="hidden">
-        <div class="text-3xl mb-3">✓</div>
-        <p id="file-name" class="text-gray-300 font-medium break-all"></p>
-        <p id="file-size" class="text-gray-600 text-sm mt-1"></p>
-      </div>
-      <input id="file-input" type="file" name="audio" class="hidden"
-             accept=".mp3,.mp4,.m4a,.wav,.ogg,.webm,.flac,.aac,.opus">
+    <!-- Source tabs -->
+    <div class="flex border-b border-gray-800 mb-5">
+      <button type="button" id="tab-url"
+              class="px-4 py-2 text-sm font-medium border-b-2 border-blue-500 text-blue-400 -mb-px transition-colors">
+        URL
+      </button>
+      <button type="button" id="tab-file"
+              class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 -mb-px hover:text-gray-300 transition-colors">
+        File upload
+      </button>
     </div>
 
-    <!-- Title -->
+    <!-- URL panel -->
+    <div id="panel-url" class="mb-5">
+      <label for="source_url" class="block text-sm text-gray-400 mb-1">
+        YouTube or podcast URL
+      </label>
+      <input id="source_url" type="url" name="source_url"
+             placeholder="https://www.youtube.com/watch?v=..."
+             class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2
+                    text-sm text-gray-100 placeholder-gray-600
+                    focus:outline-none focus:border-gray-500 transition-colors">
+      <p class="text-xs text-gray-600 mt-1">
+        Any site supported by yt-dlp — YouTube, NHK, SoundCloud, and more.
+      </p>
+    </div>
+
+    <!-- File panel -->
+    <div id="panel-file" class="mb-5 hidden">
+      <div id="drop-zone"
+           class="border-2 border-dashed border-gray-700 rounded-xl p-10 text-center
+                  cursor-pointer hover:border-gray-500 transition-colors"
+           onclick="document.getElementById('file-input').click()">
+        <div id="drop-label">
+          <div class="text-3xl mb-3">🎧</div>
+          <p class="text-gray-300 font-medium">Drop audio file here</p>
+          <p class="text-gray-600 text-sm mt-1">or click to browse</p>
+          <p class="text-gray-700 text-xs mt-2">mp3 · m4a · wav · ogg · flac · webm · aac · opus · mp4</p>
+        </div>
+        <div id="file-selected" class="hidden">
+          <div class="text-3xl mb-3">✓</div>
+          <p id="file-name" class="text-gray-300 font-medium break-all"></p>
+          <p id="file-size" class="text-gray-600 text-sm mt-1"></p>
+        </div>
+        <input id="file-input" type="file" name="audio" class="hidden"
+               accept=".mp3,.mp4,.m4a,.wav,.ogg,.webm,.flac,.aac,.opus">
+      </div>
+    </div>
+
+    <!-- Title (optional) -->
     <div class="mb-5">
-      <label for="title" class="block text-sm text-gray-400 mb-1">Title <span class="text-gray-600">(optional — defaults to filename)</span></label>
-      <input id="title" type="text" name="title" placeholder="e.g. NHK News 2026-05-04"
+      <label for="title" class="block text-sm text-gray-400 mb-1">
+        Title <span class="text-gray-600">(optional — auto-detected from URL or filename)</span>
+      </label>
+      <input id="title" type="text" name="title" placeholder="e.g. NHK Web Easy 2026-05-04"
              class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2
                     text-sm text-gray-100 placeholder-gray-600
                     focus:outline-none focus:border-gray-500 transition-colors">
@@ -86,10 +117,10 @@
     <div class="inline-flex flex-col items-center gap-3">
       <div class="spinner"></div>
       <p class="text-gray-300 font-medium">Processing…</p>
-      <div id="step-label" class="text-sm text-gray-500">Uploading file</div>
+      <div id="step-label" class="text-sm text-gray-500"></div>
       <p class="text-xs text-gray-600 max-w-xs">
-        Transcribing with Whisper, then translating and analysing with Claude.
-        This takes 1–3 minutes depending on audio length.
+        Downloading, transcribing with Whisper, then translating and analysing with Claude.
+        This takes 2–5 minutes depending on audio length.
       </p>
     </div>
   </div>
@@ -111,42 +142,73 @@
 
 {% block scripts %}
 <script>
-  const dropZone   = document.getElementById("drop-zone");
-  const fileInput  = document.getElementById("file-input");
-  const dropLabel  = document.getElementById("drop-label");
+  const tabUrl    = document.getElementById("tab-url");
+  const tabFile   = document.getElementById("tab-file");
+  const panelUrl  = document.getElementById("panel-url");
+  const panelFile = document.getElementById("panel-file");
+  const urlInput  = document.getElementById("source_url");
+  const fileInput = document.getElementById("file-input");
+  const dropZone  = document.getElementById("drop-zone");
+  const dropLabel = document.getElementById("drop-label");
   const fileSelected = document.getElementById("file-selected");
-  const fileName   = document.getElementById("file-name");
-  const fileSize   = document.getElementById("file-size");
-  const submitBtn  = document.getElementById("submit-btn");
-  const form       = document.getElementById("upload-form");
+  const fileName  = document.getElementById("file-name");
+  const fileSize  = document.getElementById("file-size");
+  const submitBtn = document.getElementById("submit-btn");
+  const form      = document.getElementById("upload-form");
   const processing = document.getElementById("processing");
   const stepLabel  = document.getElementById("step-label");
 
+  let activeTab = "url";
+
+  function setTab(tab) {
+    activeTab = tab;
+    if (tab === "url") {
+      tabUrl.classList.replace("border-transparent", "border-blue-500");
+      tabUrl.classList.replace("text-gray-500", "text-blue-400");
+      tabFile.classList.replace("border-blue-500", "border-transparent");
+      tabFile.classList.replace("text-blue-400", "text-gray-500");
+      panelUrl.classList.remove("hidden");
+      panelFile.classList.add("hidden");
+    } else {
+      tabFile.classList.replace("border-transparent", "border-blue-500");
+      tabFile.classList.replace("text-gray-500", "text-blue-400");
+      tabUrl.classList.replace("border-blue-500", "border-transparent");
+      tabUrl.classList.replace("text-blue-400", "text-gray-500");
+      panelFile.classList.remove("hidden");
+      panelUrl.classList.add("hidden");
+    }
+    updateSubmit();
+  }
+
+  function updateSubmit() {
+    if (activeTab === "url") {
+      submitBtn.disabled = urlInput.value.trim() === "";
+    } else {
+      submitBtn.disabled = !fileInput.files[0];
+    }
+  }
+
+  tabUrl.addEventListener("click",  () => setTab("url"));
+  tabFile.addEventListener("click", () => setTab("file"));
+  urlInput.addEventListener("input", updateSubmit);
+
+  // File selection
   function formatBytes(b) {
     if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
     return (b / 1024 / 1024).toFixed(1) + " MB";
   }
-
   function showFile(file) {
     dropLabel.classList.add("hidden");
     fileSelected.classList.remove("hidden");
     fileName.textContent = file.name;
     fileSize.textContent = formatBytes(file.size);
-    submitBtn.disabled = false;
+    updateSubmit();
   }
-
-  fileInput.addEventListener("change", () => {
-    if (fileInput.files[0]) showFile(fileInput.files[0]);
-  });
+  fileInput.addEventListener("change", () => { if (fileInput.files[0]) showFile(fileInput.files[0]); });
 
   // Drag and drop
-  dropZone.addEventListener("dragover", e => {
-    e.preventDefault();
-    dropZone.classList.add("border-gray-400");
-  });
-  dropZone.addEventListener("dragleave", () => {
-    dropZone.classList.remove("border-gray-400");
-  });
+  dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("border-gray-400"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("border-gray-400"));
   dropZone.addEventListener("drop", e => {
     e.preventDefault();
     dropZone.classList.remove("border-gray-400");
@@ -159,32 +221,44 @@
     }
   });
 
-  // Show processing state on submit
-  const steps = [
+  // Processing state
+  const urlSteps = [
+    "Downloading audio…",
+    "Transcribing with Whisper…",
+    "Translating segments with Claude…",
+    "Analysing vocabulary and grammar…",
+    "Writing episode files…",
+  ];
+  const fileSteps = [
     "Uploading file…",
     "Transcribing with Whisper…",
     "Translating segments with Claude…",
     "Analysing vocabulary and grammar…",
     "Writing episode files…",
   ];
-  let stepIdx = 0;
 
   form.addEventListener("submit", e => {
-    if (!fileInput.files[0]) { e.preventDefault(); return; }
+    if (activeTab === "url" && urlInput.value.trim() === "") { e.preventDefault(); return; }
+    if (activeTab === "file" && !fileInput.files[0]) { e.preventDefault(); return; }
+
+    // Clear source_url if in file mode so the server takes the file path
+    if (activeTab === "file") urlInput.value = "";
+
     submitBtn.disabled = true;
     submitBtn.textContent = "Processing…";
     processing.classList.remove("hidden");
-    stepLabel.textContent = steps[0];
 
-    // Cycle through step labels to give progress feedback
+    const steps = activeTab === "url" ? urlSteps : fileSteps;
+    let idx = 0;
+    stepLabel.textContent = steps[0];
     const interval = setInterval(() => {
-      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
-      stepLabel.textContent = steps[stepIdx];
-      if (stepIdx === steps.length - 1) clearInterval(interval);
-    }, 18000); // ~18s per step
+      idx = Math.min(idx + 1, steps.length - 1);
+      stepLabel.textContent = steps[idx];
+      if (idx === steps.length - 1) clearInterval(interval);
+    }, activeTab === "url" ? 20000 : 18000);
   });
 
-  // Disable submit until a file is chosen
-  submitBtn.disabled = true;
+  // Initial state: URL tab, submit disabled until URL entered
+  updateSubmit();
 </script>
 {% endblock %}

@@ -144,58 +144,81 @@ def upload_page():
 
 @app.route("/upload", methods=["POST"])
 def upload_process():
-    # ── Validate file ────────────────────────────────────────────────────────
-    if "audio" not in request.files:
-        return render_template("upload.html", error="No file selected."), 400
+    from lib.transcriber import transcribe_audio
+    from lib.translator import translate_segments
+    from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
+    from lib.writer import write_episode_files
+    from lib.anki import push_to_anki
 
-    f = request.files["audio"]
-    if not f.filename:
-        return render_template("upload.html", error="No file selected."), 400
+    level = request.form.get("level", DEFAULT_LEVEL).strip()
+    if level not in LEVELS:
+        level = DEFAULT_LEVEL
 
-    suffix = Path(f.filename).suffix.lower()
-    if suffix not in UPLOAD_EXTENSIONS:
-        return render_template(
-            "upload.html",
-            error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
-        ), 400
+    source_url = request.form.get("source_url", "").strip()
 
     # ── Set up episode directory ─────────────────────────────────────────────
-    title = request.form.get("title", "").strip() or Path(f.filename).stem
     base_slug = date.today().isoformat()
     slug = _unique_ep_slug(base_slug)
-
     ep_dir = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = ep_dir / f"audio{suffix}"
-    f.save(audio_path)
-
-    meta = {
-        "title": title,
-        "channel": "Upload",
-        "upload_date": date.today().strftime("%Y%m%d"),
-        "duration": 0,
-        "url": "",
-        "thumbnail": "",
-        "description": f"Uploaded file: {f.filename}",
-        "video_id": "",
-        "source": "upload",
-        "original_filename": f.filename,
-    }
-
-    # ── Run pipeline steps (synchronous) ─────────────────────────────────────
     try:
-        from lib.transcriber import transcribe_audio
-        from lib.translator import translate_segments
-        from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
-        from lib.writer import write_episode_files
-        from lib.anki import push_to_anki
+        if source_url:
+            # ── URL path: download via yt-dlp ────────────────────────────────
+            from lib.downloader import download_latest
 
-        level = request.form.get("level", DEFAULT_LEVEL).strip()
-        if level not in LEVELS:
-            level = DEFAULT_LEVEL
-        meta["level"] = level
+            audio_path, meta = download_latest([source_url], ep_dir)
+            if not audio_path:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template(
+                    "upload.html",
+                    error="Could not download audio. Check the URL and try again.",
+                ), 400
 
+            title_override = request.form.get("title", "").strip()
+            if title_override:
+                meta["title"] = title_override
+            meta["source"] = "url"
+            meta["level"] = level
+
+        else:
+            # ── File path: save uploaded audio ───────────────────────────────
+            if "audio" not in request.files:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template("upload.html", error="No file or URL provided."), 400
+
+            f = request.files["audio"]
+            if not f.filename:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template("upload.html", error="No file selected."), 400
+
+            suffix = Path(f.filename).suffix.lower()
+            if suffix not in UPLOAD_EXTENSIONS:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template(
+                    "upload.html",
+                    error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
+                ), 400
+
+            title = request.form.get("title", "").strip() or Path(f.filename).stem
+            audio_path = ep_dir / f"audio{suffix}"
+            f.save(audio_path)
+
+            meta = {
+                "title": title,
+                "channel": "Upload",
+                "upload_date": date.today().strftime("%Y%m%d"),
+                "duration": 0,
+                "url": "",
+                "thumbnail": "",
+                "description": f"Uploaded file: {f.filename}",
+                "video_id": "",
+                "source": "upload",
+                "original_filename": f.filename,
+                "level": level,
+            }
+
+        # ── Run pipeline steps (synchronous) ─────────────────────────────────
         whisper_result = transcribe_audio(audio_path)
         segments = translate_segments(whisper_result["segments"])
         analysis = analyze_transcript(segments, level=level)
@@ -205,6 +228,7 @@ def upload_process():
     except Exception as exc:
         tb = traceback.format_exc()
         log.error(f"Upload processing failed:\n{tb}")
+        shutil.rmtree(ep_dir, ignore_errors=True)
         return render_template("upload.html", error=f"Processing failed: {exc}", traceback=tb), 500
 
     return redirect(url_for("episode", date_str=slug))
