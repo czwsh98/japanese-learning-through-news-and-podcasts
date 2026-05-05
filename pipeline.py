@@ -22,7 +22,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 for _var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
     if not os.environ.get(_var):
