@@ -101,13 +101,14 @@ def _transcribe_local(audio_path: Path) -> dict:
         language="ja",
         word_timestamps=False,
         # Suppress non-speech segments at the model level
-        no_speech_threshold=0.6,
+        no_speech_threshold=0.5,
         # Flag and skip silent stretches that trigger hallucination loops
         hallucination_silence_threshold=2.0,
         # Disabling context conditioning reduces hallucination chains
         condition_on_previous_text=False,
-        # Reject segments whose repetition ratio is too high
-        compression_ratio_threshold=1.8,
+        # Stay close to the default (2.4) so speaker/acoustic changes aren't
+        # mistaken for hallucinations; _clean_segments catches the rest
+        compression_ratio_threshold=2.2,
     )
 
     raw_segments = [
