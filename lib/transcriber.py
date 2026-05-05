@@ -2,10 +2,15 @@
 
 Default: OpenAI Whisper API. Set USE_LOCAL_WHISPER=1 to use local mlx-whisper instead.
 Set MLX_WHISPER_MODEL to override the local model (default: mlx-community/whisper-large-v3-mlx).
+
+Files larger than the API's 25 MB limit are automatically split into chunks,
+transcribed in parallel, and merged — the caller receives a single seamless result.
 """
 import collections
 import os
 import logging
+import subprocess
+import tempfile
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -13,8 +18,10 @@ log = logging.getLogger(__name__)
 _USE_API = os.environ.get("USE_LOCAL_WHISPER", "").strip() in ("", "0")
 _MLX_MODEL = os.environ.get("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-mlx")
 
-_MIN_CHARS = 3      # minimum meaningful characters
-_LOOP_WINDOW = 4    # recent kept segments to check for cross-segment loops
+_MIN_CHARS = 3
+_LOOP_WINDOW = 4
+_API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
+_CHUNK_SECS = 900                # 15-minute chunks (~21 MB at 192 kbps)
 
 
 def transcribe_audio(audio_path: Path) -> dict:
@@ -24,12 +31,10 @@ def transcribe_audio(audio_path: Path) -> dict:
     return _transcribe_local(audio_path)
 
 
-def _has_repeating_phrase(text: str) -> bool:
-    """Return True if any substring of length 4-20 chars appears 3+ times.
+# ── Hallucination filter (used by both backends) ──────────────────────────────
 
-    Catches intra-segment phrase loops like:
-      トイレトリー店のトイレトリー店のトイレトリー店のトイレトリー店の
-    """
+def _has_repeating_phrase(text: str) -> bool:
+    """True if any 4–20 char substring appears 3+ times (phrase-loop hallucination)."""
     n = len(text)
     for length in range(4, min(21, n // 3 + 1)):
         counts: dict[str, int] = {}
@@ -42,43 +47,25 @@ def _has_repeating_phrase(text: str) -> bool:
 
 
 def _clean_segments(raw: list[dict]) -> list[dict]:
-    """Drop hallucinated / garbage segments from Whisper output.
-
-    Four-layer filter:
-    1. Empty / too-short text (< _MIN_CHARS chars)
-    2. Single-character dominance — one char > 60% of text (トトトト…)
-    3. Multi-character phrase loop within one segment (トイレトリー店の…)
-    4. Cross-segment loop — same text seen in the last _LOOP_WINDOW kept
-       segments (catches alternating loops like 渡辺知事は / 渡辺知事の声援…)
+    """Drop hallucinated / garbage segments. Four-layer filter:
+    1. Empty / too-short  2. Single-char dominance  3. Phrase loop  4. Cross-segment loop
     """
     cleaned: list[dict] = []
     recent: collections.deque[str] = collections.deque(maxlen=_LOOP_WINDOW)
 
     for seg in raw:
         text = seg["ja"].strip("　 \t\n\r")
-
-        if not text:
+        if not text or len(text) < _MIN_CHARS:
             continue
-
-        if len(text) < _MIN_CHARS:
-            log.debug(f"Dropping short segment [{seg['start']:.1f}s]: {text!r}")
-            continue
-
-        # Single-char dominance (e.g. トトトトト…)
         if len(text) >= 6 and max(text.count(c) for c in set(text)) / len(text) > 0.60:
             log.warning(f"Dropping char-loop [{seg['start']:.1f}s]: {text[:40]!r}")
             continue
-
-        # Multi-char phrase loop within one segment
         if _has_repeating_phrase(text):
             log.warning(f"Dropping phrase-loop [{seg['start']:.1f}s]: {text[:40]!r}")
             continue
-
-        # Cross-segment loop: same text appeared among recent kept segments
         if text in recent:
             log.warning(f"Dropping cross-segment loop [{seg['start']:.1f}s]: {text!r}")
             continue
-
         recent.append(text)
         cleaned.append({**seg, "ja": text})
 
@@ -91,6 +78,125 @@ def _clean_segments(raw: list[dict]) -> list[dict]:
     return cleaned
 
 
+# ── OpenAI Whisper API ────────────────────────────────────────────────────────
+
+def _transcribe_api(audio_path: Path) -> dict:
+    from openai import OpenAI
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    size = audio_path.stat().st_size
+    log.info(f"Transcribing {audio_path.name} ({size // 1024:,} KB) via OpenAI API ...")
+
+    if size > _API_LIMIT:
+        return _transcribe_api_chunked(client, audio_path, size)
+    return _transcribe_api_single(client, audio_path)
+
+
+def _transcribe_api_single(client, audio_path: Path) -> dict:
+    with open(audio_path, "rb") as fh:
+        response = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=fh,
+            language="ja",
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
+        )
+    raw = [
+        {
+            "index": seg.id,
+            "start": round(float(seg.start), 3),
+            "end":   round(float(seg.end),   3),
+            "ja":    seg.text.strip(),
+        }
+        for seg in response.segments
+    ]
+    segments = _clean_segments(raw)
+    log.info(f"Transcription complete: {len(segments)} segments, duration {response.duration:.1f}s")
+    return {
+        "language": response.language,
+        "duration": float(response.duration),
+        "text":     response.text,
+        "segments": segments,
+    }
+
+
+def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
+    """Split audio into ≤15-min chunks, transcribe each, merge seamlessly."""
+    n_chunks = -(-size // _API_LIMIT)   # ceiling division
+    log.info(
+        f"File is {size // 1_048_576} MB — splitting into ~{n_chunks} chunks "
+        f"of {_CHUNK_SECS // 60} min each"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="whisper_chunks_") as tmp:
+        chunk_pattern = str(Path(tmp) / "chunk_%03d.mp3")
+
+        # Split with ffmpeg — copy stream (no re-encode, fast, lossless)
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-i", str(audio_path),
+            "-f", "segment",
+            "-segment_time", str(_CHUNK_SECS),
+            "-c", "copy",
+            "-y", chunk_pattern,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg split failed: {result.stderr.strip()}")
+
+        chunks = sorted(Path(tmp).glob("chunk_*.mp3"))
+        if not chunks:
+            raise RuntimeError("ffmpeg produced no chunks")
+
+        log.info(f"Split into {len(chunks)} chunk(s), transcribing ...")
+
+        all_raw: list[dict] = []
+        offset = 0.0
+        full_text_parts: list[str] = []
+        language = "ja"
+        total_duration = 0.0
+
+        for i, chunk_path in enumerate(chunks):
+            log.info(f"  Chunk {i+1}/{len(chunks)} (offset {offset:.0f}s) ...")
+            with open(chunk_path, "rb") as fh:
+                response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=fh,
+                    language="ja",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"],
+                )
+
+            language = response.language
+            full_text_parts.append(response.text)
+            chunk_duration = float(response.duration)
+
+            for seg in response.segments:
+                all_raw.append({
+                    "index": len(all_raw),
+                    "start": round(float(seg.start) + offset, 3),
+                    "end":   round(float(seg.end)   + offset, 3),
+                    "ja":    seg.text.strip(),
+                })
+
+            offset += chunk_duration
+            total_duration = offset
+
+        segments = _clean_segments(all_raw)
+        log.info(
+            f"Transcription complete: {len(segments)} segments across "
+            f"{len(chunks)} chunks, total duration {total_duration:.1f}s"
+        )
+        return {
+            "language": language,
+            "duration": total_duration,
+            "text":     " ".join(full_text_parts),
+            "segments": segments,
+        }
+
+
+# ── Local mlx-whisper ─────────────────────────────────────────────────────────
+
 def _transcribe_local(audio_path: Path) -> dict:
     import mlx_whisper
 
@@ -100,79 +206,28 @@ def _transcribe_local(audio_path: Path) -> dict:
         path_or_hf_repo=_MLX_MODEL,
         language="ja",
         word_timestamps=False,
-        # Suppress non-speech segments at the model level
         no_speech_threshold=0.5,
-        # Flag and skip silent stretches that trigger hallucination loops
         hallucination_silence_threshold=2.0,
-        # Disabling context conditioning reduces hallucination chains
         condition_on_previous_text=False,
-        # Stay close to the default (2.4) so speaker/acoustic changes aren't
-        # mistaken for hallucinations; _clean_segments catches the rest
         compression_ratio_threshold=2.2,
     )
 
-    raw_segments = [
+    raw = [
         {
             "index": i,
             "start": round(float(seg["start"]), 3),
-            "end": round(float(seg["end"]), 3),
-            "ja": seg["text"].strip(),
+            "end":   round(float(seg["end"]),   3),
+            "ja":    seg["text"].strip(),
         }
         for i, seg in enumerate(result.get("segments", []))
     ]
 
-    segments = _clean_segments(raw_segments)
+    segments = _clean_segments(raw)
     duration = segments[-1]["end"] if segments else 0.0
     log.info(f"Transcription complete: {len(segments)} segments, duration ~{duration:.1f}s")
     return {
         "language": result.get("language", "ja"),
         "duration": duration,
-        "text": result.get("text", ""),
-        "segments": segments,
-    }
-
-
-def _transcribe_api(audio_path: Path) -> dict:
-    from openai import OpenAI
-
-    _WARN_SIZE = 24 * 1024 * 1024
-    size = audio_path.stat().st_size
-    if size > _WARN_SIZE:
-        log.warning(
-            f"Audio is {size // 1_048_576} MB -- Whisper API limit is 25 MB. "
-            "Consider splitting the file if transcription fails."
-        )
-
-    log.info(f"Transcribing {audio_path.name} ({size // 1024:,} KB) via OpenAI API ...")
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-    with open(audio_path, "rb") as fh:
-        response = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=fh,
-            language="ja",
-            response_format="verbose_json",
-            timestamp_granularities=["segment"],
-        )
-
-    raw_segments = [
-        {
-            "index": seg.id,
-            "start": round(float(seg.start), 3),
-            "end": round(float(seg.end), 3),
-            "ja": seg.text.strip(),
-        }
-        for seg in response.segments
-    ]
-
-    segments = _clean_segments(raw_segments)
-    log.info(
-        f"Transcription complete: {len(segments)} segments, "
-        f"duration {response.duration:.1f}s, language={response.language}"
-    )
-    return {
-        "language": response.language,
-        "duration": float(response.duration),
-        "text": response.text,
+        "text":     result.get("text", ""),
         "segments": segments,
     }
