@@ -1,0 +1,14 @@
+{
+  "sources": [
+    {
+      "name": "NHK Web Easy News",
+      "url": "https://www.youtube.com/@nhkwebeasynews",
+      "description": "Simplified Japanese news for learners"
+    },
+    {
+      "name": "Comprehensible Japanese",
+      "url": "https://www.youtube.com/@cijapanese",
+      "description": "Immersion-style Japanese content"
+    }
+  ]
+}

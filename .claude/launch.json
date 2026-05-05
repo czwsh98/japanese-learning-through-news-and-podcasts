@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flask-ui",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/Users/ziweichen/japanese-pipeline/web/app.py"],
+      "port": 5000
+    }
+  ]
+}

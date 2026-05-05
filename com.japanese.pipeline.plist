@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist — runs the pipeline daily at 03:00.
+
+  Install:
+    cp com.japanese.pipeline.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.japanese.pipeline.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.japanese.pipeline.plist
+
+  Run manually now:
+    launchctl start com.japanese.pipeline
+
+  Check logs:
+    tail -f /Users/ziweichen/japanese-pipeline/pipeline.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.japanese.pipeline</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>/Users/ziweichen/japanese-pipeline/pipeline.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ziweichen/japanese-pipeline</string>
+
+  <!-- 03:00 daily -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>   <integer>3</integer>
+    <key>Minute</key> <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ziweichen/japanese-pipeline/pipeline.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ziweichen/japanese-pipeline/pipeline.log</string>
+
+  <!-- Inherit user PATH so yt-dlp/ffmpeg are found -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/ziweichen</string>
+  </dict>
+
+  <!-- Re-run if missed while machine was asleep -->
+  <key>RunAtLoad</key>  <false/>
+  <key>StartOnMount</key> <false/>
+</dict>
+</plist>

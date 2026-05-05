@@ -1,0 +1,23 @@
+# Japanese Learning Pipeline — cron equivalent of the launchd plist
+#
+# Install (adds to current user's crontab):
+#   crontab -e
+#   (paste the line below, save)
+#
+# Or non-interactively:
+#   (crontab -l 2>/dev/null; cat crontab.txt) | crontab -
+#
+# Verify:
+#   crontab -l
+#
+# The PATH line ensures yt-dlp / ffmpeg are found.
+
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+
+# ┌── minute (0)
+# │  ┌── hour (3 = 03:00)
+# │  │  ┌── day of month (*)
+# │  │  │  ┌── month (*)
+# │  │  │  │  ┌── day of week (*)
+# │  │  │  │  │
+  0  3  *  *  *  cd /Users/ziweichen/japanese-pipeline && python3 pipeline.py >> pipeline.log 2>&1

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Episodes — 日本語 Pipeline{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">Episodes</h1>
+    <span class="text-sm text-gray-500">{{ episodes|length }} episode{{ 's' if episodes|length != 1 }}</span>
+  </div>
+
+  {% if episodes %}
+  <div class="space-y-2">
+    {% for ep in episodes %}
+    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 transition-all group">
+      <!-- Clickable main area -->
+      <a href="/episode/{{ ep.date }}" class="block p-4">
+        <div class="flex items-start gap-4">
+          <!-- Date badge -->
+          <div class="shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
+            <div class="text-xs text-gray-400 font-mono">{{ ep.date[:7] }}</div>
+            <div class="text-lg font-bold font-mono leading-none">{{ ep.date[8:] }}</div>
+          </div>
+          <!-- Info -->
+          <div class="flex-1 min-w-0">
+            <div class="font-medium text-white truncate">
+              {{ ep.meta.get('title') or 'Untitled Episode' }}
+            </div>
+            <div class="text-sm text-gray-400 mt-0.5">{{ ep.meta.get('channel', '') }}</div>
+            <div class="flex items-center gap-3 mt-2 text-xs">
+              {% if ep.has_audio %}
+              <span class="text-emerald-400">● audio</span>
+              {% else %}
+              <span class="text-gray-600">○ no audio</span>
+              {% endif %}
+              {% if ep.has_transcript %}
+              <span class="text-blue-400">● transcript</span>
+              {% else %}
+              <span class="text-gray-600">○ no transcript</span>
+              {% endif %}
+            </div>
+          </div>
+          <!-- Duration -->
+          {% if ep.meta.get('duration') %}
+          <div class="shrink-0 text-sm text-gray-500 font-mono pr-8">
+            {{ '%d:%02d'|format(ep.meta.duration // 60, ep.meta.duration % 60) }}
+          </div>
+          {% endif %}
+        </div>
+      </a>
+      <!-- Delete button (top-right corner, outside the link) -->
+      <form method="post" action="/episode/{{ ep.date }}/delete" class="absolute top-3 right-3"
+            onsubmit="return confirm('Delete episode \'{{ ep.meta.get('title', ep.date) | replace("'", "\\'") }}\'?\n\nThis removes all files including the audio.')">
+        <button type="submit"
+                class="opacity-0 group-hover:opacity-100 transition-opacity
+                       p-1.5 rounded-md text-gray-600 hover:text-red-400 hover:bg-red-950"
+                title="Delete episode">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>
+        </button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% else %}
+  <div class="text-center py-24 border border-dashed border-gray-800 rounded-2xl">
+    <div class="text-5xl mb-4">🎧</div>
+    <p class="text-lg font-medium mb-2">No episodes yet</p>
+    <p class="text-sm text-gray-500 mb-6">Run the pipeline to download and process your first episode.</p>
+    <code class="bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
+      python pipeline.py --dry-run
+    </code>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+# Environment
+.env
+
+# Episodes (audio + generated files)
+episodes/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

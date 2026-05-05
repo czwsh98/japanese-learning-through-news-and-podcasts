@@ -1,0 +1,251 @@
+/* ── Transcript highlights — type (solid/dashed) + level (color) ─────────── */
+
+.hl-vocab,
+.hl-grammar {
+  text-underline-offset: 3px;
+  text-decoration-thickness: 2px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: background-color 0.1s;
+}
+.hl-vocab   { text-decoration: underline; }
+.hl-grammar { text-decoration: underline dashed; }
+
+/* Level colors */
+.hl-n5 { text-decoration-color: #22c55e; }
+.hl-n4 { text-decoration-color: #14b8a6; }
+.hl-n3 { text-decoration-color: #60a5fa; }
+.hl-n2 { text-decoration-color: #f59e0b; }
+.hl-n1 { text-decoration-color: #f43f5e; }
+
+/* Hover tints */
+.hl-n5:hover { background-color: rgba(34,  197, 94,  0.15); }
+.hl-n4:hover { background-color: rgba(20,  184, 166, 0.15); }
+.hl-n3:hover { background-color: rgba(96,  165, 250, 0.15); }
+.hl-n2:hover { background-color: rgba(245, 158, 11,  0.15); }
+.hl-n1:hover { background-color: rgba(244, 63,  94,  0.15); }
+
+/* Legend demos in controls row */
+.hl-n5-demo, .hl-n4-demo, .hl-n3-demo, .hl-n2-demo, .hl-n1-demo {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 2px;
+}
+.hl-n5-demo { text-decoration-color: #22c55e; }
+.hl-n4-demo { text-decoration-color: #14b8a6; }
+.hl-n3-demo { text-decoration-color: #60a5fa; }
+.hl-n2-demo { text-decoration-color: #f59e0b; }
+.hl-n1-demo { text-decoration-color: #f43f5e; }
+
+/* ── Tooltip ─────────────────────────────────────────────────────────────── */
+
+#tooltip {
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  max-width: 260px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  line-height: 1.5;
+}
+.tt-word    { font-size: 17px; font-weight: 700; }
+.tt-reading { font-size: 13px; color: #9ca3af; font-weight: 400; margin-left: 4px; }
+.tt-badge   {
+  display: inline-block;
+  font-size: 10px;
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+/* Level-colored tooltip badge */
+.tt-badge-n5 { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
+.tt-badge-n4 { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
+.tt-badge-n3 { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
+.tt-badge-n2 { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
+.tt-badge-n1 { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+
+.tt-register { font-size: 11px; color: #6b7280; margin-top: 1px; margin-bottom: 5px; }
+.tt-en  { color: #93c5fd; font-size: 13px; }
+.tt-zh  { color: #6ee7b7; font-size: 13px; }
+
+/* ── Transcript segments ─────────────────────────────────────────────────── */
+
+.segment {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  column-gap: 6px;
+  align-items: start;
+  padding: 6px 10px 6px 10px;
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s;
+  margin-bottom: 1px;
+}
+.segment:hover { background-color: #1a2332; }
+
+.segment-active {
+  background-color: #0f2240 !important;
+  border-left-color: #3b82f6;
+}
+
+.segment-time {
+  font-size: 10px;
+  color: #4b5563;
+  font-family: ui-monospace, monospace;
+  padding-top: 4px;
+  user-select: none;
+  line-height: 1;
+}
+
+.segment-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.segment-ja {
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+.translation-en,
+.translation-zh {
+  font-size: 12px;
+  line-height: 1.5;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.translation-en { color: #60a5fa; }
+.translation-zh { color: #34d399; }
+
+.trans-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #4b5563;
+  background: #1f2937;
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* ── Translation toggle buttons ──────────────────────────────────────────── */
+
+.toggle-btn {
+  padding: 3px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #374151;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.03em;
+}
+.toggle-btn:hover { background: #1f2937; color: #d1d5db; }
+.toggle-btn.active {
+  background: #1e3a5f;
+  border-color: #3b82f6;
+  color: #93c5fd;
+}
+
+/* ── Side panel tab buttons ──────────────────────────────────────────────── */
+
+.tab-btn {
+  flex: 1;
+  padding: 7px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+  background: transparent;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+.tab-btn:hover { color: #d1d5db; }
+.tab-btn.tab-active {
+  color: #93c5fd;
+  border-bottom-color: #3b82f6;
+}
+
+/* ── Flashcards ──────────────────────────────────────────────────────────── */
+
+.card {
+  border: 1px solid #1f2937;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  transition: border-color 0.12s;
+}
+.card:hover { border-color: #374151; }
+
+.card-front {
+  background: #111827;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.card-reading {
+  font-size: 11px;
+  color: #6b7280;
+  font-weight: 400;
+}
+
+.card-level {
+  margin-left: auto;
+  font-size: 10px;
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+/* Level-colored card badges */
+.card-level-n5 { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
+.card-level-n4 { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
+.card-level-n3 { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
+.card-level-n2 { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
+.card-level-n1 { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+
+.card-body {
+  padding: 7px 10px 8px;
+  font-size: 12px;
+}
+
+.card-en          { color: #93c5fd; margin-bottom: 1px; }
+.card-zh          { color: #6ee7b7; margin-bottom: 4px; }
+.card-construction { color: #fbbf24; font-size: 11px; margin-bottom: 3px; font-family: ui-monospace, monospace; }
+.card-example     {
+  color: #6b7280;
+  font-size: 11px;
+  font-style: italic;
+  border-top: 1px solid #1f2937;
+  padding-top: 5px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.card-register    { font-size: 10px; color: #4b5563; margin-top: 3px; }
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.panel-empty {
+  color: #4b5563;
+  font-size: 12px;
+  padding: 20px 10px;
+  text-align: center;
+}
