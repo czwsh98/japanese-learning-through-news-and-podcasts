@@ -154,6 +154,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
   });
 
+  // ── Playback speed ────────────────────────────────────────────────────────
+
+  document.getElementById("speed-btns").addEventListener("click", e => {
+    const btn = e.target.closest(".speed-btn");
+    if (!btn) return;
+    const speed = parseFloat(btn.dataset.speed);
+    audio.playbackRate = speed;
+    document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("speed-active"));
+    btn.classList.add("speed-active");
+  });
+
   // ── Side-panel tab switching ──────────────────────────────────────────────
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
