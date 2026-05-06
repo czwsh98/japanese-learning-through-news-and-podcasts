@@ -83,6 +83,7 @@
         <span class="hl-n3-demo">N3</span>
         <span class="hl-n2-demo">N2</span>
         <span class="hl-n1-demo">N1</span>
+        <span class="hl-ctx-demo">ctx</span>
         <span class="text-gray-700">·</span>
         <span><span style="text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:2px;text-decoration-color:#6b7280">solid</span> = vocab</span>
         <span><span style="text-decoration:underline dashed;text-underline-offset:2px;text-decoration-thickness:2px;text-decoration-color:#6b7280">dashed</span> = grammar</span>
@@ -110,6 +111,7 @@
       <button class="tab-btn tab-active" data-tab="vocab">Vocab</button>
       <button class="tab-btn" data-tab="grammar">Grammar</button>
       <button class="tab-btn" data-tab="expressions">Phrases</button>
+      <button class="tab-btn" data-tab="context" style="color:#a78bfa" title="Domain-specific and advanced terms beyond N1">Ctx</button>
     </div>
 
     <!-- Card panels -->
@@ -121,6 +123,9 @@
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
       <div id="panel-expressions" data-panel="expressions"  class="hidden">
+        <p class="text-gray-600 text-xs p-4">Loading…</p>
+      </div>
+      <div id="panel-context"     data-panel="context"      class="hidden">
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
     </div>

@@ -10,9 +10,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const loadingEl   = document.getElementById("transcript-loading");
   const tooltip     = document.getElementById("tooltip");
 
-  const panelVocab  = document.getElementById("panel-vocab");
-  const panelGrammar= document.getElementById("panel-grammar");
-  const panelExpr   = document.getElementById("panel-expressions");
+  const panelVocab   = document.getElementById("panel-vocab");
+  const panelGrammar = document.getElementById("panel-grammar");
+  const panelExpr    = document.getElementById("panel-expressions");
+  const panelContext = document.getElementById("panel-context");
 
   let segments      = [];
   let highlights    = [];
@@ -38,23 +39,32 @@ document.addEventListener("DOMContentLoaded", async () => {
   segments   = transcriptData.segments  || [];
   highlights = analysisData.highlights  || [];
 
-  // ── Filter to episode level ───────────────────────────────────────────────
+  // ── Separate context-specific items (always shown regardless of level) ────
+
+  const ctxVocab    = (analysisData.vocab    || []).filter(v => v.level === "context-specific");
+  const ctxGrammar  = (analysisData.grammar  || []).filter(g => g.level === "context-specific");
+  const ctxHighlights = highlights.filter(h => h.level === "context-specific");
+
+  // ── Filter JLPT highlights to episode level ───────────────────────────────
 
   const LEVEL_TIERS = {
-    "beginner":             ["N5"],
-    "beginner-intermediate":["N4", "N3"],
-    "intermediate":         ["N3"],
-    "intermediate-advanced":["N2"],
-    "advanced":             ["N2", "N1"],
+    "beginner":              ["N5"],
+    "beginner-intermediate": ["N4", "N3"],
+    "intermediate":          ["N3"],
+    "intermediate-advanced": ["N2"],
+    "advanced":              ["N2", "N1"],
   };
   const episodeLevel = meta?.dataset.level || "";
   const allowedTiers = LEVEL_TIERS[episodeLevel] || null;
 
   if (allowedTiers) {
-    highlights          = highlights.filter(h => allowedTiers.includes(h.level));
-    analysisData.vocab    = (analysisData.vocab    || []).filter(v => allowedTiers.includes(v.level));
-    analysisData.grammar  = (analysisData.grammar  || []).filter(g => allowedTiers.includes(g.level));
+    highlights             = highlights.filter(h => allowedTiers.includes(h.level));
+    analysisData.vocab     = (analysisData.vocab   || []).filter(v => allowedTiers.includes(v.level));
+    analysisData.grammar   = (analysisData.grammar || []).filter(g => allowedTiers.includes(g.level));
   }
+
+  // Merge context-specific back into highlights for transcript annotation
+  const allHighlights = [...highlights, ...ctxHighlights];
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -62,6 +72,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderVocab(analysisData.vocab        || []);
   renderGrammar(analysisData.grammar    || []);
   renderExpressions(analysisData.expressions || []);
+  renderContext([...ctxVocab, ...ctxGrammar]);
 
   loadingEl.classList.add("hidden");
   transcriptEl.classList.remove("hidden");
@@ -194,7 +205,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function renderTranscript() {
     transcriptEl.innerHTML = segments.map((seg, i) => {
-      const jaHtml = annotate(seg.ja, highlights);
+      const jaHtml = annotate(seg.ja, allHighlights);
       return `<div class="segment" id="seg-${i}" data-start="${seg.start}" data-end="${seg.end}">
         <span class="segment-time">${esc(seg.time || "")}</span>
         <div class="segment-body">
@@ -340,5 +351,38 @@ document.addEventListener("DOMContentLoaded", async () => {
           </div>
         </div>`).join("")
       : `<p class="panel-empty">No set phrases identified</p>`;
+  }
+
+  function renderContext(items) {
+    if (!items.length) {
+      panelContext.innerHTML = `<p class="panel-empty">No context-specific terms identified</p>`;
+      return;
+    }
+    panelContext.innerHTML = items.map(item => {
+      const isGrammar = !!item.pattern;
+      const word      = isGrammar ? item.pattern  : item.word;
+      const reading   = isGrammar ? item.reading  : item.reading;
+      const en        = isGrammar ? item.meaning_en : item.en;
+      const zh        = isGrammar ? item.meaning_zh : item.zh;
+      const example   = item.example || "";
+      const extra     = isGrammar && item.construction
+        ? `<div class="card-construction">${esc(item.construction)}</div>` : "";
+      const tag       = isGrammar ? "grammar" : "vocab";
+      return `
+        <div class="card" style="border-color: rgba(167,139,250,0.2);">
+          <div class="card-front">
+            ${esc(word)}
+            ${reading ? `<span class="card-reading">【${esc(reading)}】</span>` : ""}
+            <span class="card-level card-level-context-specific">ctx · ${esc(tag)}</span>
+          </div>
+          <div class="card-body">
+            <div class="card-en">${esc(en)}</div>
+            <div class="card-zh">${esc(zh)}</div>
+            ${extra}
+            ${item.register ? `<div class="card-register">${esc(item.register)}</div>` : ""}
+            ${example ? `<div class="card-example">${esc(example)}</div>` : ""}
+          </div>
+        </div>`;
+    }).join("");
   }
 });

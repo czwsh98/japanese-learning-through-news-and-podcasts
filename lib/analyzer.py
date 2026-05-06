@@ -37,7 +37,7 @@ _SCHEMA: dict = {
                     "en":       {"type": "string", "description": "English gloss (concise)"},
                     "zh":       {"type": "string", "description": "Chinese gloss (concise)"},
                     "type":     {"type": "string", "enum": ["vocab", "grammar"]},
-                    "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5"]},
+                    "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5", "context-specific"]},
                     "register": {"type": "string", "description": "e.g. formal, casual, written, literary, spoken"},
                 },
                 "required": ["word", "reading", "en", "zh", "type", "level", "register"],
@@ -53,7 +53,7 @@ _SCHEMA: dict = {
                     "reading":  {"type": "string"},
                     "en":       {"type": "string"},
                     "zh":       {"type": "string"},
-                    "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5"]},
+                    "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5", "context-specific"]},
                     "example":  {"type": "string", "description": "Example sentence from the transcript"},
                     "register": {"type": "string"},
                 },
@@ -70,7 +70,7 @@ _SCHEMA: dict = {
                     "reading":      {"type": "string"},
                     "meaning_en":   {"type": "string"},
                     "meaning_zh":   {"type": "string"},
-                    "level":        {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5"]},
+                    "level":        {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5", "context-specific"]},
                     "construction": {"type": "string", "description": "How to form this pattern"},
                     "example":      {"type": "string", "description": "Example from transcript"},
                 },
@@ -106,7 +106,12 @@ def _build_system(jlpt_tiers: list[str]) -> str:
         f"Analyse the transcript below and identify all {tiers_str} vocabulary items, grammar patterns, "
         "set phrases, and idioms. Be comprehensive — learners rely on you to catch everything at "
         "this level. For 'highlights', use the exact surface form from the text so the UI can "
-        f"underline it inline. Include only {tiers_str} items; skip items outside this range."
+        f"underline it inline. Include only {tiers_str} items; skip items outside this range.\n\n"
+        "Additionally, use level 'context-specific' for words and expressions that are beyond N1 "
+        "but are important for understanding this specific content — for example: domain-specific "
+        "terminology (political, legal, medical, technical), advanced literary or formal expressions, "
+        "topical jargon, or culturally significant terms a learner at this level should know to "
+        "follow the topic. These appear separately from JLPT levels in the UI."
     )
 
 

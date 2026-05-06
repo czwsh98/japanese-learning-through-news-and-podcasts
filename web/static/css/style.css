@@ -12,30 +12,33 @@
 .hl-grammar { text-decoration: underline dashed; }
 
 /* Level colors */
-.hl-n5 { text-decoration-color: #22c55e; }
-.hl-n4 { text-decoration-color: #14b8a6; }
-.hl-n3 { text-decoration-color: #60a5fa; }
-.hl-n2 { text-decoration-color: #f59e0b; }
-.hl-n1 { text-decoration-color: #f43f5e; }
+.hl-n5              { text-decoration-color: #22c55e; }
+.hl-n4              { text-decoration-color: #14b8a6; }
+.hl-n3              { text-decoration-color: #60a5fa; }
+.hl-n2              { text-decoration-color: #f59e0b; }
+.hl-n1              { text-decoration-color: #f43f5e; }
+.hl-context-specific { text-decoration-color: #a78bfa; }
 
 /* Hover tints */
-.hl-n5:hover { background-color: rgba(34,  197, 94,  0.15); }
-.hl-n4:hover { background-color: rgba(20,  184, 166, 0.15); }
-.hl-n3:hover { background-color: rgba(96,  165, 250, 0.15); }
-.hl-n2:hover { background-color: rgba(245, 158, 11,  0.15); }
-.hl-n1:hover { background-color: rgba(244, 63,  94,  0.15); }
+.hl-n5:hover              { background-color: rgba(34,  197, 94,  0.15); }
+.hl-n4:hover              { background-color: rgba(20,  184, 166, 0.15); }
+.hl-n3:hover              { background-color: rgba(96,  165, 250, 0.15); }
+.hl-n2:hover              { background-color: rgba(245, 158, 11,  0.15); }
+.hl-n1:hover              { background-color: rgba(244, 63,  94,  0.15); }
+.hl-context-specific:hover { background-color: rgba(167, 139, 250, 0.15); }
 
 /* Legend demos in controls row */
-.hl-n5-demo, .hl-n4-demo, .hl-n3-demo, .hl-n2-demo, .hl-n1-demo {
+.hl-n5-demo, .hl-n4-demo, .hl-n3-demo, .hl-n2-demo, .hl-n1-demo, .hl-ctx-demo {
   text-decoration: underline;
   text-underline-offset: 2px;
   text-decoration-thickness: 2px;
 }
-.hl-n5-demo { text-decoration-color: #22c55e; }
-.hl-n4-demo { text-decoration-color: #14b8a6; }
-.hl-n3-demo { text-decoration-color: #60a5fa; }
-.hl-n2-demo { text-decoration-color: #f59e0b; }
-.hl-n1-demo { text-decoration-color: #f43f5e; }
+.hl-n5-demo  { text-decoration-color: #22c55e; }
+.hl-n4-demo  { text-decoration-color: #14b8a6; }
+.hl-n3-demo  { text-decoration-color: #60a5fa; }
+.hl-n2-demo  { text-decoration-color: #f59e0b; }
+.hl-n1-demo  { text-decoration-color: #f43f5e; }
+.hl-ctx-demo { text-decoration-color: #a78bfa; }
 
 /* ── Tooltip ─────────────────────────────────────────────────────────────── */
 
@@ -61,11 +64,12 @@
   vertical-align: middle;
 }
 /* Level-colored tooltip badge */
-.tt-badge-n5 { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
-.tt-badge-n4 { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
-.tt-badge-n3 { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
-.tt-badge-n2 { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
-.tt-badge-n1 { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+.tt-badge-n5               { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
+.tt-badge-n4               { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
+.tt-badge-n3               { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
+.tt-badge-n2               { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
+.tt-badge-n1               { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+.tt-badge-context-specific { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.4); background: rgba(167, 139, 250, 0.08); }
 
 .tt-register { font-size: 11px; color: #6b7280; margin-top: 1px; margin-bottom: 5px; }
 .tt-en  { color: #93c5fd; font-size: 13px; }
@@ -217,11 +221,12 @@
   font-weight: 600;
 }
 /* Level-colored card badges */
-.card-level-n5 { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
-.card-level-n4 { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
-.card-level-n3 { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
-.card-level-n2 { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
-.card-level-n1 { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+.card-level-n5               { color: #86efac; border-color: rgba(34,  197, 94,  0.4); background: rgba(34,  197, 94,  0.08); }
+.card-level-n4               { color: #5eead4; border-color: rgba(20,  184, 166, 0.4); background: rgba(20,  184, 166, 0.08); }
+.card-level-n3               { color: #93c5fd; border-color: rgba(96,  165, 250, 0.4); background: rgba(96,  165, 250, 0.08); }
+.card-level-n2               { color: #fcd34d; border-color: rgba(245, 158, 11,  0.4); background: rgba(245, 158, 11,  0.08); }
+.card-level-n1               { color: #fca5a5; border-color: rgba(244, 63,  94,  0.4); background: rgba(244, 63,  94,  0.08); }
+.card-level-context-specific { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.4); background: rgba(167, 139, 250, 0.08); }
 
 .card-body {
   padding: 7px 10px 8px;
