@@ -16,10 +16,10 @@ A personal pipeline that turns Japanese YouTube videos, news broadcasts, podcast
 A local Flask app at `localhost:5000` lets you browse every processed episode:
 
 - **Audio player** synced to the transcript — click any line to seek
-- **Inline highlights** — vocabulary and grammar items underlined in the transcript, colour-coded by JLPT level (N5 green → N4 teal → N3 blue → N2 amber → N1 rose), solid underline for vocab, dashed for grammar
-- **Hover tooltips** — word, reading, JLPT level, English and Chinese gloss
+- **Inline highlights** — vocabulary and grammar items underlined in the transcript, colour-coded by level: N5 green → N4 teal → N3 blue → N2 amber → N1 rose → context-specific violet; solid underline for vocab, dashed for grammar
+- **Hover tooltips** — word, reading, level badge, English and Chinese gloss
 - **EN / ZH translation toggles** per segment
-- **Vocab / Grammar / Phrases side panel** — flashcard-style cards filtered to the episode's chosen JLPT level
+- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; JLPT tabs filtered to the episode's chosen level; Ctx tab always shows context-specific terms
 - **Upload page** — paste a URL or drag-and-drop an audio file, choose your JLPT level
 - **Re-translate button** — re-run only the translation step on an existing episode
 
@@ -49,6 +49,17 @@ Choose the level that matches your current Japanese when uploading or running th
 | `advanced` | N2–N1 |
 
 Highlights, tooltips, and side-panel cards are filtered to show only items at the chosen level.
+
+### Context-specific level
+
+In addition to the five JLPT tiers, the analyser tags a sixth level: **context-specific** (violet). These are words and expressions that fall outside the standard JLPT curriculum but are important for understanding the specific content — for example:
+
+- Domain terminology (political, legal, medical, technical, financial)
+- Advanced literary or highly formal expressions beyond N1
+- Topical jargon specific to the show or podcast genre
+- Culturally significant terms worth knowing for the topic
+
+Context-specific highlights are always visible in the transcript regardless of the chosen JLPT level, and appear in their own **Ctx** tab in the side panel.
 
 ## Setup
 
