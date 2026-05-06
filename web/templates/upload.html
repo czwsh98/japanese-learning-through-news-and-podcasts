@@ -5,7 +5,7 @@
 <div class="max-w-lg">
   <h1 class="text-2xl font-bold mb-1">Add Episode</h1>
   <p class="text-sm text-gray-500 mb-6">
-    Paste a YouTube or podcast URL, or upload an audio file directly.
+    Paste a YouTube, Apple Podcasts, RSS feed, or other podcast URL — or upload an audio file directly.
   </p>
 
   {% if error %}
@@ -39,15 +39,15 @@
     <!-- URL panel -->
     <div id="panel-url" class="mb-5">
       <label for="source_url" class="block text-sm text-gray-400 mb-1">
-        YouTube or podcast URL
+        YouTube, Apple Podcasts, RSS feed, or other URL
       </label>
       <input id="source_url" type="url" name="source_url"
-             placeholder="https://www.youtube.com/watch?v=..."
+             placeholder="https://podcasts.apple.com/… or https://www.youtube.com/…"
              class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2
                     text-sm text-gray-100 placeholder-gray-600
                     focus:outline-none focus:border-gray-500 transition-colors">
       <p class="text-xs text-gray-600 mt-1">
-        Any site supported by yt-dlp — YouTube, NHK, SoundCloud, and more.
+        Apple Podcasts episode links, RSS feeds, YouTube, NHK, SoundCloud, and more.
       </p>
     </div>
 
