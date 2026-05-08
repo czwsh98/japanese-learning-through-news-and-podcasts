@@ -1,15 +1,13 @@
-"""Download episode audio from a yt-dlp source URL or podcast directory link.
+"""Download episode audio from a yt-dlp source URL or direct audio link.
 
 Supported inputs
 ----------------
-- YouTube, NHK, SoundCloud, and anything else yt-dlp handles
+- YouTube, NHK, SoundCloud, Apple Podcasts, and anything else yt-dlp handles
 - RSS/Atom podcast feed URLs (handled by yt-dlp)
-- Apple Podcasts episode URLs  (resolved via iTunes Lookup API → direct audio)
-- Direct audio file URLs       (streamed with requests)
+- Direct audio file URLs (streamed with requests)
 """
 import json
 import logging
-import re
 import subprocess
 import urllib.parse
 from datetime import date
@@ -24,65 +22,9 @@ log = logging.getLogger(__name__)
 _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm"}
 
 
-def _is_apple_podcasts(url: str) -> bool:
-    return "podcasts.apple.com" in url
-
-
 def _is_direct_audio(url: str) -> bool:
     ext = Path(urllib.parse.urlparse(url).path).suffix.lower()
     return ext in _DIRECT_AUDIO_EXTS
-
-
-# ── iTunes Lookup API ─────────────────────────────────────────────────────────
-
-def _resolve_apple_podcasts(url: str) -> tuple[str, dict] | None:
-    """Return (direct_audio_url, meta) for an Apple Podcasts episode URL, or None."""
-    match = re.search(r"[?&]i=(\d+)", url)
-    if not match:
-        log.warning("Apple Podcasts URL has no ?i=episode_id — cannot resolve via iTunes API")
-        return None
-
-    episode_id = match.group(1)
-    log.info(f"Resolving Apple Podcasts episode {episode_id} via iTunes Lookup API …")
-
-    try:
-        resp = _req.get(
-            "https://itunes.apple.com/lookup",
-            params={"id": episode_id},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-    except Exception as exc:
-        log.warning(f"iTunes Lookup API failed: {exc}")
-        return None
-
-    if not results:
-        log.warning("iTunes Lookup returned no results")
-        return None
-
-    r = results[0]
-    audio_url = r.get("episodeUrl", "")
-    if not audio_url:
-        log.warning("iTunes result has no episodeUrl")
-        return None
-
-    # Normalise upload_date to YYYYMMDD
-    raw_date = (r.get("releaseDate") or "")[:10].replace("-", "")
-
-    meta = {
-        "title":       r.get("trackName", ""),
-        "channel":     r.get("collectionName") or r.get("artistName", ""),
-        "upload_date": raw_date,
-        "duration":    int((r.get("trackTimeMillis") or 0) // 1000),
-        "url":         url,
-        "thumbnail":   r.get("artworkUrl600") or r.get("artworkUrl160", ""),
-        "description": (r.get("description") or "")[:500],
-        "video_id":    episode_id,
-    }
-
-    log.info(f"Resolved: {meta['title']!r} — {audio_url[:80]}…")
-    return audio_url, meta
 
 
 # ── Direct audio download ─────────────────────────────────────────────────────
@@ -175,14 +117,6 @@ def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, 
         p = episode_dir / "audio.mp3"
         p.touch()
         return p, _stub_meta()
-
-    # ── Apple Podcasts directory link ────────────────────────────────────────
-    if _is_apple_podcasts(url):
-        resolved = _resolve_apple_podcasts(url)
-        if resolved:
-            direct_url, meta = resolved
-            return _download_direct(direct_url, episode_dir, meta)
-        log.warning("Apple Podcasts resolution failed — falling through to yt-dlp")
 
     # ── Direct audio file URL ────────────────────────────────────────────────
     if _is_direct_audio(url):

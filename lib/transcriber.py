@@ -21,7 +21,6 @@ _MLX_MODEL = os.environ.get("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3
 _MIN_CHARS = 3
 _LOOP_WINDOW = 4
 _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
-_CHUNK_SECS = 900                # 15-minute chunks (~21 MB at 192 kbps)
 
 
 def transcribe_audio(audio_path: Path) -> dict:
@@ -120,12 +119,35 @@ def _transcribe_api_single(client, audio_path: Path) -> dict:
     }
 
 
+def _audio_bitrate_bps(audio_path: Path) -> int:
+    """Return audio bitrate in bits/sec via ffprobe, or 192 kbps as fallback."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=bit_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        bps = int(result.stdout.strip())
+        if bps > 0:
+            return bps
+    except ValueError:
+        pass
+    log.warning("ffprobe bitrate detection failed — assuming 192 kbps")
+    return 192_000
+
+
 def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
-    """Split audio into ≤15-min chunks, transcribe each, merge seamlessly."""
-    n_chunks = -(-size // _API_LIMIT)   # ceiling division
+    """Split audio into chunks sized to stay under _API_LIMIT, transcribe each, merge."""
+    bitrate = _audio_bitrate_bps(audio_path)
+    chunk_secs = int(_API_LIMIT / (bitrate / 8))
+    n_chunks = -(-size // _API_LIMIT)   # ceiling estimate for logging
     log.info(
-        f"File is {size // 1_048_576} MB — splitting into ~{n_chunks} chunks "
-        f"of {_CHUNK_SECS // 60} min each"
+        f"File is {size // 1_048_576} MB at {bitrate // 1000} kbps — "
+        f"splitting into ~{n_chunks} chunks of {chunk_secs}s each"
     )
 
     with tempfile.TemporaryDirectory(prefix="whisper_chunks_") as tmp:
@@ -136,7 +158,7 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-i", str(audio_path),
             "-f", "segment",
-            "-segment_time", str(_CHUNK_SECS),
+            "-segment_time", str(chunk_secs),
             "-c", "copy",
             "-y", chunk_pattern,
         ]
