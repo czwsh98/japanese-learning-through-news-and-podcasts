@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Processing… — Mimichan{% endblock %}
+
+{% block content %}
+<div class="max-w-md mx-auto mt-16 text-center">
+
+  <div id="state-processing">
+    <div class="flex justify-center mb-6">
+      <div class="spinner"></div>
+    </div>
+    <h1 class="text-xl font-bold mb-2">Processing episode</h1>
+    <p id="step-label" class="text-gray-400 text-sm mb-1">Starting…</p>
+    <p class="text-gray-600 text-xs mt-4">
+      You can close this tab — processing continues on the server.<br>
+      Check the <a href="/" class="text-blue-500 hover:text-blue-400">Episodes page</a> when done.
+    </p>
+  </div>
+
+  <div id="state-done" class="hidden">
+    <div class="text-5xl mb-4">✓</div>
+    <h1 class="text-xl font-bold mb-2 text-green-400">Episode ready</h1>
+    <p class="text-gray-400 text-sm mb-6">Redirecting you now…</p>
+  </div>
+
+  <div id="state-error" class="hidden">
+    <div class="text-5xl mb-4">✗</div>
+    <h1 class="text-xl font-bold mb-2 text-red-400">Processing failed</h1>
+    <p id="error-msg" class="text-red-300 text-sm mb-6"></p>
+    <a href="/upload"
+       class="inline-block bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm
+              font-medium rounded-lg px-4 py-2 transition-colors">
+      ← Try again
+    </a>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid #374151;
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const JOB_ID   = {{ job_id | tojson }};
+  const SLUG     = {{ slug   | tojson }};
+  const INTERVAL = 3000; // poll every 3 seconds
+
+  const stateProcessing = document.getElementById("state-processing");
+  const stateDone       = document.getElementById("state-done");
+  const stateError      = document.getElementById("state-error");
+  const stepLabel       = document.getElementById("step-label");
+  const errorMsg        = document.getElementById("error-msg");
+
+  async function poll() {
+    try {
+      const res  = await fetch(`/api/job/${JOB_ID}/status`);
+      const data = await res.json();
+
+      if (data.status === "processing") {
+        stepLabel.textContent = data.step || "Processing…";
+        setTimeout(poll, INTERVAL);
+
+      } else if (data.status === "done") {
+        stateProcessing.classList.add("hidden");
+        stateDone.classList.remove("hidden");
+        setTimeout(() => { window.location.href = `/episode/${SLUG}`; }, 1200);
+
+      } else if (data.status === "error") {
+        stateProcessing.classList.add("hidden");
+        stateError.classList.remove("hidden");
+        errorMsg.textContent = data.error || "An unknown error occurred.";
+      }
+    } catch (e) {
+      // Network hiccup — retry
+      setTimeout(poll, INTERVAL);
+    }
+  }
+
+  poll();
+</script>
+{% endblock %}

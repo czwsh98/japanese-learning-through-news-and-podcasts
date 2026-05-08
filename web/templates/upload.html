@@ -112,32 +112,7 @@
     </button>
   </form>
 
-  <!-- Processing overlay -->
-  <div id="processing" class="hidden mt-8 text-center">
-    <div class="inline-flex flex-col items-center gap-3">
-      <div class="spinner"></div>
-      <p class="text-gray-300 font-medium">Processing…</p>
-      <div id="step-label" class="text-sm text-gray-500"></div>
-      <p class="text-xs text-gray-600 max-w-xs">
-        Downloading, transcribing with Whisper, then translating and analysing with Claude.
-        This takes 2–5 minutes depending on audio length.
-      </p>
-    </div>
-  </div>
 </div>
-{% endblock %}
-
-{% block head %}
-<style>
-  .spinner {
-    width: 32px; height: 32px;
-    border: 3px solid #374151;
-    border-top-color: #3b82f6;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-</style>
 {% endblock %}
 
 {% block scripts %}
@@ -155,8 +130,6 @@
   const fileSize  = document.getElementById("file-size");
   const submitBtn = document.getElementById("submit-btn");
   const form      = document.getElementById("upload-form");
-  const processing = document.getElementById("processing");
-  const stepLabel  = document.getElementById("step-label");
 
   let activeTab = "url";
 
@@ -221,41 +194,13 @@
     }
   });
 
-  // Processing state
-  const urlSteps = [
-    "Downloading audio…",
-    "Transcribing with Whisper…",
-    "Translating segments with Claude…",
-    "Analysing vocabulary and grammar…",
-    "Writing episode files…",
-  ];
-  const fileSteps = [
-    "Uploading file…",
-    "Transcribing with Whisper…",
-    "Translating segments with Claude…",
-    "Analysing vocabulary and grammar…",
-    "Writing episode files…",
-  ];
-
   form.addEventListener("submit", e => {
     if (activeTab === "url" && urlInput.value.trim() === "") { e.preventDefault(); return; }
     if (activeTab === "file" && !fileInput.files[0]) { e.preventDefault(); return; }
-
     // Clear source_url if in file mode so the server takes the file path
     if (activeTab === "file") urlInput.value = "";
-
     submitBtn.disabled = true;
-    submitBtn.textContent = "Processing…";
-    processing.classList.remove("hidden");
-
-    const steps = activeTab === "url" ? urlSteps : fileSteps;
-    let idx = 0;
-    stepLabel.textContent = steps[0];
-    const interval = setInterval(() => {
-      idx = Math.min(idx + 1, steps.length - 1);
-      stepLabel.textContent = steps[idx];
-      if (idx === steps.length - 1) clearInterval(interval);
-    }, activeTab === "url" ? 20000 : 18000);
+    submitBtn.textContent = "Submitting…";
   });
 
   // Initial state: URL tab, submit disabled until URL entered

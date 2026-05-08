@@ -5,7 +5,9 @@ import mimetypes
 import os
 import shutil
 import sys
+import threading
 import traceback
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -37,6 +39,75 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+
+# ── Background job tracking ───────────────────────────────────────────────────
+
+# job_id → {status, slug, step, error}
+# status: "processing" | "done" | "error"
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _set_step(job_id: str, step: str) -> None:
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id]["step"] = step
+
+
+def _pipeline_thread(
+    job_id: str,
+    slug: str,
+    ep_dir: Path,
+    source_url: str | None,
+    audio_path: Path | None,
+    meta: dict,
+    level: str,
+) -> None:
+    """Runs the full pipeline in a background thread."""
+    from lib.transcriber import transcribe_audio
+    from lib.translator import translate_segments
+    from lib.analyzer import analyze_transcript
+    from lib.writer import write_episode_files
+    from lib.anki import push_to_anki
+
+    try:
+        # ── Step 1: Download (URL path only) ────────────────────────────────
+        if source_url and audio_path is None:
+            from lib.downloader import download_latest
+            _set_step(job_id, "Downloading audio…")
+            audio_path, meta = download_latest([source_url], ep_dir)
+            if not audio_path:
+                raise RuntimeError("Could not download audio — check the URL")
+
+        # ── Step 2: Transcribe ───────────────────────────────────────────────
+        _set_step(job_id, "Transcribing with Whisper…")
+        whisper_result = transcribe_audio(audio_path)
+
+        # ── Step 3: Translate ────────────────────────────────────────────────
+        _set_step(job_id, "Translating EN + ZH with Gemini…")
+        segments = translate_segments(whisper_result["segments"])
+
+        # ── Step 4: Analyse ──────────────────────────────────────────────────
+        _set_step(job_id, "Analysing vocabulary and grammar…")
+        analysis = analyze_transcript(segments, level=level)
+
+        # ── Step 5: Write files ──────────────────────────────────────────────
+        _set_step(job_id, "Writing episode files…")
+        write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
+        push_to_anki(analysis, slug)
+
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["step"]   = "Complete"
+
+    except Exception as exc:
+        tb = traceback.format_exc()
+        log.error(f"Job {job_id} failed:\n{tb}")
+        shutil.rmtree(ep_dir, ignore_errors=True)
+        with _jobs_lock:
+            _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["error"]  = str(exc)
+            _jobs[job_id]["step"]   = "Failed"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -146,94 +217,117 @@ def upload_page():
 
 @app.route("/upload", methods=["POST"])
 def upload_process():
-    from lib.transcriber import transcribe_audio
-    from lib.translator import translate_segments
-    from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
-    from lib.writer import write_episode_files
-    from lib.anki import push_to_anki
+    from lib.analyzer import LEVELS, DEFAULT_LEVEL
 
     level = request.form.get("level", DEFAULT_LEVEL).strip()
     if level not in LEVELS:
         level = DEFAULT_LEVEL
 
-    source_url = request.form.get("source_url", "").strip()
-
-    # ── Set up episode directory ─────────────────────────────────────────────
-    base_slug = date.today().isoformat()
-    slug = _unique_ep_slug(base_slug)
-    ep_dir = EPISODES_DIR / slug
+    source_url  = request.form.get("source_url", "").strip()
+    job_id      = str(uuid.uuid4())
+    base_slug   = date.today().isoformat()
+    slug        = _unique_ep_slug(base_slug)
+    ep_dir      = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        if source_url:
-            # ── URL path: download via yt-dlp ────────────────────────────────
-            from lib.downloader import download_latest
+    audio_path: Path | None = None
+    meta: dict = {}
 
-            audio_path, meta = download_latest([source_url], ep_dir)
-            if not audio_path:
-                shutil.rmtree(ep_dir, ignore_errors=True)
-                return render_template(
-                    "upload.html",
-                    error="Could not download audio. Check the URL and try again.",
-                ), 400
+    if source_url:
+        # URL path — download happens inside the thread
+        title_override = request.form.get("title", "").strip()
+        meta = {
+            "title":       title_override or source_url,
+            "channel":     "",
+            "upload_date": date.today().strftime("%Y%m%d"),
+            "duration":    0,
+            "url":         source_url,
+            "thumbnail":   "",
+            "description": "",
+            "video_id":    "",
+            "source":      "url",
+            "level":       level,
+        }
+    else:
+        # File upload — save synchronously, process in thread
+        if "audio" not in request.files:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template("upload.html", error="No file or URL provided."), 400
 
-            title_override = request.form.get("title", "").strip()
-            if title_override:
-                meta["title"] = title_override
-            meta["source"] = "url"
-            meta["level"] = level
+        f = request.files["audio"]
+        if not f.filename:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template("upload.html", error="No file selected."), 400
 
-        else:
-            # ── File path: save uploaded audio ───────────────────────────────
-            if "audio" not in request.files:
-                shutil.rmtree(ep_dir, ignore_errors=True)
-                return render_template("upload.html", error="No file or URL provided."), 400
+        suffix = Path(f.filename).suffix.lower()
+        if suffix not in UPLOAD_EXTENSIONS:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template(
+                "upload.html",
+                error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
+            ), 400
 
-            f = request.files["audio"]
-            if not f.filename:
-                shutil.rmtree(ep_dir, ignore_errors=True)
-                return render_template("upload.html", error="No file selected."), 400
+        title      = request.form.get("title", "").strip() or Path(f.filename).stem
+        audio_path = ep_dir / f"audio{suffix}"
+        f.save(audio_path)
 
-            suffix = Path(f.filename).suffix.lower()
-            if suffix not in UPLOAD_EXTENSIONS:
-                shutil.rmtree(ep_dir, ignore_errors=True)
-                return render_template(
-                    "upload.html",
-                    error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
-                ), 400
+        meta = {
+            "title":             title,
+            "channel":           "Upload",
+            "upload_date":       date.today().strftime("%Y%m%d"),
+            "duration":          0,
+            "url":               "",
+            "thumbnail":         "",
+            "description":       f"Uploaded file: {f.filename}",
+            "video_id":          "",
+            "source":            "upload",
+            "original_filename": f.filename,
+            "level":             level,
+        }
 
-            title = request.form.get("title", "").strip() or Path(f.filename).stem
-            audio_path = ep_dir / f"audio{suffix}"
-            f.save(audio_path)
+    # Register job and start background thread
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "processing",
+            "slug":   slug,
+            "step":   "Starting…",
+            "error":  "",
+        }
 
-            meta = {
-                "title": title,
-                "channel": "Upload",
-                "upload_date": date.today().strftime("%Y%m%d"),
-                "duration": 0,
-                "url": "",
-                "thumbnail": "",
-                "description": f"Uploaded file: {f.filename}",
-                "video_id": "",
-                "source": "upload",
-                "original_filename": f.filename,
-                "level": level,
-            }
+    t = threading.Thread(
+        target=_pipeline_thread,
+        args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        daemon=True,
+    )
+    t.start()
+    log.info(f"Started job {job_id} for slug {slug!r}")
 
-        # ── Run pipeline steps (synchronous) ─────────────────────────────────
-        whisper_result = transcribe_audio(audio_path)
-        segments = translate_segments(whisper_result["segments"])
-        analysis = analyze_transcript(segments, level=level)
-        write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
-        push_to_anki(analysis, slug)
+    return redirect(url_for("job_page", job_id=job_id))
 
-    except Exception as exc:
-        tb = traceback.format_exc()
-        log.error(f"Upload processing failed:\n{tb}")
-        shutil.rmtree(ep_dir, ignore_errors=True)
-        return render_template("upload.html", error=f"Processing failed: {exc}", traceback=tb), 500
 
-    return redirect(url_for("episode", date_str=slug))
+# ── Job status ────────────────────────────────────────────────────────────────
+
+@app.route("/job/<job_id>")
+def job_page(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        abort(404)
+    return render_template("job.html", job_id=job_id, slug=job["slug"])
+
+
+@app.route("/api/job/<job_id>/status")
+def api_job_status(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify({
+        "status": job["status"],
+        "step":   job.get("step", ""),
+        "slug":   job["slug"],
+        "error":  job.get("error", ""),
+    })
 
 
 # ── Static episode assets ─────────────────────────────────────────────────────
