@@ -97,6 +97,7 @@ _SCHEMA: dict = {
 }
 
 _EMPTY = {"highlights": [], "vocab": [], "grammar": [], "expressions": []}
+_CHUNK_CHARS = 1500   # target Japanese chars per analysis chunk
 
 
 def _build_system(jlpt_tiers: list[str]) -> str:
@@ -121,14 +122,46 @@ def _coerce_list_of_dicts(value: Any) -> list[dict]:
     return [item for item in value if isinstance(item, dict)]
 
 
-def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict:
-    """Return analysis dict: highlights, vocab, grammar, expressions."""
-    _, jlpt_tiers = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
-    system = _build_system(jlpt_tiers)
+def _chunk_segments(segments: list[dict]) -> list[list[dict]]:
+    """Split segments into groups where each group's Japanese text stays under _CHUNK_CHARS."""
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    for seg in segments:
+        seg_chars = len(seg["ja"])
+        if current and current_chars + seg_chars > _CHUNK_CHARS:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(seg)
+        current_chars += seg_chars
+    if current:
+        chunks.append(current)
+    return chunks
 
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in segments)
 
+def _merge_analyses(results: list[dict]) -> dict:
+    """Merge chunk results, deduplicating by surface form / pattern."""
+    seen: dict[str, set] = {
+        "highlights": set(), "vocab": set(), "grammar": set(), "expressions": set()
+    }
+    merged: dict[str, list] = {k: [] for k in seen}
+    keys = {"highlights": "word", "vocab": "word", "grammar": "pattern", "expressions": "expression"}
+
+    for result in results:
+        for section, key in keys.items():
+            for item in result.get(section, []):
+                val = item.get(key, "")
+                if val and val not in seen[section]:
+                    seen[section].add(val)
+                    merged[section].append(item)
+    return merged
+
+
+def _analyze_chunk(
+    client: OpenAI, system: str, jlpt_tiers: list[str],
+    transcript: str, chunk_idx: int, total: int,
+) -> dict:
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
@@ -151,8 +184,8 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
                     {
                         "role": "user",
                         "content": (
-                            f"Analyse this Japanese transcript for {' and '.join(jlpt_tiers)} content:\n\n"
-                            + transcript
+                            f"Analyse this Japanese transcript for {' and '.join(jlpt_tiers)} content "
+                            f"(chunk {chunk_idx + 1}/{total}):\n\n" + transcript
                         ),
                     },
                 ],
@@ -160,34 +193,52 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
 
             choice = response.choices[0]
             if choice.finish_reason == "length":
-                log.warning(
-                    "Analysis hit max_tokens — output was truncated. "
-                    "The transcript may be too long; consider shorter audio clips."
-                )
+                log.warning(f"Chunk {chunk_idx + 1}/{total} hit max_tokens — output truncated")
 
-            tool_calls = choice.message.tool_calls or []
-            for tc in tool_calls:
+            for tc in (choice.message.tool_calls or []):
                 if tc.function.name == "write_analysis":
-                    raw = json.loads(tc.function.arguments)
-                    data = {
+                    try:
+                        raw = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError as exc:
+                        log.warning(f"Chunk {chunk_idx + 1} JSON decode error: {exc} — skipping chunk")
+                        return _EMPTY
+                    return {
                         "highlights":  _coerce_list_of_dicts(raw.get("highlights", [])),
                         "vocab":       _coerce_list_of_dicts(raw.get("vocab", [])),
                         "grammar":     _coerce_list_of_dicts(raw.get("grammar", [])),
                         "expressions": _coerce_list_of_dicts(raw.get("expressions", [])),
                     }
-                    log.info(
-                        f"Analysis ({' / '.join(jlpt_tiers)}) via {_MODEL}: "
-                        f"{len(data['highlights'])} highlights, "
-                        f"{len(data['vocab'])} vocab, "
-                        f"{len(data['grammar'])} grammar, "
-                        f"{len(data['expressions'])} expressions"
-                    )
-                    return data
 
         except Exception as exc:
             if attempt == 0:
-                log.warning(f"Analysis attempt 1 failed: {exc} — retrying")
+                log.warning(f"Chunk {chunk_idx + 1} attempt 1 failed: {exc} — retrying")
             else:
-                log.error(f"Analysis attempt 2 failed: {exc} — returning empty analysis")
+                log.error(f"Chunk {chunk_idx + 1} attempt 2 failed: {exc} — skipping chunk")
 
     return _EMPTY
+
+
+def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict:
+    """Return analysis dict: highlights, vocab, grammar, expressions."""
+    _, jlpt_tiers = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
+    system = _build_system(jlpt_tiers)
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+    chunks = _chunk_segments(segments)
+    log.info(f"Analyzing {len(segments)} segments in {len(chunks)} chunk(s) via {_MODEL}")
+
+    results = []
+    for i, chunk in enumerate(chunks):
+        transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
+        result = _analyze_chunk(client, system, jlpt_tiers, transcript, i, len(chunks))
+        results.append(result)
+
+    merged = _merge_analyses(results)
+    log.info(
+        f"Analysis ({' / '.join(jlpt_tiers)}): "
+        f"{len(merged['highlights'])} highlights, "
+        f"{len(merged['vocab'])} vocab, "
+        f"{len(merged['grammar'])} grammar, "
+        f"{len(merged['expressions'])} expressions"
+    )
+    return merged
