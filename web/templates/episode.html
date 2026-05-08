@@ -48,20 +48,22 @@
 </div>
 
 <!-- Two-column layout -->
-<div class="flex gap-5" style="min-height: calc(100vh - 180px);">
+<div class="flex gap-5 md:min-h-[calc(100vh-180px)]">
 
   <!-- ── Left column: player + transcript ── -->
   <div class="flex-1 min-w-0 flex flex-col gap-4">
 
-    <!-- Audio player -->
-    <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
-      <audio id="audio-player" controls class="w-full" preload="metadata"
-             style="color-scheme: dark;">
-        <source src="/episode/{{ date }}/audio" type="audio/mpeg">
-        <track id="vtt-track" kind="subtitles"
-               src="/episode/{{ date }}/subtitles.vtt"
-               srclang="ja" label="日本語">
-      </audio>
+    <!-- Audio player (sticky on mobile) -->
+    <div class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0">
+      <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
+        <audio id="audio-player" controls class="w-full" preload="metadata"
+               style="color-scheme: dark;">
+          <source src="/episode/{{ date }}/audio" type="audio/mpeg">
+          <track id="vtt-track" kind="subtitles"
+                 src="/episode/{{ date }}/subtitles.vtt"
+                 srclang="ja" label="日本語">
+        </audio>
+      </div>
     </div>
 
     <!-- Controls row -->
@@ -77,9 +79,10 @@
       </button>
       <span id="retranslate-status" class="text-xs text-gray-500 hidden"></span>
 
-      <span class="text-gray-700 ml-2">|</span>
-      <span class="text-xs text-gray-500">Speed:</span>
-      <div class="flex gap-1" id="speed-btns">
+      <!-- Speed: desktop buttons -->
+      <span class="text-gray-700 ml-2 hidden md:inline">|</span>
+      <span class="text-xs text-gray-500 hidden md:inline">Speed:</span>
+      <div class="hidden md:flex gap-1" id="speed-btns">
         <button class="speed-btn" data-speed="0.5">0.5×</button>
         <button class="speed-btn" data-speed="0.75">0.75×</button>
         <button class="speed-btn speed-active" data-speed="1">1×</button>
@@ -88,7 +91,15 @@
         <button class="speed-btn" data-speed="2">2×</button>
       </div>
 
-      <div class="ml-auto flex items-center gap-3 text-xs text-gray-600 flex-wrap">
+      <!-- Speed: mobile stepper -->
+      <div class="flex md:hidden items-center gap-1 ml-2">
+        <button id="speed-down" class="speed-btn px-2">−</button>
+        <span id="speed-display" class="text-xs text-gray-400 w-8 text-center tabular-nums">1×</span>
+        <button id="speed-up" class="speed-btn px-2">+</button>
+      </div>
+
+      <!-- Legend: desktop only -->
+      <div class="ml-auto hidden md:flex items-center gap-3 text-xs text-gray-600 flex-wrap">
         <span class="hl-n5-demo">N5</span>
         <span class="hl-n4-demo">N4</span>
         <span class="hl-n3-demo">N3</span>
@@ -114,8 +125,13 @@
     </div>
   </div>
 
-  <!-- ── Right column: analysis side panel ── -->
-  <div class="w-72 shrink-0 flex flex-col">
+  <!-- ── Right column: analysis side panel (desktop) / bottom drawer (mobile) ── -->
+  <div id="side-panel" class="w-72 shrink-0 flex flex-col">
+
+    <!-- Drag handle (mobile drawer only) -->
+    <div id="drawer-handle" class="flex justify-center py-2 md:hidden cursor-pointer">
+      <div class="w-10 h-1 bg-gray-700 rounded-full"></div>
+    </div>
 
     <!-- Tab bar -->
     <div class="flex border-b border-gray-800 mb-3">
@@ -156,6 +172,20 @@
     </div>
   </div>
 
+</div>
+
+<!-- Mobile drawer overlay -->
+<div id="drawer-overlay" class="hidden fixed inset-0 bg-black/60 z-40 md:hidden"></div>
+
+<!-- Mobile drawer trigger bar -->
+<div id="drawer-trigger-bar" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-gray-950 border-t border-gray-800 px-4 py-2.5 flex items-center">
+  <button id="btn-open-drawer" class="flex-1 flex items-center justify-center gap-2 text-sm text-gray-300 font-medium">
+    <span id="drawer-label">Vocab · Grammar · Phrases</span>
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="18 15 12 9 6 15"/>
+    </svg>
+  </button>
 </div>
 {% endblock %}
 

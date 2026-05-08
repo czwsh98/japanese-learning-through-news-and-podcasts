@@ -21,6 +21,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   let showEn        = false;
   let showZh        = false;
 
+  const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
   // ── Fetch data ────────────────────────────────────────────────────────────
 
   let transcriptData = { segments: [] };
@@ -88,8 +90,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Click a segment → seek
+  // Click/tap a segment → seek (skip if tapping a highlight on touch — tooltip handles it)
   transcriptEl.addEventListener("click", e => {
+    if (isTouch && e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
     if (!seg) return;
     audio.currentTime = parseFloat(seg.dataset.start);
@@ -156,16 +159,36 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Playback speed ────────────────────────────────────────────────────────
 
+  const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  let speedIdx = 2; // 1× default
+  const speedDisplay = document.getElementById("speed-display");
+
+  function applySpeed(idx) {
+    speedIdx = idx;
+    const s = SPEEDS[speedIdx];
+    audio.playbackRate = s;
+    if (speedDisplay) speedDisplay.textContent = s + "×";
+    document.querySelectorAll(".speed-btn[data-speed]").forEach(b =>
+      b.classList.toggle("speed-active", parseFloat(b.dataset.speed) === s)
+    );
+  }
+
   document.getElementById("speed-btns").addEventListener("click", e => {
-    const btn = e.target.closest(".speed-btn");
+    const btn = e.target.closest(".speed-btn[data-speed]");
     if (!btn) return;
-    const speed = parseFloat(btn.dataset.speed);
-    audio.playbackRate = speed;
-    document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("speed-active"));
-    btn.classList.add("speed-active");
+    applySpeed(SPEEDS.indexOf(parseFloat(btn.dataset.speed)));
+  });
+
+  document.getElementById("speed-down")?.addEventListener("click", () => {
+    if (speedIdx > 0) applySpeed(speedIdx - 1);
+  });
+  document.getElementById("speed-up")?.addEventListener("click", () => {
+    if (speedIdx < SPEEDS.length - 1) applySpeed(speedIdx + 1);
   });
 
   // ── Side-panel tab switching ──────────────────────────────────────────────
+
+  const drawerLabel = document.getElementById("drawer-label");
 
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -173,25 +196,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.classList.add("tab-active");
       document.querySelectorAll("[data-panel]").forEach(p => p.classList.add("hidden"));
       document.querySelector(`[data-panel="${btn.dataset.tab}"]`).classList.remove("hidden");
+      if (drawerLabel) drawerLabel.textContent = btn.textContent.trim();
     });
   });
 
   // ── Tooltip ───────────────────────────────────────────────────────────────
 
-  document.addEventListener("mousemove", e => {
-    if (!tooltip.classList.contains("hidden")) {
-      tooltip.style.left = (e.clientX + 14) + "px";
-      tooltip.style.top  = (e.clientY + 14) + "px";
-    }
-  });
-
-  document.addEventListener("mouseover", e => {
-    const span = e.target.closest("[data-hl]");
-    if (!span) { tooltip.classList.add("hidden"); return; }
-
-    let hl;
-    try { hl = JSON.parse(span.dataset.hl); } catch { return; }
-
+  function showTooltip(hl, x, y) {
     const lvlCls = "tt-badge-" + (hl.level || "").toLowerCase();
     tooltip.innerHTML = `
       <div>
@@ -203,14 +214,76 @@ document.addEventListener("DOMContentLoaded", async () => {
       <div class="tt-en">${esc(hl.en)}</div>
       <div class="tt-zh">${esc(hl.zh)}</div>
     `;
+    tooltip.style.left = x + "px";
+    tooltip.style.top  = y + "px";
     tooltip.classList.remove("hidden");
-  });
+  }
 
-  document.addEventListener("mouseout", e => {
-    if (!e.relatedTarget?.closest("[data-hl]")) {
+  if (isTouch) {
+    // Tap to reveal, tap same again or elsewhere to dismiss
+    let activeSpan = null;
+
+    transcriptEl.addEventListener("click", e => {
+      const span = e.target.closest("[data-hl]");
+      if (!span) { tooltip.classList.add("hidden"); activeSpan = null; return; }
+      if (span === activeSpan) { tooltip.classList.add("hidden"); activeSpan = null; return; }
+
+      let hl;
+      try { hl = JSON.parse(span.dataset.hl); } catch { return; }
+
+      const rect = span.getBoundingClientRect();
+      const ttWidth = 260;
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - ttWidth - 8));
+      const top  = Math.min(rect.bottom + 8, window.innerHeight - 160);
+      showTooltip(hl, left, top);
+      activeSpan = span;
+    });
+
+    document.addEventListener("scroll", () => {
       tooltip.classList.add("hidden");
-    }
-  });
+      activeSpan = null;
+    }, { passive: true });
+
+  } else {
+    document.addEventListener("mousemove", e => {
+      if (!tooltip.classList.contains("hidden")) {
+        tooltip.style.left = (e.clientX + 14) + "px";
+        tooltip.style.top  = (e.clientY + 14) + "px";
+      }
+    });
+
+    document.addEventListener("mouseover", e => {
+      const span = e.target.closest("[data-hl]");
+      if (!span) { tooltip.classList.add("hidden"); return; }
+      let hl;
+      try { hl = JSON.parse(span.dataset.hl); } catch { return; }
+      showTooltip(hl, e.clientX + 14, e.clientY + 14);
+    });
+
+    document.addEventListener("mouseout", e => {
+      if (!e.relatedTarget?.closest("[data-hl]")) tooltip.classList.add("hidden");
+    });
+  }
+
+  // ── Mobile bottom drawer ──────────────────────────────────────────────────
+
+  const sidePanel      = document.getElementById("side-panel");
+  const drawerOverlay  = document.getElementById("drawer-overlay");
+  const btnOpenDrawer  = document.getElementById("btn-open-drawer");
+  const drawerHandle   = document.getElementById("drawer-handle");
+
+  function openDrawer() {
+    sidePanel.classList.add("drawer-open");
+    drawerOverlay.classList.remove("hidden");
+  }
+  function closeDrawer() {
+    sidePanel.classList.remove("drawer-open");
+    drawerOverlay.classList.add("hidden");
+  }
+
+  btnOpenDrawer?.addEventListener("click", openDrawer);
+  drawerOverlay?.addEventListener("click", closeDrawer);
+  drawerHandle?.addEventListener("click", closeDrawer);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 

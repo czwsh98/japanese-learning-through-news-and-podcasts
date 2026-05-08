@@ -275,3 +275,51 @@
   padding: 20px 10px;
   text-align: center;
 }
+
+/* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
+
+@media (max-width: 767px) {
+  /* Transcript: let it scroll with the page, bigger tap targets */
+  #transcript {
+    max-height: none !important;
+    overflow-y: visible;
+    padding-bottom: 72px; /* clear the fixed trigger bar */
+  }
+
+  .segment {
+    grid-template-columns: 1fr;
+    padding: 10px 6px;
+  }
+  .segment-time { display: none; }
+  .segment-ja   { font-size: 18px; }
+
+  /* Side panel becomes a slide-up bottom drawer */
+  #side-panel {
+    position: fixed !important;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100% !important;
+    max-height: 80vh;
+    display: flex !important;
+    flex-direction: column;
+    background: #030712;
+    border-top: 1px solid #1f2937;
+    border-radius: 1rem 1rem 0 0;
+    transform: translateY(100%);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 50;
+    overflow: hidden;
+  }
+  #side-panel.drawer-open {
+    transform: translateY(0);
+  }
+
+  /* Panel scroll area: fill drawer, not a fixed px height */
+  #side-panel .overflow-y-auto {
+    max-height: none !important;
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
