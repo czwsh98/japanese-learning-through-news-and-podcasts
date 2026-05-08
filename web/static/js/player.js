@@ -123,12 +123,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       renderTranscript();
 
       // Restore visible translation rows based on current toggle state
-      transcriptEl.querySelectorAll(".translation-en").forEach(el =>
-        el.classList.toggle("hidden", !showEn)
-      );
-      transcriptEl.querySelectorAll(".translation-zh").forEach(el =>
-        el.classList.toggle("hidden", !showZh)
-      );
+      syncTranslationUI();
 
       retranslateStatus.textContent = `✓ ${segments.length} segments re-translated`;
       retranslateStatus.classList.remove("hidden");
@@ -141,21 +136,60 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  document.getElementById("toggle-en").addEventListener("click", function () {
-    showEn = !showEn;
-    this.classList.toggle("active", showEn);
+  // ── Translation toggle helpers (shared by header buttons + FAB) ──────────
+
+  function syncTranslationUI() {
+    // Header buttons (desktop)
+    document.getElementById("toggle-en").classList.toggle("active", showEn);
+    document.getElementById("toggle-zh").classList.toggle("active", showZh);
+    // FAB pills
+    const fabEn = document.getElementById("fab-en-btn");
+    const fabZh = document.getElementById("fab-zh-btn");
+    if (fabEn) fabEn.classList.toggle("active", showEn);
+    if (fabZh) fabZh.classList.toggle("active", showZh);
+    // FAB main button: lit when either translation is on
+    const fabMain = document.getElementById("fab-main");
+    if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh);
+    // Rows
     transcriptEl.querySelectorAll(".translation-en").forEach(el =>
       el.classList.toggle("hidden", !showEn)
     );
-  });
-
-  document.getElementById("toggle-zh").addEventListener("click", function () {
-    showZh = !showZh;
-    this.classList.toggle("active", showZh);
     transcriptEl.querySelectorAll(".translation-zh").forEach(el =>
       el.classList.toggle("hidden", !showZh)
     );
+  }
+
+  document.getElementById("toggle-en").addEventListener("click", () => {
+    showEn = !showEn; syncTranslationUI();
   });
+  document.getElementById("toggle-zh").addEventListener("click", () => {
+    showZh = !showZh; syncTranslationUI();
+  });
+
+  // ── Translation FAB ───────────────────────────────────────────────────────
+
+  const fabMain  = document.getElementById("fab-main");
+  const fabTray  = document.getElementById("fab-tray");
+  const fabEnBtn = document.getElementById("fab-en-btn");
+  const fabZhBtn = document.getElementById("fab-zh-btn");
+  let fabOpen = false;
+
+  function openFab()  { fabOpen = true;  fabTray.classList.replace("fab-tray-hidden", "fab-tray-visible"); }
+  function closeFab() { fabOpen = false; fabTray.classList.replace("fab-tray-visible", "fab-tray-hidden"); }
+
+  fabMain?.addEventListener("click", e => {
+    e.stopPropagation();
+    fabOpen ? closeFab() : openFab();
+  });
+  fabEnBtn?.addEventListener("click", e => {
+    e.stopPropagation();
+    showEn = !showEn; syncTranslationUI();
+  });
+  fabZhBtn?.addEventListener("click", e => {
+    e.stopPropagation();
+    showZh = !showZh; syncTranslationUI();
+  });
+  document.addEventListener("click", () => { if (fabOpen) closeFab(); });
 
   // ── Playback speed ────────────────────────────────────────────────────────
 
