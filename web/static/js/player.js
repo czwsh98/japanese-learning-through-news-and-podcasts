@@ -28,8 +28,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const AUTO_FOLLOW_INACTIVITY_MS = 20_000;
   let autoFollow = true;
   let autoFollowTimer = null;
+  let programmaticScroll = false;
+  let programmaticScrollTimer = null;
 
   function markUserNavigation() {
+    if (programmaticScroll) return;
     // User is intentionally browsing: stop auto scrolling for a while
     autoFollow = false;
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
@@ -51,6 +54,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const bottomPad = 180; // clear bottom drawer trigger bar
     const inView = rect.top >= topPad && rect.bottom <= (window.innerHeight - bottomPad);
     if (!force && inView) return;
+
+    // Prevent our own scroll from being interpreted as user navigation.
+    programmaticScroll = true;
+    if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
+    programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 800);
 
     el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -119,6 +127,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (idx !== currentIdx) {
       setActive(idx);
       currentIdx = idx;
+    }
+  });
+
+  // When the user drags the scrubber / seeks, immediately jump transcript focus.
+  audio.addEventListener("seeked", () => {
+    const t = audio.currentTime;
+    const idx = segments.findIndex(s => t >= s.start && t < s.end);
+    if (idx >= 0) {
+      currentIdx = idx;
+      setActive(idx);
+      scrollActiveIntoView(idx, true);
     }
   });
 
