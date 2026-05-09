@@ -56,9 +56,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!force && inView) return;
 
     // Prevent our own scroll from being interpreted as user navigation.
+    // Use 1200ms — smooth scroll on mobile can take up to ~1s on long distances.
     programmaticScroll = true;
     if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
-    programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 800);
+    programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
 
     el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -141,11 +142,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Pause auto-follow when the user scrolls/touches; resume after 20s inactivity.
-  // (window scroll is the important one on mobile because the transcript is page-scrolling.)
-  window.addEventListener("scroll", () => { if (isTouch) markUserNavigation(); }, { passive: true });
-  window.addEventListener("touchstart", () => { if (isTouch) markUserNavigation(); }, { passive: true });
-  window.addEventListener("wheel", () => { markUserNavigation(); }, { passive: true });
+  // Pause auto-follow when the user intentionally scrolls; resume after 20s inactivity.
+  // Use touchmove (not touchstart) on mobile — touchstart fires on any tap, including
+  // word tooltips and UI controls, which would incorrectly pause auto-follow.
+  // touchmove only fires when the finger actually moves (i.e. a real scroll gesture).
+  window.addEventListener("touchmove", () => { if (isTouch) markUserNavigation(); }, { passive: true });
+  window.addEventListener("wheel",     () => { markUserNavigation(); },              { passive: true });
 
   // Click/tap a segment → seek (skip if tapping a highlight on touch — tooltip handles it)
   transcriptEl.addEventListener("click", e => {
