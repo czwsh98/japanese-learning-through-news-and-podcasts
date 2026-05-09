@@ -23,6 +23,38 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
 
+  // ── Mobile auto-follow (pause on user scroll, resume after inactivity) ────
+
+  const AUTO_FOLLOW_INACTIVITY_MS = 20_000;
+  let autoFollow = true;
+  let autoFollowTimer = null;
+
+  function markUserNavigation() {
+    // User is intentionally browsing: stop auto scrolling for a while
+    autoFollow = false;
+    if (autoFollowTimer) clearTimeout(autoFollowTimer);
+    autoFollowTimer = setTimeout(() => {
+      autoFollow = true;
+      // Re-focus the currently speaking line (if any)
+      if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
+    }, AUTO_FOLLOW_INACTIVITY_MS);
+  }
+
+  function scrollActiveIntoView(idx, force) {
+    const el = document.getElementById(`seg-${idx}`);
+    if (!el) return;
+    if (!force && !autoFollow) return;
+
+    // If it's already reasonably visible, don't fight the user's scroll position.
+    const rect = el.getBoundingClientRect();
+    const topPad = 120;    // clear sticky nav + player
+    const bottomPad = 180; // clear bottom drawer trigger bar
+    const inView = rect.top >= topPad && rect.bottom <= (window.innerHeight - bottomPad);
+    if (!force && inView) return;
+
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   // ── Fetch data ────────────────────────────────────────────────────────────
 
   let transcriptData = { segments: [] };
@@ -90,6 +122,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Pause auto-follow when the user scrolls/touches; resume after 20s inactivity.
+  // (window scroll is the important one on mobile because the transcript is page-scrolling.)
+  window.addEventListener("scroll", () => { if (isTouch) markUserNavigation(); }, { passive: true });
+  window.addEventListener("touchstart", () => { if (isTouch) markUserNavigation(); }, { passive: true });
+  window.addEventListener("wheel", () => { markUserNavigation(); }, { passive: true });
+
   // Click/tap a segment → seek (skip if tapping a highlight on touch — tooltip handles it)
   transcriptEl.addEventListener("click", e => {
     if (isTouch && e.target.closest("[data-hl]")) return;
@@ -97,6 +135,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!seg) return;
     audio.currentTime = parseFloat(seg.dataset.start);
     audio.play().catch(() => {});
+
+    // If they explicitly choose a line, resume following from there.
+    autoFollow = true;
+    if (autoFollowTimer) clearTimeout(autoFollowTimer);
   });
 
   // ── Translation toggles ───────────────────────────────────────────────────
@@ -342,12 +384,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const el = document.getElementById(`seg-${idx}`);
     if (!el) return;
     el.classList.add("segment-active");
-    // Scroll into view only if not already visible
-    const rect = el.getBoundingClientRect();
-    const container = transcriptEl.getBoundingClientRect();
-    if (rect.top < container.top || rect.bottom > container.bottom) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    scrollActiveIntoView(idx, false);
   }
 
   /**

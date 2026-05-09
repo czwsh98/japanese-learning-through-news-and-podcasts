@@ -52,6 +52,7 @@ def _write_cards(path: Path, analysis: dict) -> None:
     rows: list[dict] = []
 
     for v in analysis.get("vocab", []):
+        lvl = (v.get("level") or "").strip()
         rows.append({
             "type": "vocab",
             "front": v["word"],
@@ -60,12 +61,13 @@ def _write_cards(path: Path, analysis: dict) -> None:
             "en": v["en"],
             "zh": v["zh"],
             "register": v.get("register", ""),
-            "level": v.get("level", ""),
+            "level": lvl,
             "example": v.get("example", ""),
-            "tags": f"japanese N1N2 vocab {v.get('level', '')}".strip(),
+            "tags": " ".join([t for t in ["japanese", "vocab", lvl] if t]).strip(),
         })
 
     for g in analysis.get("grammar", []):
+        lvl = (g.get("level") or "").strip()
         rows.append({
             "type": "grammar",
             "front": g["pattern"],
@@ -74,9 +76,9 @@ def _write_cards(path: Path, analysis: dict) -> None:
             "en": g["meaning_en"],
             "zh": g["meaning_zh"],
             "register": "",
-            "level": g.get("level", ""),
+            "level": lvl,
             "example": g.get("example", ""),
-            "tags": f"japanese N1N2 grammar {g.get('level', '')}".strip(),
+            "tags": " ".join([t for t in ["japanese", "grammar", lvl] if t]).strip(),
         })
 
     for e in analysis.get("expressions", []):
@@ -90,7 +92,7 @@ def _write_cards(path: Path, analysis: dict) -> None:
             "register": "",
             "level": "",
             "example": e.get("context", ""),
-            "tags": "japanese N1N2 expression",
+            "tags": "japanese expression",
         })
 
     with open(path, "w", newline="", encoding="utf-8") as fh:

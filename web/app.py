@@ -68,7 +68,6 @@ def _pipeline_thread(
     from lib.translator import translate_segments
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files
-    from lib.anki import push_to_anki
 
     try:
         # ── Step 1: Download (URL path only) ────────────────────────────────
@@ -94,7 +93,6 @@ def _pipeline_thread(
         # ── Step 5: Write files ──────────────────────────────────────────────
         _set_step(job_id, "Writing episode files…")
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
-        push_to_anki(analysis, slug)
 
         with _jobs_lock:
             _jobs[job_id]["status"] = "done"

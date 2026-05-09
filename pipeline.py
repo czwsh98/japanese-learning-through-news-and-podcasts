@@ -4,7 +4,7 @@ Japanese Learning Pipeline
 --------------------------
 Downloads the latest episode from each source in sources.json, transcribes it
 with Whisper, translates segments with Claude, identifies N1/N2 vocabulary and
-grammar with Claude, writes per-episode flat files, and optionally pushes to Anki.
+grammar with Claude, writes per-episode flat files (including an Anki-importable CSV).
 
 Usage:
   python pipeline.py                     # process today's episode
@@ -29,7 +29,6 @@ for _var in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
         print(f"ERROR: {_var} not set. Copy .env.example → .env and fill in your keys.")
         sys.exit(1)
 
-from lib.anki import push_to_anki
 from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
 from lib.downloader import download_latest
 from lib.transcriber import transcribe_audio
@@ -128,10 +127,6 @@ def run(episode_date: date, url_override: str | None, dry_run: bool, level: str 
     # ── Step 5: Write files ─────────────────────────────────────────────────
     log.info("Step 5/5 — Write episode files")
     write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
-
-    # ── Bonus: Anki push (non-blocking) ─────────────────────────────────────
-    log.info("Bonus    — AnkiConnect push")
-    push_to_anki(analysis, episode_date.isoformat())
 
     log.info(bar)
     log.info(f"  Pipeline complete ✓  ({ep_dir})")

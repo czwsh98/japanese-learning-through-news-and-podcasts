@@ -9,7 +9,7 @@ A personal pipeline that turns Japanese YouTube videos, news broadcasts, podcast
 3. **Translates** each segment into English and Simplified Chinese via **Google Gemini Flash**
 4. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
 5. **Writes** per-episode flat files: `transcript.json`, `subtitles.vtt`, `analysis.json`, `cards.csv`, `meta.json`
-6. **Pushes** flashcards to Anki via AnkiConnect (optional, non-blocking)
+6. **Exports** Anki-ready flashcards as `cards.csv` (download/import into Anki)
 
 ## Web UI
 
@@ -70,7 +70,7 @@ Context-specific highlights are always visible in the transcript regardless of t
 - ffmpeg — `brew install ffmpeg` (required for chunking large audio files)
 - An [OpenAI API key](https://platform.openai.com/) — for Whisper transcription and gpt-4o-mini analysis
 - A [Gemini API key](https://aistudio.google.com/) — for translation
-- *(Optional)* [Anki](https://apps.ankiweb.net/) with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on
+- *(Optional)* [Anki](https://apps.ankiweb.net/) — import `cards.csv`
 
 ### Install
 
@@ -99,7 +99,6 @@ GEMINI_MODEL=gemini-2.5-flash          # default translation model
 OPENAI_ANALYSIS_MODEL=gpt-4o-mini      # default analysis model
 USE_LOCAL_WHISPER=1                    # set to use local mlx-whisper (Apple Silicon)
 MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
-ANKI_CONNECT_URL=http://localhost:8765
 EPISODES_DIR=episodes
 ```
 
@@ -158,7 +157,7 @@ launchctl load ~/Library/LaunchAgents/com.japanese.pipeline.plist
 │   ├── translator.py    # Gemini Flash — EN + ZH translation
 │   ├── analyzer.py      # gpt-4o-mini — JLPT vocabulary & grammar analysis
 │   ├── writer.py        # Writes flat files per episode
-│   └── anki.py          # AnkiConnect push
+│   └── (no AnkiConnect) # Use cards.csv import instead
 ├── web/
 │   ├── app.py           # Flask web UI
 │   ├── templates/       # Jinja2 HTML templates
