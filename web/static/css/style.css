@@ -316,6 +316,69 @@
   color: #93c5fd;
 }
 
+/* ── YouTube embed container ─────────────────────────────────────────────── */
+
+.yt-container {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+}
+
+.yt-container iframe,
+.yt-container #yt-player {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border: 0;
+}
+
+/* ── Compact transcript (video mode) ────────────────────────────────────── */
+
+.compact-mode .segment {
+  opacity: 0.45;
+  transition: opacity 0.2s, background-color 0.12s, border-color 0.12s;
+}
+.compact-mode .segment.segment-active {
+  opacity: 1;
+}
+
+/* ── Full transcript modal ───────────────────────────────────────────────── */
+
+.modal-seg {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  column-gap: 6px;
+  align-items: start;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.12s;
+  margin-bottom: 2px;
+}
+.modal-seg:hover { background-color: #1a2332; }
+.modal-seg-active { background-color: #0f2240 !important; }
+
+.modal-seg-time {
+  font-size: 10px;
+  color: #4b5563;
+  font-family: ui-monospace, monospace;
+  padding-top: 3px;
+  user-select: none;
+  line-height: 1;
+}
+
+.modal-seg-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modal-seg-ja {
+  font-size: 15px;
+  line-height: 1.7;
+}
+
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 
 @media (max-width: 767px) {
@@ -324,6 +387,13 @@
     max-height: none !important;
     overflow-y: visible;
     padding-bottom: 72px; /* clear the fixed trigger bar */
+  }
+
+  /* Video mode: keep the transcript as a fixed-height scroll container */
+  #transcript.compact-mode {
+    height: 35vh !important;
+    overflow-y: auto !important;
+    padding-bottom: 0 !important;
   }
 
   .segment {

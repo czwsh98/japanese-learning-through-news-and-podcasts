@@ -102,12 +102,22 @@ _CHUNK_CHARS = 1500   # target Japanese chars per analysis chunk
 
 def _build_system(jlpt_tiers: list[str]) -> str:
     tiers_str = " and ".join(jlpt_tiers)
+    n1_guidance = (
+        "\n\nN1 vs N2 classification guidance: "
+        "Label an item N1 if it is low-frequency in everyday spoken Japanese — "
+        "formal/written vocabulary, literary or classical expressions, abstract or academic nouns, "
+        "compound verbs or auxiliary forms rare in conversation, and grammar patterns found only in "
+        "formal writing or sophisticated prose. "
+        "Label it N2 only if it genuinely appears often in news, business conversation, or daily life. "
+        "When in doubt between N1 and N2, prefer N1."
+    ) if "N1" in jlpt_tiers else ""
     return (
         f"You are a Japanese language expert specialising in JLPT {tiers_str} preparation. "
         f"Analyse the transcript below and identify all {tiers_str} vocabulary items, grammar patterns, "
         "set phrases, and idioms. Be comprehensive — learners rely on you to catch everything at "
-        "this level. For 'highlights', use the exact surface form from the text so the UI can "
-        f"underline it inline. Include only {tiers_str} items; skip items outside this range.\n\n"
+        "these levels. For 'highlights', use the exact surface form from the text so the UI can "
+        f"underline it inline. Include only {tiers_str} items; skip items outside this range."
+        f"{n1_guidance}\n\n"
         "Additionally, use level 'context-specific' for words and expressions that are beyond N1 "
         "but are important for understanding this specific content — for example: domain-specific "
         "terminology (political, legal, medical, technical), advanced literary or formal expressions, "
