@@ -435,6 +435,28 @@
   }
 }
 
+/* ── Jump-to-now pill ────────────────────────────────────────────────────── */
+
+.jump-now-pill {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  padding: 5px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #1e3a5f;
+  border: 1px solid #3b82f6;
+  color: #93c5fd;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.jump-now-pill:hover { background: #1d4ed8; color: #fff; }
+
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 
 @media (max-width: 767px) {

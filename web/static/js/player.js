@@ -19,6 +19,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const panelExpr         = document.getElementById("panel-expressions");
   const panelContext      = document.getElementById("panel-context");
   const modalTranscriptEl = document.getElementById("modal-transcript");
+  const jumpPill          = document.getElementById("jump-now-pill");
 
   let segments   = [];
   let highlights = [];
@@ -61,18 +62,30 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Auto-follow ───────────────────────────────────────────────────────────
 
-  const AUTO_FOLLOW_INACTIVITY_MS = 20_000;
+  const AUTO_FOLLOW_INACTIVITY_MS = 8_000;
   let autoFollow = true;
   let autoFollowTimer = null;
   let programmaticScroll = false;
   let programmaticScrollTimer = null;
 
+  function setProgrammaticScroll(scrollTarget) {
+    programmaticScroll = true;
+    if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
+    if ("onscrollend" in scrollTarget) {
+      scrollTarget.addEventListener("scrollend", () => { programmaticScroll = false; }, { once: true });
+    } else {
+      programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
+    }
+  }
+
   function markUserNavigation() {
     if (programmaticScroll) return;
     autoFollow = false;
+    if (!inYtDesktopMode()) jumpPill?.classList.remove("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
+      jumpPill?.classList.add("hidden");
       if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
     }, AUTO_FOLLOW_INACTIVITY_MS);
   }
@@ -101,32 +114,23 @@ document.addEventListener("DOMContentLoaded", async () => {
         const targetScroll = Math.max(0, absoluteTop - 8);
         if (!force && Math.abs(transcriptEl.scrollTop - targetScroll) < 5) return;
 
-        programmaticScroll = true;
-        if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
-        programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
-
+        setProgrammaticScroll(transcriptEl);
         transcriptEl.scrollTo({ top: targetScroll, behavior: "smooth" });
       } else {
         // Audio mode: center the active line in the panel
         const inView = elRect.top >= containerRect.top && elRect.bottom <= containerRect.bottom;
         if (!force && inView) return;
 
-        programmaticScroll = true;
-        if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
-        programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
-
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        setProgrammaticScroll(transcriptEl);
+        el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
       }
     } else {
       // Mobile audio: transcript flows with the page
       const inView = elRect.top >= 120 && elRect.bottom <= (window.innerHeight - 180);
       if (!force && inView) return;
 
-      programmaticScroll = true;
-      if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
-      programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
-
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      setProgrammaticScroll(window);
+      el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
     }
   }
 
@@ -224,8 +228,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (audio) { audio.currentTime = t; audio.play().catch(() => {}); }
     }
     autoFollow = true;
+    jumpPill?.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
   }
+
+  jumpPill?.addEventListener("click", () => {
+    autoFollow = true;
+    jumpPill.classList.add("hidden");
+    if (autoFollowTimer) clearTimeout(autoFollowTimer);
+    if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
+  });
 
   // Transcript click-to-seek
   transcriptEl.addEventListener("click", e => {

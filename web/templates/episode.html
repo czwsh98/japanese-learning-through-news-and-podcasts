@@ -129,7 +129,7 @@
     </div>
 
     <!-- Transcript panel -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 {{ '' if is_youtube else 'flex-1 ' }}overflow-hidden flex flex-col">
+    <div class="relative bg-gray-900 rounded-xl border border-gray-800 {{ '' if is_youtube else 'flex-1 ' }}overflow-hidden flex flex-col">
       <!-- Panel header -->
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
         <span class="text-xs text-gray-500">Transcript</span>
@@ -145,6 +145,7 @@
            class="overflow-y-auto p-2 hidden {{ '' if is_youtube else 'flex-1' }}"
            style="{{ 'height: 35vh;' if is_youtube else 'max-height: calc(100vh - 340px);' }} scroll-behavior: smooth;">
       </div>
+      <button id="jump-now-pill" class="jump-now-pill hidden" aria-label="Jump to now playing">↓ Now playing</button>
     </div>
   </div>
 
