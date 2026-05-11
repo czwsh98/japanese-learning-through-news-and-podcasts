@@ -379,6 +379,62 @@
   line-height: 1.7;
 }
 
+/* ── Nearby-segment visibility (desktop video compact mode) ─────────────── */
+.seg-nb-hidden { display: none !important; }
+
+/* ── Desktop episode mode: viewport-locked, no-scroll layout ────────────── */
+@media (min-width: 768px) {
+  body.ep-desktop main {
+    height: calc(100vh - var(--nav-h, 57px));
+    overflow: hidden;
+    padding-bottom: 0;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+  }
+  body.ep-desktop #ep-page {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  body.ep-desktop #ep-header { flex-shrink: 0; }
+  body.ep-desktop #ep-two-col {
+    flex: 1;
+    min-height: 0 !important;
+  }
+  body.ep-desktop #ep-left-col {
+    min-height: 0;
+    overflow: hidden;
+  }
+  /* Transcript: fill available column space and scroll internally (audio mode) */
+  body.ep-desktop #transcript {
+    max-height: none !important;
+    overflow-y: auto;
+  }
+  /* Right panel: fill column height and scroll internally */
+  body.ep-desktop #side-panel {
+    min-height: 0;
+    overflow: hidden;
+  }
+  body.ep-desktop #side-panel > .overflow-y-auto {
+    flex: 1 !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+  }
+
+  /* YouTube video mode: cap video height + compact transcript (sized to nearby segments) */
+  body.ep-desktop.yt-mode .yt-container {
+    max-height: 50vh;
+  }
+  body.ep-desktop.yt-mode #transcript {
+    height: auto !important;
+    flex: none !important;
+  }
+}
+
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 
 @media (max-width: 767px) {

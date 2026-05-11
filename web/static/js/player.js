@@ -28,6 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let ytPlayer   = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+  const inYtDesktopMode = () => useYoutube && !isTouch && window.innerWidth >= 768;
 
   // ── Playback speed ────────────────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
 
   function scrollActiveIntoView(idx, force) {
+    if (inYtDesktopMode()) return; // active segment is always visible in compact mode
     const el = document.getElementById(`seg-${idx}`);
     if (!el || (!force && !autoFollow)) return;
 
@@ -202,6 +204,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   transcriptEl.classList.remove("hidden");
   if (isYoutube) transcriptEl.classList.add("compact-mode");
 
+  if (!isTouch && window.innerWidth >= 768) {
+    const nav = document.querySelector("nav");
+    if (nav) document.documentElement.style.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
+    document.body.classList.add("ep-desktop");
+    if (isYoutube) {
+      document.body.classList.add("yt-mode");
+      updateNearbySegments(-1);
+    }
+  }
+
   // ── Seek helper ───────────────────────────────────────────────────────────
 
   function seekTo(t) {
@@ -276,6 +288,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       ytPlayer?.seekTo(currentTime, true);
       transcriptEl.classList.add("compact-mode");
       btnTogglePlayer.textContent = "Audio only";
+      if (!isTouch && window.innerWidth >= 768) {
+        document.body.classList.add("yt-mode");
+        updateNearbySegments(currentIdx);
+      }
     } else {
       ytPlayerWrap?.classList.add("hidden");
       audioPlayerWrap?.classList.remove("hidden");
@@ -283,6 +299,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (audio) audio.currentTime = currentTime;
       transcriptEl.classList.remove("compact-mode");
       btnTogglePlayer.textContent = "Video";
+      document.body.classList.remove("yt-mode");
+      segments.forEach((_, i) => document.getElementById(`seg-${i}`)?.classList.remove("seg-nb-hidden"));
     }
 
     if (currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
@@ -447,6 +465,17 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
+  // Show only nearby segments in desktop video mode (±1 around current)
+  function updateNearbySegments(idx) {
+    const WINDOW = 1;
+    segments.forEach((_, i) => {
+      const el = document.getElementById(`seg-${i}`);
+      if (!el) return;
+      const show = idx < 0 ? (i < 3) : (Math.abs(i - idx) <= WINDOW);
+      el.classList.toggle("seg-nb-hidden", !show);
+    });
+  }
+
   function setActive(idx) {
     document.querySelectorAll(".segment.segment-active")
       .forEach(el => el.classList.remove("segment-active"));
@@ -454,6 +483,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const el = document.getElementById(`seg-${idx}`);
       if (el) { el.classList.add("segment-active"); scrollActiveIntoView(idx, false); }
     }
+
+    if (inYtDesktopMode()) updateNearbySegments(idx);
 
     // Keep modal in sync when it's open
     document.querySelectorAll(".modal-seg.modal-seg-active")

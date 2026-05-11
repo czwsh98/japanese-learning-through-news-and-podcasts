@@ -17,8 +17,10 @@
      data-video-id="{{ meta.get('video_id', '') if is_youtube else '' }}"
      class="hidden"></div>
 
+<div id="ep-page">
+
 <!-- Page header -->
-<div class="mb-5 flex items-start justify-between gap-4">
+<div id="ep-header" class="mb-5 flex items-start justify-between gap-4">
   <div>
     <a href="/" class="text-xs text-gray-600 hover:text-gray-400 transition-colors">← all episodes</a>
     <h1 class="text-xl font-bold mt-1 leading-snug">{{ meta.get('title', 'Episode') }}</h1>
@@ -55,10 +57,10 @@
 </div>
 
 <!-- Two-column layout -->
-<div class="flex gap-5 md:min-h-[calc(100vh-180px)]">
+<div id="ep-two-col" class="flex gap-5 md:min-h-[calc(100vh-180px)]">
 
   <!-- ── Left column: player + transcript ── -->
-  <div class="flex-1 min-w-0 flex flex-col gap-4">
+  <div id="ep-left-col" class="flex-1 min-w-0 flex flex-col gap-4">
 
     <!-- YouTube video player (shown for YouTube episodes) -->
     <div id="yt-player-wrap" class="yt-container rounded-xl overflow-hidden bg-black{% if not is_youtube %} hidden{% endif %}">
@@ -194,6 +196,8 @@
   </div>
 
 </div>
+
+</div><!-- /ep-page -->
 
 <!-- Mobile drawer overlay -->
 <div id="drawer-overlay" class="hidden fixed inset-0 bg-black/60 z-40 md:hidden"></div>
