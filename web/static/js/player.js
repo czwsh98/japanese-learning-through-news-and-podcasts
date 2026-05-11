@@ -6,7 +6,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!dateStr) return;
 
   const videoId   = meta?.dataset.videoId || "";
-  const isYoutube = !!videoId;
+  const isYoutube = !!videoId;   // static: whether this episode has a YouTube video
+  let   useYoutube = isYoutube;  // mutable: current playback mode
 
   const audio        = document.getElementById("audio-player");
   const transcriptEl = document.getElementById("transcript");
@@ -37,7 +38,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function applySpeed(idx) {
     speedIdx = idx;
     const s = SPEEDS[speedIdx];
-    if (isYoutube) { if (ytPlayer) ytPlayer.setPlaybackRate(s); }
+    if (useYoutube) { if (ytPlayer) ytPlayer.setPlaybackRate(s); }
     else if (audio) audio.playbackRate = s;
     if (speedDisplay) speedDisplay.textContent = s + "×";
     document.querySelectorAll(".speed-btn[data-speed]").forEach(b =>
@@ -75,16 +76,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, AUTO_FOLLOW_INACTIVITY_MS);
   }
 
-  // Scrolling within the transcript panel (desktop audio + video mode)
+  // Scrolling within the transcript panel (desktop + YouTube mode)
   transcriptEl.addEventListener("scroll", () => {
     if (!programmaticScroll) markUserNavigation();
   }, { passive: true });
 
-  // Mobile audio: transcript overflows the page, catch window-level events
-  if (!isYoutube) {
-    window.addEventListener("touchmove", () => { if (isTouch) markUserNavigation(); }, { passive: true });
-    window.addEventListener("wheel",     () => { markUserNavigation(); },              { passive: true });
-  }
+  // Mobile audio: transcript overflows the page — catch window-level events
+  window.addEventListener("touchmove", () => { if (isTouch && !useYoutube) markUserNavigation(); }, { passive: true });
+  window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
 
   function scrollActiveIntoView(idx, force) {
     const el = document.getElementById(`seg-${idx}`);
@@ -94,9 +93,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const elRect        = el.getBoundingClientRect();
 
     if (transcriptEl.scrollHeight > transcriptEl.clientHeight) {
-      // Panel has its own scroll (desktop + video mode)
-      if (isYoutube) {
-        // Pin active line to the top of the compact panel
+      if (useYoutube) {
+        // Pin active line to top of compact panel
         const absoluteTop  = elRect.top - containerRect.top + transcriptEl.scrollTop;
         const targetScroll = Math.max(0, absoluteTop - 8);
         if (!force && Math.abs(transcriptEl.scrollTop - targetScroll) < 5) return;
@@ -204,21 +202,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   transcriptEl.classList.remove("hidden");
   if (isYoutube) transcriptEl.classList.add("compact-mode");
 
-  // ── Seek helper (routes to the right backend) ─────────────────────────────
+  // ── Seek helper ───────────────────────────────────────────────────────────
 
   function seekTo(t) {
-    if (isYoutube) {
+    if (useYoutube) {
       ytPlayer?.seekTo(t, true);
       ytPlayer?.playVideo();
     } else {
-      audio.currentTime = t;
-      audio.play().catch(() => {});
+      if (audio) { audio.currentTime = t; audio.play().catch(() => {}); }
     }
     autoFollow = true;
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
   }
 
-  // Transcript click-to-seek (shared between audio and YouTube)
+  // Transcript click-to-seek
   transcriptEl.addEventListener("click", e => {
     if (isTouch && e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
@@ -228,62 +225,67 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Playback sync ─────────────────────────────────────────────────────────
 
-  if (isYoutube) {
-    await waitForYTAPI();
-    ytPlayer = await createYTPlayer(videoId);
-
-    // Apply any speed selected before the player was ready
-    if (speedIdx !== 2) ytPlayer.setPlaybackRate(SPEEDS[speedIdx]);
-
-    // Poll current time since YouTube has no timeupdate event
-    setInterval(() => {
-      const t   = ytPlayer.getCurrentTime();
-      const idx = segments.findIndex(s => t >= s.start && t < s.end);
-      if (idx !== currentIdx) setActive(idx);
-    }, 250);
-
-  } else {
+  // Audio listeners run always; guard with !useYoutube so they go silent in video mode
+  if (audio) {
     audio.addEventListener("timeupdate", () => {
+      if (useYoutube) return;
       const t   = audio.currentTime;
       const idx = segments.findIndex(s => t >= s.start && t < s.end);
       if (idx !== currentIdx) setActive(idx);
     });
-
     audio.addEventListener("seeked", () => {
+      if (useYoutube) return;
       const t   = audio.currentTime;
       const idx = segments.findIndex(s => t >= s.start && t < s.end);
       if (idx >= 0) { setActive(idx); scrollActiveIntoView(idx, true); }
     });
   }
 
-  // ── Re-translate ──────────────────────────────────────────────────────────
+  if (isYoutube) {
+    await waitForYTAPI();
+    ytPlayer = await createYTPlayer(videoId);
 
-  const btnRetranslate    = document.getElementById("btn-retranslate");
-  const retranslateStatus = document.getElementById("retranslate-status");
+    if (speedIdx !== 2) ytPlayer.setPlaybackRate(SPEEDS[speedIdx]);
 
-  btnRetranslate?.addEventListener("click", async () => {
-    if (!confirm("Re-run translation for this episode? This may take a minute.")) return;
-    btnRetranslate.disabled    = true;
-    btnRetranslate.textContent = "Translating…";
-    retranslateStatus.textContent = "";
-    retranslateStatus.classList.add("hidden");
-    try {
-      const res  = await fetch(`/episode/${dateStr}/retranslate`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      segments = data.segments || [];
-      renderTranscript();
-      renderModalTranscript();
-      syncTranslationUI();
-      retranslateStatus.textContent = `✓ ${segments.length} segments re-translated`;
-      retranslateStatus.classList.remove("hidden");
-    } catch (err) {
-      retranslateStatus.textContent = `Error: ${err.message}`;
-      retranslateStatus.classList.remove("hidden");
-    } finally {
-      btnRetranslate.disabled    = false;
-      btnRetranslate.textContent = "Re-translate";
+    // Poll current time; guard with useYoutube so it goes silent in audio mode
+    setInterval(() => {
+      if (!useYoutube) return;
+      const t   = ytPlayer.getCurrentTime();
+      const idx = segments.findIndex(s => t >= s.start && t < s.end);
+      if (idx !== currentIdx) setActive(idx);
+    }, 250);
+  }
+
+  // ── Video / audio toggle ──────────────────────────────────────────────────
+
+  const btnTogglePlayer = document.getElementById("btn-toggle-player");
+  const ytPlayerWrap    = document.getElementById("yt-player-wrap");
+  const audioPlayerWrap = document.getElementById("audio-player-wrap");
+
+  btnTogglePlayer?.addEventListener("click", () => {
+    const currentTime = useYoutube
+      ? (ytPlayer?.getCurrentTime() || 0)
+      : (audio?.currentTime || 0);
+
+    useYoutube = !useYoutube;
+
+    if (useYoutube) {
+      ytPlayerWrap?.classList.remove("hidden");
+      audioPlayerWrap?.classList.add("hidden");
+      audio?.pause();
+      ytPlayer?.seekTo(currentTime, true);
+      transcriptEl.classList.add("compact-mode");
+      btnTogglePlayer.textContent = "Audio only";
+    } else {
+      ytPlayerWrap?.classList.add("hidden");
+      audioPlayerWrap?.classList.remove("hidden");
+      ytPlayer?.pauseVideo();
+      if (audio) audio.currentTime = currentTime;
+      transcriptEl.classList.remove("compact-mode");
+      btnTogglePlayer.textContent = "Video";
     }
+
+    if (currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
   });
 
   // ── Translation toggles ───────────────────────────────────────────────────
@@ -300,7 +302,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     transcriptEl.querySelectorAll(".translation-en").forEach(el => el.classList.toggle("hidden", !showEn));
     transcriptEl.querySelectorAll(".translation-zh").forEach(el => el.classList.toggle("hidden", !showZh));
     // Re-snap after row heights change (wait for reflow)
-    if (isYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+    if (useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
   }
 
   document.getElementById("toggle-en")?.addEventListener("click", () => { showEn = !showEn; syncTranslationUI(); });

@@ -60,14 +60,13 @@
   <!-- ── Left column: player + transcript ── -->
   <div class="flex-1 min-w-0 flex flex-col gap-4">
 
-    {% if is_youtube %}
-    <!-- YouTube video player — full column width, 16:9 -->
-    <div class="yt-container rounded-xl overflow-hidden bg-black">
+    <!-- YouTube video player (shown for YouTube episodes) -->
+    <div id="yt-player-wrap" class="yt-container rounded-xl overflow-hidden bg-black{% if not is_youtube %} hidden{% endif %}">
       <div id="yt-player"></div>
     </div>
-    {% else %}
-    <!-- Audio player (sticky on mobile) -->
-    <div class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0">
+
+    <!-- Audio player (shown for non-YouTube, or when toggled) -->
+    <div id="audio-player-wrap" class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0{% if is_youtube %} hidden{% endif %}">
       <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
         <audio id="audio-player" controls class="w-full" preload="metadata"
                style="color-scheme: dark;">
@@ -78,7 +77,6 @@
         </audio>
       </div>
     </div>
-    {% endif %}
 
     <!-- Controls row -->
     <div class="flex items-center gap-3 flex-wrap">
@@ -86,12 +84,13 @@
       <button id="toggle-en" class="toggle-btn hidden md:inline-block" title="Toggle English translation">EN</button>
       <button id="toggle-zh" class="toggle-btn hidden md:inline-block" title="Toggle Chinese translation">ZH</button>
 
-      <button id="btn-retranslate"
+      {% if is_youtube %}
+      <button id="btn-toggle-player"
               class="toggle-btn ml-2"
-              title="Re-run translation on this episode">
-        Re-translate
+              title="Switch between video and audio-only playback">
+        Audio only
       </button>
-      <span id="retranslate-status" class="text-xs text-gray-500 hidden"></span>
+      {% endif %}
 
       <!-- Speed: desktop buttons -->
       <span class="text-gray-700 ml-2 hidden md:inline">|</span>

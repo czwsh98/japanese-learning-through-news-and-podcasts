@@ -174,31 +174,6 @@ def episode(date_str: str):
     return render_template("episode.html", date=date_str, meta=meta)
 
 
-@app.route("/episode/<date_str>/retranslate", methods=["POST"])
-def episode_retranslate(date_str: str):
-    ep = _ep_dir(date_str)
-    transcript_file = ep / "transcript.json"
-    if not transcript_file.exists():
-        return jsonify({"error": "No transcript.json found — run the pipeline first"}), 404
-
-    try:
-        from lib.translator import translate_segments
-        from lib.writer import _write_vtt
-
-        data = json.loads(transcript_file.read_text(encoding="utf-8"))
-        new_segments = translate_segments(data["segments"])
-
-        updated = {"segments": new_segments}
-        transcript_file.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
-        _write_vtt(ep / "subtitles.vtt", new_segments)
-
-        log.info(f"Re-translated {len(new_segments)} segments for {date_str}")
-        return jsonify({"ok": True, "segments": new_segments})
-    except Exception as exc:
-        tb = traceback.format_exc()
-        log.error(f"Re-translation failed for {date_str}:\n{tb}")
-        return jsonify({"error": str(exc), "traceback": tb}), 500
-
 
 @app.route("/episode/<date_str>/delete", methods=["POST"])
 def episode_delete(date_str: str):
