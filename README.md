@@ -131,7 +131,7 @@ python pipeline.py --date 2026-05-04
 # Override source URL for a single run
 python pipeline.py --url https://www.youtube.com/watch?v=...
 
-# Choose JLPT level (default: advanced)
+# Choose JLPT level (default: advanced, now N1)
 python pipeline.py --url <URL> --level intermediate
 
 # Dry run — no API calls, writes stub files to verify file layout

@@ -3,8 +3,8 @@
 Japanese Learning Pipeline
 --------------------------
 Downloads the latest episode from each source in sources.json, transcribes it
-with Whisper, translates segments with Claude, identifies N1/N2 vocabulary and
-grammar with Claude, writes per-episode flat files (including an Anki-importable CSV).
+with Whisper, translates segments with Gemini Flash, identifies N1/N2 vocabulary and
+grammar with OpenAI gpt-4o-mini, writes per-episode flat files (including an Anki-importable CSV).
 
 Usage:
   python pipeline.py                     # process today's episode
@@ -117,11 +117,11 @@ def run(episode_date: date, url_override: str | None, dry_run: bool, level: str 
     whisper_result = _stub_whisper() if dry_run else transcribe_audio(audio_path)
 
     # ── Step 3: Translate ───────────────────────────────────────────────────
-    log.info("Step 3/5 — Translate EN + ZH (Claude — Call 1)")
+    log.info("Step 3/5 — Translate EN + ZH (Gemini Flash)")
     segments = _stub_segments() if dry_run else translate_segments(whisper_result["segments"])
 
     # ── Step 4: Analyze ─────────────────────────────────────────────────────
-    log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (Claude — Call 2)")
+    log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (OpenAI gpt-4o-mini)")
     analysis = _stub_analysis() if dry_run else analyze_transcript(segments, level=level)
 
     # ── Step 5: Write files ─────────────────────────────────────────────────

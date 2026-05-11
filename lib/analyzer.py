@@ -13,10 +13,10 @@ _MODEL = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
 # level key → (display label, ordered JLPT tiers to find)
 LEVELS: dict[str, tuple[str, list[str]]] = {
     "beginner":              ("N5",    ["N5"]),
-    "beginner-intermediate": ("N4–N3", ["N4", "N3"]),
+    "beginner-intermediate": ("N4",    ["N4"]),
     "intermediate":          ("N3",    ["N3"]),
     "intermediate-advanced": ("N2",    ["N2"]),
-    "advanced":              ("N2–N1", ["N2", "N1"]),
+    "advanced":              ("N1",    ["N1"]),
 }
 DEFAULT_LEVEL = "advanced"
 
@@ -103,20 +103,18 @@ _CHUNK_CHARS = 1500   # target Japanese chars per analysis chunk
 def _build_system(jlpt_tiers: list[str]) -> str:
     tiers_str = " and ".join(jlpt_tiers)
     n1_guidance = (
-        "\n\nN1 vs N2 classification guidance: "
-        "Label an item N1 if it is low-frequency in everyday spoken Japanese — "
-        "formal/written vocabulary, literary or classical expressions, abstract or academic nouns, "
-        "compound verbs or auxiliary forms rare in conversation, and grammar patterns found only in "
-        "formal writing or sophisticated prose. "
-        "Label it N2 only if it genuinely appears often in news, business conversation, or daily life. "
-        "When in doubt between N1 and N2, prefer N1."
+        "\n\nN1 labelling guidance: cast wide — include formal/written vocabulary, literary or "
+        "classical expressions, abstract or academic nouns, compound verbs or auxiliary forms rare "
+        "in everyday speech, and grammar patterns found mainly in formal writing or sophisticated "
+        "prose. When uncertain whether an item reaches N1, include it rather than omit it."
     ) if "N1" in jlpt_tiers else ""
     return (
         f"You are a Japanese language expert specialising in JLPT {tiers_str} preparation. "
         f"Analyse the transcript below and identify all {tiers_str} vocabulary items, grammar patterns, "
-        "set phrases, and idioms. Be comprehensive — learners rely on you to catch everything at "
-        "these levels. For 'highlights', use the exact surface form from the text so the UI can "
-        f"underline it inline. Include only {tiers_str} items; skip items outside this range."
+        "set phrases, and idioms. Err on the side of including borderline items — it is better to "
+        "over-label than to miss a teachable word. For 'highlights', use the exact surface form from "
+        f"the text so the UI can underline it inline. Focus on {tiers_str} items; skip only obvious "
+        "everyday basics well below this level."
         f"{n1_guidance}\n\n"
         "Additionally, use level 'context-specific' for words and expressions that are beyond N1 "
         "but are important for understanding this specific content — for example: domain-specific "
