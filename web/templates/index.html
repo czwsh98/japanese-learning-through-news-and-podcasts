@@ -37,6 +37,10 @@
               {% else %}
               <span class="text-gray-600">○ no transcript</span>
               {% endif %}
+              {% set url = ep.meta.get('url', '') %}
+              {% if 'youtube.com' in url or 'youtu.be' in url %}
+              <span class="text-red-400">● video</span>
+              {% endif %}
             </div>
           </div>
           <!-- Duration -->
