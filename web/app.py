@@ -3,9 +3,11 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import sys
 import threading
+import time
 import traceback
 import uuid
 from datetime import date
@@ -35,6 +37,9 @@ EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
+# Slug pattern: YYYY-MM-DD or YYYY-MM-DD-N
+_SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
+
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -42,16 +47,34 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
 # ── Background job tracking ───────────────────────────────────────────────────
 
-# job_id → {status, slug, step, error}
+# job_id → {status, slug, step, step_num, total_steps, error, started_at}
 # status: "processing" | "done" | "error"
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
+_MAX_JOBS = 50  # prune old jobs when exceeding this count
 
 
-def _set_step(job_id: str, step: str) -> None:
+def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
     with _jobs_lock:
         if job_id in _jobs:
             _jobs[job_id]["step"] = step
+            if step_num:
+                _jobs[job_id]["step_num"] = step_num
+
+
+def _prune_old_jobs() -> None:
+    """Remove oldest completed/failed jobs when the pool exceeds _MAX_JOBS."""
+    with _jobs_lock:
+        if len(_jobs) <= _MAX_JOBS:
+            return
+        finished = [
+            (jid, j) for jid, j in _jobs.items()
+            if j["status"] in ("done", "error")
+        ]
+        finished.sort(key=lambda x: x[1].get("started_at", 0))
+        to_remove = len(_jobs) - _MAX_JOBS
+        for jid, _ in finished[:to_remove]:
+            del _jobs[jid]
 
 
 def _pipeline_thread(
@@ -69,34 +92,37 @@ def _pipeline_thread(
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files
 
+    total_steps = 5
+
     try:
         # ── Step 1: Download (URL path only) ────────────────────────────────
         if source_url and audio_path is None:
             from lib.downloader import download_latest
-            _set_step(job_id, "Downloading audio…")
+            _set_step(job_id, "Downloading audio…", 1)
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
 
         # ── Step 2: Transcribe ───────────────────────────────────────────────
-        _set_step(job_id, "Transcribing with Whisper…")
+        _set_step(job_id, "Transcribing with Whisper…", 2)
         whisper_result = transcribe_audio(audio_path)
 
         # ── Step 3: Translate ────────────────────────────────────────────────
-        _set_step(job_id, "Translating EN + ZH with Gemini…")
+        _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
         segments = translate_segments(whisper_result["segments"])
 
         # ── Step 4: Analyse ──────────────────────────────────────────────────
-        _set_step(job_id, "Analysing vocabulary and grammar…")
+        _set_step(job_id, "Analysing vocabulary and grammar…", 4)
         analysis = analyze_transcript(segments, level=level)
 
         # ── Step 5: Write files ──────────────────────────────────────────────
-        _set_step(job_id, "Writing episode files…")
+        _set_step(job_id, "Writing episode files…", 5)
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
         with _jobs_lock:
             _jobs[job_id]["status"] = "done"
             _jobs[job_id]["step"]   = "Complete"
+            _jobs[job_id]["step_num"] = total_steps
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -111,7 +137,12 @@ def _pipeline_thread(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ep_dir(date_str: str) -> Path:
+    if not _SLUG_RE.match(date_str):
+        abort(400)
     ep = EPISODES_DIR / date_str
+    # Prevent path traversal
+    if not ep.resolve().is_relative_to(EPISODES_DIR.resolve()):
+        abort(400)
     if not ep.is_dir():
         abort(404)
     return ep
@@ -140,6 +171,12 @@ def _unique_ep_slug(base: str) -> str:
         slug = f"{base}-{counter}"
         counter += 1
     return slug
+
+
+def _make_response_cached(response):
+    """Add immutable cache headers to a response (for static episode data)."""
+    response.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    return response
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -264,8 +301,13 @@ def upload_process():
             "status": "processing",
             "slug":   slug,
             "step":   "Starting…",
+            "step_num": 0,
+            "total_steps": 5,
             "error":  "",
+            "started_at": time.time(),
         }
+
+    _prune_old_jobs()
 
     t = threading.Thread(
         target=_pipeline_thread,
@@ -296,10 +338,12 @@ def api_job_status(job_id: str):
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify({
-        "status": job["status"],
-        "step":   job.get("step", ""),
-        "slug":   job["slug"],
-        "error":  job.get("error", ""),
+        "status":      job["status"],
+        "step":        job.get("step", ""),
+        "step_num":    job.get("step_num", 0),
+        "total_steps": job.get("total_steps", 5),
+        "slug":        job["slug"],
+        "error":       job.get("error", ""),
     })
 
 
@@ -319,7 +363,7 @@ def episode_vtt(date_str: str):
     vtt = _ep_dir(date_str) / "subtitles.vtt"
     if not vtt.exists():
         abort(404)
-    return send_file(vtt, mimetype="text/vtt")
+    return _make_response_cached(send_file(vtt, mimetype="text/vtt"))
 
 
 @app.route("/episode/<date_str>/cards.csv")
@@ -339,17 +383,20 @@ def episode_cards(date_str: str):
 
 @app.route("/api/episode/<date_str>/meta")
 def api_meta(date_str: str):
-    return jsonify(_read_json(_ep_dir(date_str) / "meta.json"))
+    resp = jsonify(_read_json(_ep_dir(date_str) / "meta.json"))
+    return _make_response_cached(resp)
 
 
 @app.route("/api/episode/<date_str>/transcript")
 def api_transcript(date_str: str):
-    return jsonify(_read_json(_ep_dir(date_str) / "transcript.json"))
+    resp = jsonify(_read_json(_ep_dir(date_str) / "transcript.json"))
+    return _make_response_cached(resp)
 
 
 @app.route("/api/episode/<date_str>/analysis")
 def api_analysis(date_str: str):
-    return jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
+    resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
+    return _make_response_cached(resp)
 
 
 @app.route("/api/episodes")

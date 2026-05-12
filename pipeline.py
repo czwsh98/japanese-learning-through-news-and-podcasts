@@ -11,11 +11,13 @@ Usage:
   python pipeline.py --date 2026-05-01   # reprocess a specific date
   python pipeline.py --url <URL>         # override source
   python pipeline.py --dry-run           # stub all API calls
+  python pipeline.py --force             # reprocess even if output files exist
 """
 import json
 import logging
 import os
 import sys
+import time
 from argparse import ArgumentParser
 from datetime import date
 from pathlib import Path
@@ -90,7 +92,20 @@ def _stub_analysis() -> dict:
     return {"highlights": [], "vocab": [], "grammar": [], "expressions": []}
 
 
-def run(episode_date: date, url_override: str | None, dry_run: bool, level: str = DEFAULT_LEVEL) -> bool:
+def _timed(label: str):
+    """Context manager that logs elapsed time for a pipeline step."""
+    class _Timer:
+        def __enter__(self):
+            self.start = time.perf_counter()
+            return self
+        def __exit__(self, *_):
+            elapsed = time.perf_counter() - self.start
+            log.info(f"  ⏱  {label} completed in {elapsed:.1f}s")
+    return _Timer()
+
+
+def run(episode_date: date, url_override: str | None, dry_run: bool,
+        level: str = DEFAULT_LEVEL, force: bool = False) -> bool:
     ep_dir = EPISODES_DIR / episode_date.isoformat()
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,34 +117,80 @@ def run(episode_date: date, url_override: str | None, dry_run: bool, level: str 
     log.info(f"  Output dir   : {ep_dir}")
     log.info(f"  Level        : {level} ({' / '.join(jlpt_tiers)})")
     log.info(f"  Dry run      : {dry_run}")
+    log.info(f"  Force        : {force}")
     log.info(bar)
+
+    pipeline_start = time.perf_counter()
+
+    # ── Checkpoint helpers ───────────────────────────────────────────────────
+    transcript_file = ep_dir / "transcript.json"
+    analysis_file   = ep_dir / "analysis.json"
+
+    def _has_transcript():
+        return not force and transcript_file.exists()
+
+    def _has_translations():
+        if force or not transcript_file.exists():
+            return False
+        try:
+            data = json.loads(transcript_file.read_text(encoding="utf-8"))
+            segs = data.get("segments", [])
+            return segs and all(s.get("en") for s in segs[:3])
+        except Exception:
+            return False
+
+    def _has_analysis():
+        return not force and analysis_file.exists()
 
     # ── Step 1: Download ────────────────────────────────────────────────────
     log.info("Step 1/5 — Download audio")
-    urls = [url_override] if url_override else load_source_urls()
-    audio_path, meta = download_latest(urls, ep_dir, dry_run=dry_run)
-    if not audio_path:
-        log.error("Download failed — aborting")
-        return False
+    with _timed("Download"):
+        urls = [url_override] if url_override else load_source_urls()
+        audio_path, meta = download_latest(urls, ep_dir, dry_run=dry_run)
+        if not audio_path:
+            log.error("Download failed — aborting")
+            return False
 
     # ── Step 2: Transcribe ──────────────────────────────────────────────────
-    log.info("Step 2/5 — Transcribe (Whisper API)")
-    whisper_result = _stub_whisper() if dry_run else transcribe_audio(audio_path)
+    if _has_transcript() and not dry_run:
+        log.info("Step 2/5 — Transcribe (SKIPPED — transcript.json exists, use --force to redo)")
+        whisper_result = json.loads(transcript_file.read_text(encoding="utf-8"))
+        # Ensure top-level keys exist for downstream steps
+        if "segments" not in whisper_result:
+            whisper_result = {"segments": whisper_result.get("segments", []),
+                              "language": "ja", "duration": 0.0, "text": ""}
+    else:
+        log.info("Step 2/5 — Transcribe (Whisper API)")
+        with _timed("Transcribe"):
+            whisper_result = _stub_whisper() if dry_run else transcribe_audio(audio_path)
 
     # ── Step 3: Translate ───────────────────────────────────────────────────
-    log.info("Step 3/5 — Translate EN + ZH (Gemini Flash)")
-    segments = _stub_segments() if dry_run else translate_segments(whisper_result["segments"])
+    if _has_translations() and not dry_run:
+        log.info("Step 3/5 — Translate (SKIPPED — translations already present, use --force to redo)")
+        segments = json.loads(transcript_file.read_text(encoding="utf-8")).get("segments", [])
+    else:
+        log.info("Step 3/5 — Translate EN + ZH (Gemini Flash)")
+        with _timed("Translate"):
+            segments = _stub_segments() if dry_run else translate_segments(whisper_result["segments"])
 
     # ── Step 4: Analyze ─────────────────────────────────────────────────────
-    log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (OpenAI gpt-4o-mini)")
-    analysis = _stub_analysis() if dry_run else analyze_transcript(segments, level=level)
+    if _has_analysis() and not dry_run:
+        log.info(f"Step 4/5 — Analyze (SKIPPED — analysis.json exists, use --force to redo)")
+        analysis = json.loads(analysis_file.read_text(encoding="utf-8"))
+    else:
+        log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (OpenAI gpt-4o-mini)")
+        with _timed("Analyze"):
+            analysis = _stub_analysis() if dry_run else analyze_transcript(segments, level=level)
 
     # ── Step 5: Write files ─────────────────────────────────────────────────
     log.info("Step 5/5 — Write episode files")
-    write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
+    with _timed("Write files"):
+        write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
+    total_elapsed = time.perf_counter() - pipeline_start
     log.info(bar)
     log.info(f"  Pipeline complete ✓  ({ep_dir})")
+    log.info(f"  Total time: {total_elapsed:.1f}s")
     log.info(bar)
     return True
 
@@ -149,10 +210,15 @@ def main() -> None:
         action="store_true",
         help="Skip all API calls — write stub files to verify file layout",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reprocess all steps even if output files already exist",
+    )
     args = parser.parse_args()
 
     episode_date = date.fromisoformat(args.date) if args.date else date.today()
-    success = run(episode_date, args.url, args.dry_run, level=args.level)
+    success = run(episode_date, args.url, args.dry_run, level=args.level, force=args.force)
     sys.exit(0 if success else 1)
 
 

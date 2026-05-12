@@ -155,14 +155,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   let transcriptData = { segments: [] };
   let analysisData   = { highlights: [], vocab: [], grammar: [], expressions: [] };
 
-  try {
-    [transcriptData, analysisData] = await Promise.all([
-      fetch(`/api/episode/${dateStr}/transcript`).then(r => { if (!r.ok) throw r; return r.json(); }),
-      fetch(`/api/episode/${dateStr}/analysis`).then(r => { if (!r.ok) throw r; return r.json(); }),
-    ]);
-  } catch {
+  // Fetch transcript and analysis independently — show what we can even if one fails
+  const [transcriptResult, analysisResult] = await Promise.allSettled([
+    fetch(`/api/episode/${dateStr}/transcript`).then(r => { if (!r.ok) throw r; return r.json(); }),
+    fetch(`/api/episode/${dateStr}/analysis`).then(r => { if (!r.ok) throw r; return r.json(); }),
+  ]);
+
+  if (transcriptResult.status === "fulfilled") {
+    transcriptData = transcriptResult.value;
+  } else {
     loadingEl.textContent = "Could not load transcript (pipeline may still be running).";
     return;
+  }
+
+  if (analysisResult.status === "fulfilled") {
+    analysisData = analysisResult.value;
+  } else {
+    console.warn("Analysis data not available — showing transcript without highlights");
   }
 
   segments   = transcriptData.segments || [];
@@ -200,6 +209,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderGrammar(analysisData.grammar    || []);
   renderExpressions(analysisData.expressions || []);
   renderContext([...ctxVocab, ...ctxGrammar]);
+
+  // ── Episode stats bar ──────────────────────────────────────────────────────
+  const vocabCount  = (analysisData.vocab || []).length + ctxVocab.length;
+  const grammarCount = (analysisData.grammar || []).length + ctxGrammar.length;
+  const exprCount   = (analysisData.expressions || []).length;
+  const ctxCount    = ctxVocab.length + ctxGrammar.length;
+  if (vocabCount + grammarCount + exprCount > 0) {
+    const statsEl = document.createElement("div");
+    statsEl.className = "text-xs text-gray-500 px-3 py-1.5 border-b border-gray-800 flex items-center gap-3 flex-wrap";
+    const parts = [];
+    if (vocabCount)  parts.push(`<span class="text-gray-400">${vocabCount}</span> vocab`);
+    if (grammarCount) parts.push(`<span class="text-gray-400">${grammarCount}</span> grammar`);
+    if (exprCount)   parts.push(`<span class="text-gray-400">${exprCount}</span> expressions`);
+    if (ctxCount)    parts.push(`<span style="color:#a78bfa">${ctxCount}</span> context-specific`);
+    statsEl.innerHTML = parts.join(' <span class="text-gray-700">·</span> ');
+    // Insert after the panel header in transcript card
+    const panelHeader = transcriptCard?.querySelector(".border-b.border-gray-800");
+    if (panelHeader) panelHeader.after(statsEl);
+  }
 
   loadingEl.classList.add("hidden");
   transcriptEl.classList.remove("hidden");
@@ -374,9 +402,72 @@ document.addEventListener("DOMContentLoaded", async () => {
     fabHint.classList.remove("hidden");
     setTimeout(() => {
       fabHint.classList.add("fab-hint-fade");
+
       setTimeout(() => fabHint.classList.add("hidden"), 500);
     }, 3500);
   }
+
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────────
+
+  document.addEventListener("keydown", e => {
+    // Skip when focus is in an input, textarea, or contenteditable
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || e.target.isContentEditable) return;
+
+    switch (e.key) {
+      case " ": { // Space — play/pause
+        e.preventDefault();
+        if (useYoutube) {
+          if (!ytPlayer) break;
+          const state = ytPlayer.getPlayerState();
+          state === 1 ? ytPlayer.pauseVideo() : ytPlayer.playVideo();
+        } else if (audio) {
+          audio.paused ? audio.play().catch(() => {}) : audio.pause();
+        }
+        break;
+      }
+      case "ArrowLeft": { // ← seek −5s
+        e.preventDefault();
+        if (useYoutube && ytPlayer) ytPlayer.seekTo(Math.max(0, ytPlayer.getCurrentTime() - 5), true);
+        else if (audio) audio.currentTime = Math.max(0, audio.currentTime - 5);
+        break;
+      }
+      case "ArrowRight": { // → seek +5s
+        e.preventDefault();
+        if (useYoutube && ytPlayer) ytPlayer.seekTo(ytPlayer.getCurrentTime() + 5, true);
+        else if (audio) audio.currentTime += 5;
+        break;
+      }
+      case "ArrowUp": { // ↑ previous segment
+        e.preventDefault();
+        if (currentIdx > 0) seekTo(segments[currentIdx - 1].start);
+        break;
+      }
+      case "ArrowDown": { // ↓ next segment
+        e.preventDefault();
+        if (currentIdx < segments.length - 1) seekTo(segments[currentIdx + 1].start);
+        break;
+      }
+      case "e": { // Toggle English
+        showEn = !showEn;
+        syncTranslationUI();
+        break;
+      }
+      case "c": { // Toggle Chinese
+        showZh = !showZh;
+        syncTranslationUI();
+        break;
+      }
+      case "[": { // Speed down
+        if (speedIdx > 0) applySpeed(speedIdx - 1);
+        break;
+      }
+      case "]": { // Speed up
+        if (speedIdx < SPEEDS.length - 1) applySpeed(speedIdx + 1);
+        break;
+      }
+    }
+  });
 
   // ── Side-panel tab switching ──────────────────────────────────────────────
 
@@ -523,9 +614,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  // Show only nearby segments in video mode (±2 around current, both mobile and desktop)
+  // Show only nearby segments in video mode (±1 around current, both mobile and desktop)
   function updateNearbySegments(idx) {
-    const WINDOW = 2;
+    const WINDOW = 1;
     segments.forEach((_, i) => {
       const el = document.getElementById(`seg-${i}`);
       if (!el) return;

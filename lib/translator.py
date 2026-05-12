@@ -2,6 +2,9 @@
 import json
 import logging
 import os
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from google import genai
 
@@ -10,6 +13,9 @@ log = logging.getLogger(__name__)
 _API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 _BATCH   = 50   # segments per Gemini call (large context window — 50 is comfortable)
+_MAX_WORKERS = 4  # concurrent Gemini requests
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds
 
 _RESPONSE_SCHEMA = {
     "type": "object",
@@ -49,10 +55,32 @@ def translate_segments(raw_segments: list[dict]) -> list[dict]:
     # Index → {en, zh} lookup built from batched Gemini responses
     tr_map: dict[int, dict] = {}
 
+    # Build batch list
+    batches = []
     for i in range(0, len(raw_segments), _BATCH):
-        batch = raw_segments[i : i + _BATCH]
-        _translate_batch(client, batch, i, tr_map)
-        log.info(f"Translated {min(i + _BATCH, len(raw_segments))}/{len(raw_segments)} segments")
+        batches.append(raw_segments[i : i + _BATCH])
+
+    if len(batches) <= 1:
+        # Single batch — no need for threading overhead
+        for batch in batches:
+            _translate_batch(client, batch, tr_map)
+        log.info(f"Translated {len(raw_segments)}/{len(raw_segments)} segments")
+    else:
+        # Multiple batches — run concurrently
+        log.info(f"Translating {len(raw_segments)} segments in {len(batches)} batches ({_MAX_WORKERS} workers)")
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_translate_batch, client, batch, tr_map): idx
+                for idx, batch in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    log.error(f"Translation batch {batch_idx + 1} failed: {exc}")
+                done_count = min((batch_idx + 1) * _BATCH, len(raw_segments))
+                log.info(f"Translated batch {batch_idx + 1}/{len(batches)} (up to segment {done_count})")
 
     merged = []
     for orig in raw_segments:
@@ -63,8 +91,8 @@ def translate_segments(raw_segments: list[dict]) -> list[dict]:
     return merged
 
 
-def _translate_batch(client: genai.Client, batch: list[dict], offset: int, tr_map: dict) -> None:
-    """Translate one batch; populate tr_map with {index: {en, zh}} entries."""
+def _translate_batch(client: genai.Client, batch: list[dict], tr_map: dict) -> None:
+    """Translate one batch with exponential backoff; populate tr_map."""
     payload = [{"index": s["index"], "ja": s["ja"]} for s in batch]
     prompt  = (
         f"Translate ALL {len(batch)} Japanese segments below into English (en) "
@@ -72,7 +100,7 @@ def _translate_batch(client: genai.Client, batch: list[dict], offset: int, tr_ma
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
-    for attempt in range(2):
+    for attempt in range(_MAX_RETRIES):
         try:
             response = client.models.generate_content(
                 model=_MODEL,
@@ -90,10 +118,12 @@ def _translate_batch(client: genai.Client, batch: list[dict], offset: int, tr_ma
             return
 
         except Exception as exc:
-            if attempt == 0:
-                log.warning(f"Gemini translation batch attempt 1 failed: {exc} — retrying")
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                log.warning(f"Gemini batch attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
+                time.sleep(delay)
             else:
-                log.error(f"Gemini translation batch attempt 2 failed: {exc} — padding with blanks")
+                log.error(f"Gemini batch attempt {attempt + 1} failed: {exc} — padding with blanks")
                 for s in batch:
                     tr_map.setdefault(s["index"], {"en": "", "zh": ""})
 

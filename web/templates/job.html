@@ -10,6 +10,20 @@
     </div>
     <h1 class="text-xl font-bold mb-2">Processing episode</h1>
     <p id="step-label" class="text-gray-400 text-sm mb-1">Starting…</p>
+
+    <!-- Progress bar -->
+    <div class="mt-4 mx-auto max-w-xs">
+      <div class="flex items-center justify-between text-xs text-gray-500 mb-1">
+        <span id="step-counter">Step 0/5</span>
+        <span id="elapsed-time">0:00</span>
+      </div>
+      <div class="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+        <div id="progress-bar"
+             class="h-full bg-blue-500 rounded-full transition-all duration-500 ease-out"
+             style="width: 0%"></div>
+      </div>
+    </div>
+
     <p class="text-gray-600 text-xs mt-4">
       You can close this tab — processing continues on the server.<br>
       Check the <a href="/" class="text-blue-500 hover:text-blue-400">Episodes page</a> when done.
@@ -53,13 +67,30 @@
 <script>
   const JOB_ID   = {{ job_id | tojson }};
   const SLUG     = {{ slug   | tojson }};
-  const INTERVAL = 3000; // poll every 3 seconds
+  const INTERVAL = 2000; // poll every 2 seconds
 
   const stateProcessing = document.getElementById("state-processing");
   const stateDone       = document.getElementById("state-done");
   const stateError      = document.getElementById("state-error");
   const stepLabel       = document.getElementById("step-label");
   const errorMsg        = document.getElementById("error-msg");
+  const progressBar     = document.getElementById("progress-bar");
+  const stepCounter     = document.getElementById("step-counter");
+  const elapsedTime     = document.getElementById("elapsed-time");
+
+  const startedAt = Date.now();
+
+  function formatElapsed() {
+    const secs = Math.floor((Date.now() - startedAt) / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  // Update elapsed time every second
+  setInterval(() => {
+    if (elapsedTime) elapsedTime.textContent = formatElapsed();
+  }, 1000);
 
   async function poll() {
     try {
@@ -68,9 +99,16 @@
 
       if (data.status === "processing") {
         stepLabel.textContent = data.step || "Processing…";
+        const stepNum    = data.step_num    || 0;
+        const totalSteps = data.total_steps || 5;
+        const pct = Math.round((stepNum / totalSteps) * 100);
+        progressBar.style.width = pct + "%";
+        stepCounter.textContent = `Step ${stepNum}/${totalSteps}`;
         setTimeout(poll, INTERVAL);
 
       } else if (data.status === "done") {
+        progressBar.style.width = "100%";
+        stepCounter.textContent = "Done";
         stateProcessing.classList.add("hidden");
         stateDone.classList.remove("hidden");
         setTimeout(() => { window.location.href = `/episode/${SLUG}`; }, 1200);

@@ -2,6 +2,9 @@
 import json
 import logging
 import os
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from openai import OpenAI
@@ -9,6 +12,9 @@ from openai import OpenAI
 log = logging.getLogger(__name__)
 
 _MODEL = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
+_MAX_WORKERS = 4  # concurrent OpenAI requests
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds
 
 # level key → (display label, ordered JLPT tiers to find)
 LEVELS: dict[str, tuple[str, list[str]]] = {
@@ -170,7 +176,7 @@ def _analyze_chunk(
     client: OpenAI, system: str, jlpt_tiers: list[str],
     transcript: str, chunk_idx: int, total: int,
 ) -> dict:
-    for attempt in range(2):
+    for attempt in range(_MAX_RETRIES):
         try:
             response = client.chat.completions.create(
                 model=_MODEL,
@@ -218,10 +224,12 @@ def _analyze_chunk(
                     }
 
         except Exception as exc:
-            if attempt == 0:
-                log.warning(f"Chunk {chunk_idx + 1} attempt 1 failed: {exc} — retrying")
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                log.warning(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
+                time.sleep(delay)
             else:
-                log.error(f"Chunk {chunk_idx + 1} attempt 2 failed: {exc} — skipping chunk")
+                log.error(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc} — skipping chunk")
 
     return _EMPTY
 
@@ -235,11 +243,27 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
     chunks = _chunk_segments(segments)
     log.info(f"Analyzing {len(segments)} segments in {len(chunks)} chunk(s) via {_MODEL}")
 
-    results = []
-    for i, chunk in enumerate(chunks):
-        transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
-        result = _analyze_chunk(client, system, jlpt_tiers, transcript, i, len(chunks))
-        results.append(result)
+    if len(chunks) <= 1:
+        # Single chunk — no threading overhead
+        results = []
+        for i, chunk in enumerate(chunks):
+            transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
+            results.append(_analyze_chunk(client, system, jlpt_tiers, transcript, i, len(chunks)))
+    else:
+        # Multiple chunks — run concurrently
+        log.info(f"Running {len(chunks)} analysis chunks concurrently ({_MAX_WORKERS} workers)")
+        results = [_EMPTY] * len(chunks)
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {}
+            for i, chunk in enumerate(chunks):
+                transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
+                futures[pool.submit(_analyze_chunk, client, system, jlpt_tiers, transcript, i, len(chunks))] = i
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as exc:
+                    log.error(f"Analysis chunk {idx + 1} failed: {exc}")
 
     merged = _merge_analyses(results)
     log.info(
