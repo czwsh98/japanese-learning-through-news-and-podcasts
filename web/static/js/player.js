@@ -33,6 +33,33 @@ document.addEventListener("DOMContentLoaded", async () => {
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
   const isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
 
+  // ── Layout initialization ─────────────────────────────────────────────────
+  // Tabbed sidebar with transcript tab only applies to desktop/iPad YouTube.
+  // Audio and mobile always use the original layout (transcript in left col).
+
+  if (isYoutube && isDesktopLayout) {
+    // Move transcript elements from left-col card into sidebar panel-transcript
+    const panelTranscript = document.getElementById("panel-transcript");
+    if (panelTranscript) {
+      [loadingEl, transcriptEl, jumpPill].forEach(el => {
+        if (el) panelTranscript.appendChild(el);
+      });
+      transcriptEl.style.height = "";
+      transcriptEl.classList.add("flex-1");
+    }
+    transcriptCard?.classList.add("hidden");
+  } else if (isYoutube) {
+    // Mobile YouTube: hide Transcript tab, activate Vocab instead
+    const transcriptTab = document.querySelector('.tab-btn[data-tab="transcript"]');
+    if (transcriptTab) {
+      transcriptTab.classList.add("hidden");
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("tab-active"));
+      document.querySelector('.tab-btn[data-tab="vocab"]')?.classList.add("tab-active");
+      document.querySelectorAll("[data-panel]").forEach(p => p.classList.add("hidden"));
+      document.getElementById("panel-vocab")?.classList.remove("hidden");
+    }
+  }
+
   // ── AnkiConnect Integration ──────────────────────────────────────────────
 
   const ANKI_URL = "http://localhost:8765";
@@ -388,7 +415,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   transcriptEl.classList.remove("hidden");
 
   if (isYoutube) {
-    // transcriptEl.classList.add("compact-mode"); // Obsolete for desktop tabbed sidebar
+    if (!isDesktopLayout) transcriptEl.classList.add("compact-mode");
     updateNearbySegments(-1);
   }
 

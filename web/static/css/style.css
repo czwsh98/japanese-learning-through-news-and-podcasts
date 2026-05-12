@@ -454,6 +454,13 @@
     min-height: 0;
     overflow: hidden;
   }
+  /* Audio layout: the direct .overflow-y-auto child of side-panel fills height on desktop */
+  body.ep-desktop #side-panel > .overflow-y-auto {
+    flex: 1 !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow-y: auto !important;
+  }
 
   /* YouTube video mode */
   body.ep-desktop.yt-mode #ep-left-col {
