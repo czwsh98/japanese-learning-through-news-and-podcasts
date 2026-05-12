@@ -500,10 +500,11 @@
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 
 @media (max-width: 767px) {
-  /* Transcript: let it scroll with the page, bigger tap targets */
+  /* Transcript: scrolls inside its card container (mirrors modal behaviour).
+     Height is set dynamically by JS (sizeMobileTranscript). */
   #transcript {
     max-height: none !important;
-    overflow-y: visible;
+    overflow-y: auto;
     padding-bottom: 72px; /* clear the fixed trigger bar */
   }
 

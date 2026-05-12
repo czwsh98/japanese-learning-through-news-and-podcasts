@@ -274,8 +274,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     const el = document.getElementById(`seg-${idx}`);
     if (!el || (!force && !autoFollow)) return;
 
-    // Determine if we are scrolling the transcript container or the whole window
-    const isContainerScrollable = transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
+    // Use computed overflow style to distinguish container scroll from page scroll.
+    // Checking scrollHeight alone is misleading because overflow:visible elements
+    // can have scrollHeight > clientHeight without actually being scrollable.
+    const overflowY = window.getComputedStyle(transcriptEl).overflowY;
+    const isContainerScrollable = (overflowY === "auto" || overflowY === "scroll") &&
+                                   transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
     const scrollTarget = isContainerScrollable ? transcriptEl : window;
 
     setProgrammaticScroll(scrollTarget);
@@ -426,6 +430,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // 3. Update scroll logic targets
     updatePillPosition();
+    // Debug logs START
+    console.log("player.js: repositionTranscript called, updatePillPosition finished. jumpPill classList:", jumpPill?.classList.value);
+    // Debug logs END
   }
 
   // ── Initial Render ────────────────────────────────────────────────────────
@@ -470,6 +477,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.body.classList.add("ep-desktop");
     if (isYoutube) document.body.classList.add("yt-mode");
   }
+
+  sizeMobileTranscript();
+  window.addEventListener("resize", sizeMobileTranscript, { passive: true });
 
   updatePillPosition();
 
@@ -522,6 +532,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
+      // Debug logs START
+      console.log("player.js: Adding 'hidden' to jumpPill after inactivity. Current classList:", jumpPill?.classList.value);
+      // Debug logs END
       jumpPill?.classList.add("hidden");
       if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
     }, AUTO_FOLLOW_INACTIVITY_MS);
@@ -533,13 +546,33 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   jumpPill?.addEventListener("click", () => {
     autoFollow = true;
+    // Debug logs START
+    console.log("player.js: jumpPill clicked, adding 'hidden'. Current classList:", jumpPill.classList.value);
+    // Debug logs END
     jumpPill.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
   });
 
   function updatePillPosition() {
-    jumpPill?.classList.toggle("pill-fixed", !isDesktopLayout && isTouch && !useYoutube);
+    // pill-fixed was needed when the transcript scrolled the whole page on mobile.
+    // Now the transcript is a bounded container on all layouts, so the pill sits
+    // position:absolute at the bottom of the card — never needs fixed positioning.
+    jumpPill?.classList.remove("pill-fixed");
+  }
+
+  // Size the transcript to fill the space between the sticky audio player and the
+  // bottom drawer bar, mirroring the max-h approach used by the full-screen modal.
+  function sizeMobileTranscript() {
+    if (isDesktopLayout || isYoutube) return;
+    const cardBody = document.getElementById("transcript-card-body");
+    const drawerBar = document.getElementById("drawer-trigger-bar");
+    if (!cardBody) return;
+    const top = cardBody.getBoundingClientRect().top + window.scrollY;
+    const drawerH = drawerBar ? drawerBar.offsetHeight : 48;
+    // Subtract top offset from document origin, page bottom padding, and drawer bar
+    const available = document.documentElement.clientHeight - top - drawerH - 8;
+    transcriptEl.style.height = Math.max(200, available) + "px";
   }
 
   async function handleExplain(e) {
