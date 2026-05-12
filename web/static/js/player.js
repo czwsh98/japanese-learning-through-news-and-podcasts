@@ -384,6 +384,50 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const allHighlights = [...highlights, ...ctxHighlights];
 
+  const panelTranscript = document.getElementById("panel-transcript");
+  const transcriptCardBody = document.getElementById("transcript-card-body");
+  const tabBtnTranscript = document.getElementById("tab-btn-transcript");
+
+  function repositionTranscript() {
+    // 1. Determine where the transcript belongs
+    // - Desktop Video: Sidebar (panel-transcript)
+    // - Desktop Audio: Main Area (transcript-card-body)
+    // - Mobile: Main Area (transcript-card-body)
+    
+    const targetInSidebar = isDesktopLayout && useYoutube;
+    const targetParent = targetInSidebar ? panelTranscript : transcriptCardBody;
+
+    if (transcriptEl.parentElement !== targetParent) {
+      targetParent.appendChild(transcriptEl);
+    }
+
+    // 2. Manage visibility of UI elements
+    // - Transcript tab button only visible in Desktop Video
+    if (tabBtnTranscript) {
+      tabBtnTranscript.classList.toggle("hidden", !targetInSidebar);
+    }
+    
+    // - Transcript card only visible if NOT in sidebar
+    if (transcriptCard) {
+      transcriptCard.classList.toggle("hidden", targetInSidebar);
+    }
+
+    // - If it moved into the sidebar, make sure the panel is visible if the tab is active
+    if (targetInSidebar) {
+      const activeTab = document.querySelector(".tab-btn.tab-active")?.dataset.tab;
+      panelTranscript.classList.toggle("hidden", activeTab !== "transcript");
+    } else {
+      // If moved to left col, ensure the sidebar switches to a card tab (like Vocab)
+      const currentTab = document.querySelector(".tab-btn.tab-active");
+      if (currentTab?.dataset.tab === "transcript") {
+        document.querySelector('.tab-btn[data-tab="vocab"]')?.click();
+      }
+    }
+    
+    // 3. Update scroll logic targets
+    updatePillPosition();
+  }
+
   // ── Initial Render ────────────────────────────────────────────────────────
 
   renderTranscript();
@@ -392,6 +436,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderGrammar(analysisData.grammar    || []);
   renderExpressions(analysisData.expressions || []);
   renderContext([...ctxVocab, ...ctxGrammar]);
+  repositionTranscript();
 
   // Stats bar
   const vocabCount  = (analysisData.vocab || []).length + ctxVocab.length;
@@ -623,6 +668,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (el) el.classList.remove("seg-nb-hidden", "seg-nb-near");
       });
     }
+    repositionTranscript();
     updatePillPosition();
     if (!useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
   });

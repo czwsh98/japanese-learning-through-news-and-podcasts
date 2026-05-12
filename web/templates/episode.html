@@ -56,22 +56,23 @@
   </form>
 </div>
 
-{% if is_youtube %}
 <!-- ══════════════════════════════════════════════════════════════════════════
-     YouTube layout: tabbed sidebar (desktop) / compact transcript (mobile)
+     Unified Responsive Layout
      ══════════════════════════════════════════════════════════════════════════ -->
 <div id="ep-two-col" class="flex gap-5 md:min-h-[calc(100vh-180px)]">
 
-  <!-- ── Left column: player + transcript ── -->
-  <div id="ep-left-col" class="flex-1 min-w-0 flex flex-col gap-4">
+  <!-- ── Left column: players + main transcript ── -->
+  <div id="ep-left-col" class="flex-[3] min-w-0 flex flex-col gap-4">
 
-    <!-- YouTube video player -->
+    <!-- YouTube video player (if applicable) -->
+    {% if is_youtube %}
     <div id="yt-player-wrap" class="yt-container rounded-xl overflow-hidden bg-black">
       <div id="yt-player"></div>
     </div>
+    {% endif %}
 
-    <!-- Audio player (shown when toggled to audio-only) -->
-    <div id="audio-player-wrap" class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0 hidden">
+    <!-- Audio player -->
+    <div id="audio-player-wrap" class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0{% if is_youtube %} hidden{% endif %}">
       <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
         <audio id="audio-player" controls class="w-full" preload="metadata"
                style="color-scheme: dark;">
@@ -88,11 +89,13 @@
       <span class="text-xs text-gray-500 mr-1 hidden md:inline">Translations:</span>
       <button id="toggle-en" class="toggle-btn hidden md:inline-block" title="Toggle English translation">EN</button>
       <button id="toggle-zh" class="toggle-btn hidden md:inline-block" title="Toggle Chinese translation">ZH</button>
-      <button id="btn-toggle-player"
-              class="toggle-btn ml-2"
-              title="Switch between video and audio-only playback">
+
+      {% if is_youtube %}
+      <button id="btn-toggle-player" class="toggle-btn ml-2" title="Switch between video and audio-only playback">
         Audio only
       </button>
+      {% endif %}
+
       <span class="text-gray-700 ml-2 hidden md:inline">|</span>
       <span class="text-xs text-gray-500 hidden md:inline">Speed:</span>
       <div class="hidden md:flex gap-1" id="speed-btns">
@@ -118,23 +121,23 @@
       </div>
     </div>
 
-    <!-- Transcript card (mobile: always visible; desktop: hidden by JS after content moves to sidebar) -->
-    <div id="transcript-card" class="relative bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex flex-col">
+    <!-- Transcript card (Landing spot for transcript in Audio/Mobile modes) -->
+    <div id="transcript-card" class="relative bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex flex-col flex-1">
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
         <span class="text-xs text-gray-500">Transcript</span>
       </div>
       <div id="transcript-loading" class="p-6 text-center text-gray-500 text-sm">
         Loading transcript…
       </div>
-      <div id="transcript"
-           class="overflow-y-auto p-2 hidden"
-           style="height: 35vh; scroll-behavior: smooth;">
+      <!-- Note: the #transcript element is initially inside #transcript-card-body -->
+      <div id="transcript-card-body" class="flex-1 overflow-hidden relative flex flex-col">
+        <div id="transcript" class="overflow-y-auto p-2 hidden h-full" style="scroll-behavior: smooth;"></div>
+        <button id="jump-now-pill" class="jump-now-pill hidden" aria-label="Jump to now playing">↓ Now playing</button>
       </div>
-      <button id="jump-now-pill" class="jump-now-pill hidden" aria-label="Jump to now playing">↓ Now playing</button>
     </div>
   </div>
 
-  <!-- ── Right column: Tabbed Sidebar (desktop: transcript + analysis; mobile: analysis drawer) ── -->
+  <!-- ── Right column: Study Center Sidebar ── -->
   <div id="side-panel" class="md:w-[350px] lg:w-[450px] shrink-0 flex flex-col bg-gray-900 md:border border-gray-800 md:rounded-xl overflow-hidden">
 
     <!-- Drag handle (mobile drawer only) -->
@@ -142,10 +145,10 @@
       <div class="w-10 h-1 bg-gray-700 rounded-full"></div>
     </div>
 
-    <!-- Tab bar: Transcript tab is hidden on mobile (transcript is in left col) -->
+    <!-- Tab bar -->
     <div class="flex border-b border-gray-800 shrink-0 overflow-x-auto no-scrollbar">
-      <button class="tab-btn tab-active" data-tab="transcript">Transcript</button>
-      <button class="tab-btn" data-tab="vocab">Vocab</button>
+      <button class="tab-btn" data-tab="transcript" id="tab-btn-transcript">Transcript</button>
+      <button class="tab-btn tab-active" data-tab="vocab">Vocab</button>
       <button class="tab-btn" data-tab="grammar">Grammar</button>
       <button class="tab-btn" data-tab="expressions">Phrases</button>
       <button class="tab-btn" data-tab="context" style="color:#a78bfa" title="Domain-specific and advanced terms beyond N1">Ctx</button>
@@ -153,170 +156,38 @@
 
     <!-- Content panels -->
     <div id="panel-container" class="relative flex-1 overflow-hidden flex flex-col">
+      <!-- Transcript sidebar panel: landing spot for transcript in Desktop Video mode -->
+      <div id="panel-transcript" data-panel="transcript" class="hidden flex-col h-full overflow-hidden relative"></div>
 
-      <!-- Transcript panel: empty on load; JS moves transcript here on desktop -->
-      <div id="panel-transcript" data-panel="transcript" class="flex flex-col h-full"></div>
-
-      <div id="panel-vocab" data-panel="vocab" class="hidden overflow-y-auto h-full p-2">
+      <div id="panel-vocab" data-panel="vocab" class="overflow-y-auto h-full p-2">
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
-
       <div id="panel-grammar" data-panel="grammar" class="hidden overflow-y-auto h-full p-2">
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
-
       <div id="panel-expressions" data-panel="expressions" class="hidden overflow-y-auto h-full p-2">
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
-
       <div id="panel-context" data-panel="context" class="hidden overflow-y-auto h-full p-2">
         <p class="text-gray-600 text-xs p-4">Loading…</p>
       </div>
-
     </div>
 
     <!-- Sidebar footer -->
     <div class="px-4 py-3 border-t border-gray-800 flex items-center justify-between bg-gray-900/50">
       <div class="flex gap-3">
-        <a href="/episode/{{ date }}/cards.csv" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors" title="Download Anki CSV">
-          CSV
-        </a>
+        <a href="/episode/{{ date }}/cards.csv" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">CSV</a>
         {% if meta.get('url') %}
-        <a href="{{ meta.url }}" target="_blank" rel="noopener" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors" title="View Source">
-          Source ↗
-        </a>
+        <a href="{{ meta.url }}" target="_blank" rel="noopener" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Source ↗</a>
         {% endif %}
       </div>
-      <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
-        Full Screen ↗
-      </button>
-    </div>
-  </div>
-
-</div>
-
-{% else %}
-<!-- ══════════════════════════════════════════════════════════════════════════
-     Audio layout: transcript fills left column, 4-tab analysis panel on right
-     ══════════════════════════════════════════════════════════════════════════ -->
-<div id="ep-two-col" class="flex gap-5 md:min-h-[calc(100vh-180px)]">
-
-  <!-- ── Left column: player + transcript ── -->
-  <div id="ep-left-col" class="flex-1 min-w-0 flex flex-col gap-4">
-
-    <!-- Audio player -->
-    <div id="audio-player-wrap" class="sticky top-12 z-30 md:static bg-gray-950 md:bg-transparent -mx-4 md:mx-0 px-4 md:px-0 pb-2 md:pb-0">
-      <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
-        <audio id="audio-player" controls class="w-full" preload="metadata"
-               style="color-scheme: dark;">
-          <source src="/episode/{{ date }}/audio" type="audio/mpeg">
-          <track kind="subtitles"
-                 src="/episode/{{ date }}/subtitles.vtt"
-                 srclang="ja" label="日本語">
-        </audio>
-      </div>
-    </div>
-
-    <!-- Controls row -->
-    <div class="flex items-center gap-3 flex-wrap">
-      <span class="text-xs text-gray-500 mr-1 hidden md:inline">Translations:</span>
-      <button id="toggle-en" class="toggle-btn hidden md:inline-block" title="Toggle English translation">EN</button>
-      <button id="toggle-zh" class="toggle-btn hidden md:inline-block" title="Toggle Chinese translation">ZH</button>
-      <span class="text-gray-700 ml-2 hidden md:inline">|</span>
-      <span class="text-xs text-gray-500 hidden md:inline">Speed:</span>
-      <div class="hidden md:flex gap-1" id="speed-btns">
-        <button class="speed-btn" data-speed="0.5">0.5×</button>
-        <button class="speed-btn" data-speed="0.75">0.75×</button>
-        <button class="speed-btn speed-active" data-speed="1">1×</button>
-        <button class="speed-btn" data-speed="1.25">1.25×</button>
-        <button class="speed-btn" data-speed="1.5">1.5×</button>
-        <button class="speed-btn" data-speed="2">2×</button>
-      </div>
-      <div class="flex md:hidden items-center gap-1 ml-2">
-        <button id="speed-down" class="speed-btn px-2">−</button>
-        <span id="speed-display" class="text-xs text-gray-400 w-8 text-center tabular-nums">1×</span>
-        <button id="speed-up" class="speed-btn px-2">+</button>
-      </div>
-      <div class="ml-auto hidden md:flex items-center gap-3 text-xs text-gray-600 flex-wrap">
-        <span class="hl-n5-demo">N5</span>
-        <span class="hl-n4-demo">N4</span>
-        <span class="hl-n3-demo">N3</span>
-        <span class="hl-n2-demo">N2</span>
-        <span class="hl-n1-demo">N1</span>
-        <span class="hl-ctx-demo">ctx</span>
-        <span class="text-gray-700">·</span>
-        <span><span style="text-decoration:underline;text-underline-offset:2px;text-decoration-thickness:2px;text-decoration-color:#6b7280">solid</span> = vocab</span>
-        <span><span style="text-decoration:underline dashed;text-underline-offset:2px;text-decoration-thickness:2px;text-decoration-color:#6b7280">dashed</span> = grammar</span>
-        <span class="text-gray-700">· click to seek</span>
-      </div>
-    </div>
-
-    <!-- Transcript panel (fills remaining column height) -->
-    <div id="transcript-card" class="relative bg-gray-900 rounded-xl border border-gray-800 flex-1 overflow-hidden flex flex-col">
-      <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
-        <span class="text-xs text-gray-500">Transcript</span>
-      </div>
-      <div id="transcript-loading" class="p-6 text-center text-gray-500 text-sm">
-        Loading transcript…
-      </div>
-      <div id="transcript"
-           class="overflow-y-auto p-2 hidden flex-1"
-           style="max-height: calc(100vh - 340px); scroll-behavior: smooth;">
-      </div>
-      <button id="jump-now-pill" class="jump-now-pill hidden" aria-label="Jump to now playing">↓ Now playing</button>
-    </div>
-  </div>
-
-  <!-- ── Right column: analysis side panel (desktop) / bottom drawer (mobile) ── -->
-  <div id="side-panel" class="w-72 shrink-0 flex flex-col">
-
-    <!-- Drag handle (mobile drawer only) -->
-    <div id="drawer-handle" class="flex justify-center py-2 md:hidden cursor-pointer">
-      <div class="w-10 h-1 bg-gray-700 rounded-full"></div>
-    </div>
-
-    <!-- Tab bar -->
-    <div class="flex border-b border-gray-800 mb-3">
-      <button class="tab-btn tab-active" data-tab="vocab">Vocab</button>
-      <button class="tab-btn" data-tab="grammar">Grammar</button>
-      <button class="tab-btn" data-tab="expressions">Phrases</button>
-      <button class="tab-btn" data-tab="context" style="color:#a78bfa" title="Domain-specific and advanced terms beyond N1">Ctx</button>
-    </div>
-
-    <!-- Card panels -->
-    <div class="overflow-y-auto flex-1" style="max-height: calc(100vh - 220px);">
-      <div id="panel-vocab" data-panel="vocab">
-        <p class="text-gray-600 text-xs p-4">Loading…</p>
-      </div>
-      <div id="panel-grammar" data-panel="grammar" class="hidden">
-        <p class="text-gray-600 text-xs p-4">Loading…</p>
-      </div>
-      <div id="panel-expressions" data-panel="expressions" class="hidden">
-        <p class="text-gray-600 text-xs p-4">Loading…</p>
-      </div>
-      <div id="panel-context" data-panel="context" class="hidden">
-        <p class="text-gray-600 text-xs p-4">Loading…</p>
-      </div>
-    </div>
-
-    <!-- Download footer -->
-    <div class="pt-3 mt-3 border-t border-gray-800 flex flex-col gap-1">
-      <a href="/episode/{{ date }}/cards.csv"
-         class="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-        ↓ Download Anki cards (.csv)
-      </a>
-      {% if meta.get('url') %}
-      <a href="{{ meta.url }}" target="_blank" rel="noopener"
-         class="text-xs text-gray-500 hover:text-gray-300 transition-colors">
-        ↗ Original source
-      </a>
+      {% if is_youtube %}
+      <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Full Screen ↗</button>
       {% endif %}
     </div>
   </div>
 
 </div>
-
-{% endif %}
 
 </div><!-- /ep-page -->
 
