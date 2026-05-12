@@ -8,6 +8,7 @@ Supported inputs
 """
 import json
 import logging
+import os
 import subprocess
 import urllib.parse
 from datetime import date
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
 _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm"}
 
 
@@ -41,7 +43,7 @@ def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Pat
         return audio_path, meta
 
     log.info(f"Streaming audio from {audio_url[:80]}…")
-    with _req.get(audio_url, stream=True, timeout=600) as resp:
+    with _req.get(audio_url, stream=True, timeout=_TIMEOUT) as resp:
         resp.raise_for_status()
         with open(audio_path, "wb") as fh:
             for chunk in resp.iter_content(chunk_size=65_536):
@@ -64,7 +66,7 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
         "--dump-json", "--no-warnings", "--quiet",
         url,
     ]
-    result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=60)
+    result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=min(60, _TIMEOUT))
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp metadata failed: {result.stderr.strip()}")
 
@@ -83,7 +85,7 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
         url,
     ]
     log.info(f"Downloading {meta['title']!r} from {url}")
-    result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp download failed: {result.stderr.strip()}")
 

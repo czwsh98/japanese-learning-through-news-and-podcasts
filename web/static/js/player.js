@@ -146,13 +146,37 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.title = "Synced!";
     } catch (err) {
       console.error(err);
-      alert("AnkiConnect error: " + err + "\n\nMake sure Anki is open and AnkiConnect is installed.");
+      showToast("AnkiConnect error: " + err + "\n\nMake sure Anki is open and AnkiConnect is installed.");
       btn.innerHTML = originalHTML;
       btn.disabled = false;
     }
   }
 
   // ── Helpers (Hoisted or defined before use) ────────────────────────────────
+
+  /**
+   * Shows a toast notification.
+   * @param {string} message The message to display.
+   * @param {"error"|"success"} type The type of toast.
+   */
+  function showToast(message, type = "error") {
+    let container = document.getElementById("toast-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "toast-container";
+      container.className = "fixed bottom-4 right-4 z-50 flex flex-col gap-2";
+      document.body.appendChild(container);
+    }
+    const toast = document.createElement("div");
+    const bgColor = type === "error" ? "bg-red-500" : "bg-green-500";
+    toast.className = `${bgColor} text-white px-4 py-2 rounded shadow-lg transition-opacity duration-300`;
+    toast.innerText = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.classList.add("opacity-0");
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
+  }
 
   function esc(str) {
     return String(str || "")
@@ -836,6 +860,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (isTouch && modalTranscriptEl) setupTouchTooltips(modalTranscriptEl);
 
   // side-panel renderers
+  /**
+   * Renders the vocabulary cards.
+   * @param {Array<{word: string, reading: string, en: string, zh: string, level: string}>} v Vocabulary array
+   */
   function renderVocab(v) {
     panelVocab.innerHTML = v.length ? v.map(item => {
       const cardJson = JSON.stringify({
@@ -852,6 +880,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).join("") : `<p class="panel-empty">No vocab</p>`;
   }
 
+  /**
+   * Renders the grammar cards.
+   * @param {Array<{pattern: string, reading: string, meaning_en: string, meaning_zh: string, level: string}>} g Grammar array
+   */
   function renderGrammar(g) {
     panelGrammar.innerHTML = g.length ? g.map(item => {
       const cardJson = JSON.stringify({
@@ -868,6 +900,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).join("") : `<p class="panel-empty">No grammar</p>`;
   }
 
+  /**
+   * Renders the expressions cards.
+   * @param {Array<{expression: string, reading: string, en: string, zh: string}>} e Expressions array
+   */
   function renderExpressions(e) {
     panelExpr.innerHTML = e.length ? e.map(item => {
       const cardJson = JSON.stringify({
@@ -883,6 +919,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).join("") : `<p class="panel-empty">No expressions</p>`;
   }
 
+  /**
+   * Renders the context-specific vocabulary and grammar cards.
+   * @param {Array<Object>} c Context array
+   */
   function renderContext(c) {
     panelContext.innerHTML = c.length ? c.map(item => {
       const cardJson = JSON.stringify({

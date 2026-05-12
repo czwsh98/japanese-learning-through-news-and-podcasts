@@ -162,9 +162,10 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
             "-c", "copy",
             "-y", chunk_pattern,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg split failed: {result.stderr.strip()}")
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"ffmpeg split failed: {e.stderr.strip()}")
 
         chunks = sorted(Path(tmp).glob("chunk_*.mp3"))
         if not chunks:
