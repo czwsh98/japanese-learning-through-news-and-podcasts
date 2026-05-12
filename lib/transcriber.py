@@ -56,7 +56,7 @@ def _clean_segments(raw: list[dict]) -> list[dict]:
         text = seg["ja"].strip("　 \t\n\r")
         if not text or len(text) < _MIN_CHARS:
             continue
-        if len(text) >= 6 and max(text.count(c) for c in set(text)) / len(text) > 0.60:
+        if len(text) >= 6 and max(text.count(c) for c in set(text)) / len(text) > 0.80:
             log.warning(f"Dropping char-loop [{seg['start']:.1f}s]: {text[:40]!r}")
             continue
         if _has_repeating_phrase(text):

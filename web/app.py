@@ -127,7 +127,6 @@ def _pipeline_thread(
     except Exception as exc:
         tb = traceback.format_exc()
         log.error(f"Job {job_id} failed:\n{tb}")
-        shutil.rmtree(ep_dir, ignore_errors=True)
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"]  = str(exc)

@@ -43,9 +43,12 @@ def _write_vtt(path: Path, segments: list[dict]) -> None:
 
 
 def _vtt_time(seconds: float) -> str:
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
+    # Handle rounding to 3 decimal places to avoid 60.000s
+    milli = int(round(seconds * 1000))
+    s, ms = divmod(milli, 1000)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 def _write_cards(path: Path, analysis: dict) -> None:

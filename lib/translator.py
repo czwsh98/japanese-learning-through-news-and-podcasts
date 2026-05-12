@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -11,11 +12,13 @@ from google import genai
 log = logging.getLogger(__name__)
 
 _API_KEY = os.environ.get("GEMINI_API_KEY", "")
-_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 _BATCH   = 50   # segments per Gemini call (large context window — 50 is comfortable)
 _MAX_WORKERS = 4  # concurrent Gemini requests
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
+
+_TR_LOCK = threading.Lock()
 
 _RESPONSE_SCHEMA = {
     "type": "object",
@@ -114,7 +117,8 @@ def _translate_batch(client: genai.Client, batch: list[dict], tr_map: dict) -> N
             data = json.loads(response.text)
             for item in data.get("translations", []):
                 if isinstance(item, dict) and "index" in item:
-                    tr_map[item["index"]] = {"en": item.get("en", ""), "zh": item.get("zh", "")}
+                    with _TR_LOCK:
+                        tr_map[item["index"]] = {"en": item.get("en", ""), "zh": item.get("zh", "")}
             return
 
         except Exception as exc:
@@ -125,7 +129,8 @@ def _translate_batch(client: genai.Client, batch: list[dict], tr_map: dict) -> N
             else:
                 log.error(f"Gemini batch attempt {attempt + 1} failed: {exc} — padding with blanks")
                 for s in batch:
-                    tr_map.setdefault(s["index"], {"en": "", "zh": ""})
+                    with _TR_LOCK:
+                        tr_map.setdefault(s["index"], {"en": "", "zh": ""})
 
 
 def _fmt(seconds: float) -> str:
