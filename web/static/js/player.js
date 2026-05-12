@@ -241,14 +241,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function scrollActiveIntoView(idx, force) {
-    if (useYoutube) return;
+    // If we are in compact mode (mobile video), don't scroll the container
+    if (useYoutube && !isDesktopLayout) return;
+
     const el = document.getElementById(`seg-${idx}`);
     if (!el || (!force && !autoFollow)) return;
 
-    // Use a simple, robust scrollIntoView call. 
-    // This will scroll the element into view relative to its nearest scrollable ancestor 
-    // (which is transcriptEl in the new layout).
-    setProgrammaticScroll(transcriptEl);
+    // Determine if we are scrolling the transcript container or the whole window
+    const isContainerScrollable = transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
+    const scrollTarget = isContainerScrollable ? transcriptEl : window;
+
+    setProgrammaticScroll(scrollTarget);
     el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
   }
 
