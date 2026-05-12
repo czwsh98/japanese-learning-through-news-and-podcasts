@@ -33,6 +33,92 @@ document.addEventListener("DOMContentLoaded", async () => {
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
   const isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
 
+  // ── AnkiConnect Integration ──────────────────────────────────────────────
+
+  const ANKI_URL = "http://localhost:8765";
+
+  async function invokeAnki(action, version, params = {}) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.addEventListener("error", () => reject("Failed to issue request to AnkiConnect."));
+      xhr.addEventListener("load", () => {
+        try {
+          const response = JSON.parse(xhr.responseText);
+          if (response.error) throw response.error;
+          resolve(response.result);
+        } catch (e) {
+          reject(e);
+        }
+      });
+      xhr.open("POST", ANKI_URL);
+      xhr.send(JSON.stringify({ action, version, params }));
+    });
+  }
+
+  async function syncToAnki(card) {
+    const deckName = "Japanese Pipeline";
+    const modelName = "Japanese Pipeline Model";
+
+    // 1. Ensure deck exists
+    await invokeAnki("createDeck", 6, { deck: deckName });
+
+    // 2. Ensure model exists
+    const models = await invokeAnki("modelNames", 6);
+    if (!models.includes(modelName)) {
+      await invokeAnki("createModel", 6, {
+        modelName,
+        inOrderFields: ["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"],
+        css: ".card { font-family: 'Hiragino Sans', 'Meiryo', sans-serif; text-align: center; color: #d1d5db; background-color: #111827; padding: 20px; } .ja { font-size: 32px; color: #fff; margin-bottom: 10px; } .reading { font-size: 18px; color: #9ca3af; } .translation { margin-top: 15px; font-size: 16px; } .en { color: #93c5fd; } .zh { color: #6ee7b7; } .example { margin-top: 15px; font-style: italic; color: #6b7280; font-size: 14px; border-top: 1px solid #374151; padding-top: 10px; }",
+        cardTemplates: [{
+          Name: "Recognition",
+          Front: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div></div>",
+          Back: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div><hr><div class='translation'><div class='en'>{{English}}</div><div class='zh'>{{Chinese}}</div></div><div class='example'>{{Example}}</div></div>"
+        }]
+      });
+    }
+
+    // 3. Add note
+    return await invokeAnki("addNote", 6, {
+      note: {
+        deckName,
+        modelName,
+        fields: {
+          Front: card.front,
+          Reading: card.reading || "",
+          English: card.en || "",
+          Chinese: card.zh || "",
+          Example: card.example || "",
+          Level: card.level || "",
+          Type: card.type || ""
+        },
+        tags: (card.tags || "japanese").split(" "),
+        options: { allowDuplicate: false }
+      }
+    });
+  }
+
+  async function handleAnkiSync(e) {
+    const btn = e.target.closest(".btn-anki");
+    if (!btn) return;
+    e.stopPropagation();
+    
+    const cardData = JSON.parse(btn.dataset.card);
+    const originalHTML = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+
+    try {
+      await syncToAnki(cardData);
+      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      btn.title = "Synced!";
+    } catch (err) {
+      console.error(err);
+      alert("AnkiConnect error: " + err + "\n\nMake sure Anki is open and AnkiConnect is installed.");
+      btn.innerHTML = originalHTML;
+      btn.disabled = false;
+    }
+  }
+
   // ── Helpers (Hoisted or defined before use) ────────────────────────────────
 
   function esc(str) {
@@ -81,9 +167,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       return `<div class="segment" id="seg-${i}" data-start="${seg.start}" data-end="${seg.end}">
         <span class="segment-time">${esc(seg.time || "")}</span>
         <div class="segment-body">
-          <div class="segment-ja">${jaHtml}</div>
+          <div class="flex items-start justify-between">
+            <div class="segment-ja">${jaHtml}</div>
+            <button class="btn-explain ml-2 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </button>
+          </div>
           <div class="translation-en hidden"><span class="trans-tag">EN</span>${esc(seg.en || "")}</div>
           <div class="translation-zh hidden"><span class="trans-tag">ZH</span>${esc(seg.zh || "")}</div>
+          <div class="explanation-box hidden mt-2 p-3 bg-gray-800/40 rounded-lg border border-gray-700 text-xs text-gray-300 leading-relaxed"></div>
         </div>
       </div>`;
     }).join("");
@@ -96,9 +188,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       return `<div class="modal-seg" id="modal-seg-${i}" data-start="${seg.start}" data-end="${seg.end}">
         <span class="modal-seg-time">${esc(seg.time || "")}</span>
         <div class="modal-seg-body">
-          <div class="modal-seg-ja">${jaHtml}</div>
+          <div class="flex items-start justify-between">
+            <div class="modal-seg-ja">${jaHtml}</div>
+            <button class="btn-explain ml-2 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </button>
+          </div>
           ${seg.en ? `<div class="translation-en hidden"><span class="trans-tag">EN</span>${esc(seg.en)}</div>` : ""}
           ${seg.zh ? `<div class="translation-zh hidden"><span class="trans-tag">ZH</span>${esc(seg.zh)}</div>` : ""}
+          <div class="explanation-box hidden mt-2 p-3 bg-gray-800/40 rounded-lg border border-gray-700 text-xs text-gray-300 leading-relaxed"></div>
         </div>
       </div>`;
     }).join("");
@@ -106,8 +204,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const COMPACT_NEAR = 2;
   function updateNearbySegments(idx) {
+    if (isDesktopLayout) return; // Tabbed sidebar doesn't need compact mode
     const activeIdx = idx < 0 ? 0 : idx;
-    const near = isDesktopLayout ? 0 : COMPACT_NEAR;
+    const near = COMPACT_NEAR;
     segments.forEach((_, i) => {
       const el = document.getElementById(`seg-${i}`);
       if (!el) return;
@@ -125,7 +224,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (el) { el.classList.add("segment-active"); scrollActiveIntoView(idx, false); }
     }
 
-    if (useYoutube) updateNearbySegments(idx);
+    if (useYoutube && !isDesktopLayout) updateNearbySegments(idx);
 
     document.querySelectorAll(".modal-seg.modal-seg-active")
       .forEach(el => el.classList.remove("modal-seg-active"));
@@ -299,7 +398,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   transcriptEl.classList.remove("hidden");
 
   if (isYoutube) {
-    transcriptEl.classList.add("compact-mode");
+    // transcriptEl.classList.add("compact-mode"); // Obsolete for desktop tabbed sidebar
     updateNearbySegments(-1);
   }
 
@@ -383,7 +482,52 @@ document.addEventListener("DOMContentLoaded", async () => {
     jumpPill?.classList.toggle("pill-fixed", !isDesktopLayout && isTouch && !useYoutube);
   }
 
+  async function handleExplain(e) {
+    const btn = e.target.closest(".btn-explain");
+    if (!btn) return;
+    e.stopPropagation();
+
+    const segEl = btn.closest("[data-start]");
+    const box = segEl.querySelector(".explanation-box");
+    
+    if (!box.classList.contains("hidden")) {
+      box.classList.add("hidden");
+      return;
+    }
+
+    if (box.innerHTML && !box.querySelector(".animate-pulse")) {
+      box.classList.remove("hidden");
+      return;
+    }
+
+    const jaText = segEl.querySelector(".segment-ja, .modal-seg-ja").innerText;
+    box.innerHTML = '<span class="animate-pulse flex items-center gap-2"><svg class="animate-spin h-3 w-3 text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Analyzing grammar...</span>';
+    box.classList.remove("hidden");
+
+    try {
+      const resp = await fetch("/api/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: jaText })
+      });
+      const data = await resp.json();
+      if (data.explanation) {
+        box.innerHTML = marked.parse(data.explanation);
+        // Ensure links in explanation open in new tab
+        box.querySelectorAll("a").forEach(a => a.target = "_blank");
+      } else {
+        box.innerHTML = '<span class="text-red-400">Error: ' + esc(data.error || "Could not explain") + "</span>";
+      }
+    } catch (err) {
+      box.innerHTML = '<span class="text-red-400">Error: ' + esc(err.message) + "</span>";
+    }
+  }
+
   transcriptEl.addEventListener("click", e => {
+    if (e.target.closest(".btn-explain")) {
+      handleExplain(e);
+      return;
+    }
     if (isTouch && e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
     if (seg) seekTo(parseFloat(seg.dataset.start));
@@ -441,8 +585,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioPlayerWrap?.classList.add("hidden");
       audio?.pause();
       ytPlayer?.seekTo(currentTime, true);
-      transcriptEl.classList.add("compact-mode");
-      transcriptEl.style.height = "35vh";
+      if (!isDesktopLayout) {
+        transcriptEl.classList.add("compact-mode");
+        transcriptEl.style.height = "35vh";
+      }
       btnTogglePlayer.textContent = "Audio only";
       updateNearbySegments(currentIdx);
       if (isDesktopLayout) document.body.classList.add("yt-mode");
@@ -451,8 +597,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioPlayerWrap?.classList.remove("hidden");
       ytPlayer?.pauseVideo();
       if (audio) audio.currentTime = currentTime;
-      transcriptEl.classList.remove("compact-mode");
-      transcriptEl.style.height = "";
+      if (!isDesktopLayout) {
+        transcriptEl.classList.remove("compact-mode");
+        transcriptEl.style.height = "";
+      }
       btnTogglePlayer.textContent = "Video";
       document.body.classList.remove("yt-mode");
       segments.forEach((_, i) => {
@@ -529,6 +677,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   const sidePanel = document.getElementById("side-panel");
+  sidePanel?.addEventListener("click", handleAnkiSync);
   const drawerOverlay = document.getElementById("drawer-overlay");
   const btnOpenDrawer = document.getElementById("btn-open-drawer");
   const drawerHandle  = document.getElementById("drawer-handle");
@@ -540,7 +689,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function showTooltip(hl, x, y) {
     const lvl = (hl.level || "").toLowerCase();
-    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">【${esc(hl.reading)}】</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(hl.en)}</div><div class="tt-zh">${esc(hl.zh)}</div>`;
+    const jishoUrl = `https://jisho.org/search/${encodeURIComponent(hl.word)}`;
+    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">【${esc(hl.reading)}】</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(hl.en)}</div><div class="tt-zh">${esc(hl.zh)}</div><div class="mt-2 pt-2 border-t border-gray-700 flex justify-end"><a href="${jishoUrl}" target="_blank" class="text-[10px] text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1">Search on Jisho ↗</a></div>`;
     tooltip.style.left = x + "px"; tooltip.style.top = y + "px"; tooltip.classList.remove("hidden");
   }
 
@@ -574,12 +724,78 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", e => { if (e.key === "Escape") { transcriptModal?.classList.add("hidden"); document.body.style.overflow = ""; } });
   modalTranscriptEl?.addEventListener("scroll", () => { if (!modalProgrammaticScroll) modalJumpPill?.classList.remove("hidden"); }, { passive: true });
   modalJumpPill?.addEventListener("click", () => { modalJumpPill.classList.add("hidden"); scrollModalToActive(); });
-  modalTranscriptEl?.addEventListener("click", e => { if (isTouch && e.target.closest("[data-hl]")) return; const seg = e.target.closest("[data-start]"); if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); document.body.style.overflow = ""; } });
+  modalTranscriptEl?.addEventListener("click", e => {
+    if (e.target.closest(".btn-explain")) {
+      handleExplain(e);
+      return;
+    }
+    if (isTouch && e.target.closest("[data-hl]")) return;
+    const seg = e.target.closest("[data-start]");
+    if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); document.body.style.overflow = ""; }
+  });
   if (isTouch && modalTranscriptEl) setupTouchTooltips(modalTranscriptEl);
 
   // side-panel renderers
-  function renderVocab(v) { panelVocab.innerHTML = v.length ? v.map(item => `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`).join("") : `<p class="panel-empty">No vocab</p>`; }
-  function renderGrammar(g) { panelGrammar.innerHTML = g.length ? g.map(item => `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div></div></div>`).join("") : `<p class="panel-empty">No grammar</p>`; }
-  function renderExpressions(e) { panelExpr.innerHTML = e.length ? e.map(item => `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`).join("") : `<p class="panel-empty">No expressions</p>`; }
-  function renderContext(c) { panelContext.innerHTML = c.length ? c.map(item => `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(item.word||item.pattern)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div></div></div>`).join("") : `<p class="panel-empty">No ctx</p>`; }
+  function renderVocab(v) {
+    panelVocab.innerHTML = v.length ? v.map(item => {
+      const cardJson = JSON.stringify({
+        type: "vocab",
+        front: item.word,
+        reading: item.reading,
+        en: item.en,
+        zh: item.zh,
+        example: item.example,
+        level: item.level,
+        tags: `japanese vocab ${item.level || ""}`.trim()
+      }).replace(/'/g, "&#39;");
+      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`;
+    }).join("") : `<p class="panel-empty">No vocab</p>`;
+  }
+
+  function renderGrammar(g) {
+    panelGrammar.innerHTML = g.length ? g.map(item => {
+      const cardJson = JSON.stringify({
+        type: "grammar",
+        front: item.pattern,
+        reading: item.reading,
+        en: item.meaning_en,
+        zh: item.meaning_zh,
+        example: item.example,
+        level: item.level,
+        tags: `japanese grammar ${item.level || ""}`.trim()
+      }).replace(/'/g, "&#39;");
+      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div></div></div>`;
+    }).join("") : `<p class="panel-empty">No grammar</p>`;
+  }
+
+  function renderExpressions(e) {
+    panelExpr.innerHTML = e.length ? e.map(item => {
+      const cardJson = JSON.stringify({
+        type: "expression",
+        front: item.expression,
+        reading: item.reading,
+        en: item.en,
+        zh: item.zh,
+        example: item.context,
+        tags: "japanese expression"
+      }).replace(/'/g, "&#39;");
+      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`;
+    }).join("") : `<p class="panel-empty">No expressions</p>`;
+  }
+
+  function renderContext(c) {
+    panelContext.innerHTML = c.length ? c.map(item => {
+      const cardJson = JSON.stringify({
+        type: "context-specific",
+        front: item.word || item.pattern,
+        reading: item.reading,
+        en: item.en || item.meaning_en,
+        zh: item.zh || item.meaning_zh,
+        example: item.example,
+        level: "context-specific",
+        tags: "japanese context-specific"
+      }).replace(/'/g, "&#39;");
+      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(item.word||item.pattern)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific">ctx</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div></div></div>`;
+    }).join("") : `<p class="panel-empty">No ctx</p>`;
+  }
 });

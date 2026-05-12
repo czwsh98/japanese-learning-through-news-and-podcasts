@@ -274,3 +274,26 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
         f"{len(merged['expressions'])} expressions"
     )
     return merged
+
+
+def explain_sentence(text: str) -> str:
+    """Return a detailed grammatical breakdown of a Japanese sentence via LLM."""
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    system = (
+        "You are a Japanese language expert. Provide a concise but thorough grammatical breakdown "
+        "of the Japanese sentence provided by the user. Explain particles, conjugations, and "
+        "any difficult vocabulary or idioms. Use Markdown for formatting. "
+        "The tone should be helpful and educational. Keep it under 200 words if possible."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Please explain this sentence: {text}"},
+            ],
+        )
+        return response.choices[0].message.content or "Could not generate explanation."
+    except Exception as exc:
+        log.error(f"Explain sentence failed: {exc}")
+        return f"Error: {str(exc)}"

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Subscriptions — 日本語 Pipeline{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+  <div class="mb-8 flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold">Subscriptions</h1>
+      <p class="text-gray-500 mt-1">Manage YouTube channels and podcast feeds for automated daily processing.</p>
+    </div>
+    <button onclick="document.getElementById('add-form').classList.toggle('hidden')" 
+            class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+      + Add Source
+    </button>
+  </div>
+
+  {% if error %}
+  <div class="bg-red-950 border border-red-900 text-red-400 px-4 py-3 rounded-lg mb-6 text-sm">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  <!-- Add Source Form -->
+  <div id="add-form" class="hidden bg-gray-900 border border-gray-800 rounded-xl p-6 mb-8">
+    <h2 class="text-lg font-semibold mb-4">Add New Subscription</h2>
+    <form action="/subscriptions/add" method="post" class="space-y-4">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="space-y-1">
+          <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</label>
+          <input type="text" name="name" required placeholder="e.g. NHK News Web Easy"
+                 class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
+        </div>
+        <div class="space-y-1">
+          <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">URL</label>
+          <input type="url" name="url" required placeholder="YouTube Channel or Podcast RSS URL"
+                 class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
+        </div>
+      </div>
+      <div class="space-y-1">
+        <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Description (Optional)</label>
+        <input type="text" name="description" placeholder="Brief notes about this source"
+               class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
+      </div>
+      <div class="flex justify-end gap-3 pt-2">
+        <button type="button" onclick="document.getElementById('add-form').classList.add('hidden')"
+                class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
+          Cancel
+        </button>
+        <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg text-sm font-semibold transition-colors">
+          Add Subscription
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Source List -->
+  <div class="space-y-4">
+    {% if sources %}
+      {% for source in sources %}
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <h3 class="font-semibold text-gray-100 truncate">{{ source.name }}</h3>
+          <p class="text-xs text-gray-500 mt-0.5 truncate">{{ source.url }}</p>
+          {% if source.description %}
+          <p class="text-xs text-gray-400 mt-2">{{ source.description }}</p>
+          {% endif %}
+        </div>
+        <form action="/subscriptions/delete" method="post" onsubmit="return confirm('Remove this subscription?')">
+          <input type="hidden" name="url" value="{{ source.url }}">
+          <button type="submit" class="p-2 text-gray-600 hover:text-red-400 transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+          </button>
+        </form>
+      </div>
+      {% endfor %}
+    {% else %}
+      <div class="text-center py-20 bg-gray-900 border border-gray-800 border-dashed rounded-xl">
+        <div class="text-gray-600 mb-2">No active subscriptions.</div>
+        <button onclick="document.getElementById('add-form').classList.remove('hidden')" 
+                class="text-blue-500 text-sm hover:underline">Add your first source</button>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="mt-8 text-center">
+    <p class="text-xs text-gray-600">
+      Note: These sources are checked by the <code>pipeline.py</code> script when run via cron or launchd.
+    </p>
+  </div>
+</div>
+{% endblock %}

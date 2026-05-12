@@ -34,6 +34,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 _episodes_env = os.environ.get("EPISODES_DIR", "")
 EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
                 else _PROJECT_ROOT / (_episodes_env or "episodes"))
+SOURCES_FILE = _PROJECT_ROOT / "sources.json"
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
@@ -219,6 +220,43 @@ def episode_delete(date_str: str):
     return redirect(url_for("index"))
 
 
+@app.route("/subscriptions", methods=["GET"])
+def subscriptions_page():
+    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+    return render_template("subscriptions.html", sources=sources_data.get("sources", []))
+
+
+@app.route("/subscriptions/add", methods=["POST"])
+def subscriptions_add():
+    name = request.form.get("name", "").strip()
+    url = request.form.get("url", "").strip()
+    desc = request.form.get("description", "").strip()
+
+    if not name or not url:
+        return render_template("subscriptions.html", error="Name and URL are required.",
+                               sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []))
+
+    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+    if "sources" not in sources_data: sources_data["sources"] = []
+    sources_data["sources"].append({"name": name, "url": url, "description": desc})
+
+    SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return redirect(url_for("subscriptions_page"))
+
+
+@app.route("/subscriptions/delete", methods=["POST"])
+def subscriptions_delete():
+    url = request.form.get("url", "").strip()
+    if not url:
+        abort(400)
+
+    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+    sources_data["sources"] = [s for s in sources_data.get("sources", []) if s["url"] != url]
+
+    SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return redirect(url_for("subscriptions_page"))
+
+
 @app.route("/upload", methods=["GET"])
 def upload_page():
     return render_template("upload.html")
@@ -396,6 +434,17 @@ def api_transcript(date_str: str):
 def api_analysis(date_str: str):
     resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
     return _make_response_cached(resp)
+
+
+@app.route("/api/explain", methods=["POST"])
+def api_explain():
+    from lib.analyzer import explain_sentence
+    data = request.json or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    explanation = explain_sentence(text)
+    return jsonify({"explanation": explanation})
 
 
 @app.route("/api/episodes")

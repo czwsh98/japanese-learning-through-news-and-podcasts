@@ -181,6 +181,10 @@
   color: #93c5fd;
 }
 
+/* Utility: Hide scrollbar but allow scrolling */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
 /* ── Side panel tab buttons ──────────────────────────────────────────────── */
 
 .tab-btn {
@@ -446,26 +450,13 @@
     min-height: 0;
     overflow: hidden;
   }
-  body.ep-desktop #side-panel > .overflow-y-auto {
-    flex: 1 !important;
-    min-height: 0 !important;
-    max-height: none !important;
-    overflow-y: auto !important;
+  body.ep-desktop #panel-container {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
-  /* YouTube video mode: let video fill available width (aspect-ratio drives height naturally) */
-  /* Prevent the card and transcript from being flex-shrunk, which caused
-     overflow-hidden on the card to clip the active segment and its translation. */
-  body.ep-desktop.yt-mode #transcript-card {
-    flex-shrink: 0;
-  }
-  body.ep-desktop.yt-mode #transcript {
-    height: auto !important;
-    flex: none !important;
-    overflow: visible !important;
-  }
-  /* Allow the column to overflow so the unshrinkable card can render fully.
-     Main's overflow:hidden is the final clipping boundary. */
+  /* YouTube video mode */
   body.ep-desktop.yt-mode #ep-left-col {
     overflow: visible;
   }
