@@ -357,6 +357,12 @@
 
 /* ── Compact transcript (video mode) ────────────────────────────────────── */
 
+.compact-mode {
+  display: flex !important;
+  flex-direction: column;
+  justify-content: center;
+}
+
 .compact-mode .segment {
   opacity: 0.45;
   transition: opacity 0.2s, background-color 0.12s, border-color 0.12s;
@@ -446,14 +452,21 @@
     overflow-y: auto !important;
   }
 
-  /* YouTube video mode: cap video height + compact transcript (sized to nearby segments) */
-  body.ep-desktop.yt-mode .yt-container {
-    max-height: 50vh;
+  /* YouTube video mode: let video fill available width (aspect-ratio drives height naturally) */
+  /* Prevent the card and transcript from being flex-shrunk, which caused
+     overflow-hidden on the card to clip the active segment and its translation. */
+  body.ep-desktop.yt-mode #transcript-card {
+    flex-shrink: 0;
   }
   body.ep-desktop.yt-mode #transcript {
     height: auto !important;
     flex: none !important;
-    overflow: hidden !important;
+    overflow: visible !important;
+  }
+  /* Allow the column to overflow so the unshrinkable card can render fully.
+     Main's overflow:hidden is the final clipping boundary. */
+  body.ep-desktop.yt-mode #ep-left-col {
+    overflow: visible;
   }
 }
 

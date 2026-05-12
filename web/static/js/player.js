@@ -614,15 +614,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  // Show only nearby segments in video mode (±1 around current, both mobile and desktop)
+  // Show only the active segment in video mode
   function updateNearbySegments(idx) {
-    const WINDOW = 1;
+    const activeIdx = idx < 0 ? 0 : idx;
     segments.forEach((_, i) => {
       const el = document.getElementById(`seg-${i}`);
       if (!el) return;
-      const dist = idx < 0 ? (i < 3 ? 0 : Infinity) : Math.abs(i - idx);
-      el.classList.toggle("seg-nb-hidden", dist > WINDOW);
-      el.classList.toggle("seg-nb-near",   dist === 1);
+      el.classList.toggle("seg-nb-hidden", i !== activeIdx);
+      el.classList.remove("seg-nb-near");
     });
   }
 
