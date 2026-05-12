@@ -245,33 +245,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     const el = document.getElementById(`seg-${idx}`);
     if (!el || (!force && !autoFollow)) return;
 
-    // In the new tabbed layout, transcriptEl is almost always a scroll container.
-    // On desktop or when inside the mobile drawer, we scroll the container.
-    const isScrollable = transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
-
-    if (isScrollable || isDesktopLayout) {
-      const containerRect = transcriptEl.getBoundingClientRect();
-      const elRect        = el.getBoundingClientRect();
-      const inView        = elRect.top >= containerRect.top && elRect.bottom <= containerRect.bottom;
-      
-      if (!force && inView) return;
-      
-      setProgrammaticScroll(transcriptEl);
-      el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
-    } else {
-      // Fallback for old layout or mobile main-page transcript
-      const audioWrap = document.getElementById("audio-player-wrap");
-      const drawerBar = document.getElementById("drawer-trigger-bar");
-      const topClear  = audioWrap ? audioWrap.getBoundingClientRect().bottom : 120;
-      const botClear  = drawerBar ? window.innerHeight - drawerBar.getBoundingClientRect().top : 120;
-      const elRect    = el.getBoundingClientRect();
-      const inView    = elRect.top >= topClear && elRect.bottom <= (window.innerHeight - botClear);
-      
-      if (!force && inView) return;
-      
-      setProgrammaticScroll(window);
-      el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
-    }
+    // Use a simple, robust scrollIntoView call. 
+    // This will scroll the element into view relative to its nearest scrollable ancestor 
+    // (which is transcriptEl in the new layout).
+    setProgrammaticScroll(transcriptEl);
+    el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
   }
 
   function scrollModalToActive() {
