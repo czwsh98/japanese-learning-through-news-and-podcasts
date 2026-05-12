@@ -451,8 +451,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
       jumpPill?.classList.add("hidden");
-      if (useYoutube) { if (currentIdx >= 0) updateNearbySegments(currentIdx); }
-      else            { if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true); }
+      if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
     }, AUTO_FOLLOW_INACTIVITY_MS);
   }
 
@@ -464,8 +463,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     autoFollow = true;
     jumpPill.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
-    if (useYoutube) { if (currentIdx >= 0) updateNearbySegments(currentIdx); }
-    else            { if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true); }
+    if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
   });
 
   function updatePillPosition() {
