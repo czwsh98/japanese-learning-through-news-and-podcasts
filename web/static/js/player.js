@@ -31,6 +31,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let ytPlayer   = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+  const isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
 
   // ── Helpers (Hoisted or defined before use) ────────────────────────────────
 
@@ -106,7 +107,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const COMPACT_NEAR = 2;
   function updateNearbySegments(idx) {
     const activeIdx = idx < 0 ? 0 : idx;
-    const near = (isTouch || window.innerWidth < 768) ? COMPACT_NEAR : 0;
+    const near = isDesktopLayout ? 0 : COMPACT_NEAR;
     segments.forEach((_, i) => {
       const el = document.getElementById(`seg-${i}`);
       if (!el) return;
@@ -302,7 +303,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateNearbySegments(-1);
   }
 
-  if (!isTouch && window.innerWidth >= 768) {
+  if (isDesktopLayout) {
     const nav = document.querySelector("nav");
     if (nav) document.documentElement.style.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
     document.body.classList.add("ep-desktop");
@@ -379,7 +380,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   function updatePillPosition() {
-    jumpPill?.classList.toggle("pill-fixed", isTouch && !useYoutube);
+    jumpPill?.classList.toggle("pill-fixed", !isDesktopLayout && isTouch && !useYoutube);
   }
 
   transcriptEl.addEventListener("click", e => {
@@ -444,7 +445,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       transcriptEl.style.height = "35vh";
       btnTogglePlayer.textContent = "Audio only";
       updateNearbySegments(currentIdx);
-      if (!isTouch && window.innerWidth >= 768) document.body.classList.add("yt-mode");
+      if (isDesktopLayout) document.body.classList.add("yt-mode");
     } else {
       ytPlayerWrap?.classList.add("hidden");
       audioPlayerWrap?.classList.remove("hidden");
