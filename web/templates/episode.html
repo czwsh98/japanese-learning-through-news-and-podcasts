@@ -125,6 +125,11 @@
     <div id="transcript-card" class="relative bg-gray-900 rounded-xl border border-gray-800 overflow-hidden flex flex-col flex-1">
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
         <span class="text-xs text-gray-500">Transcript</span>
+        {% if is_youtube %}
+        <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
+          Full Screen ↗
+        </button>
+        {% endif %}
       </div>
       <div id="transcript-loading" class="p-6 text-center text-gray-500 text-sm">
         Loading transcript…
@@ -181,8 +186,8 @@
         <a href="{{ meta.url }}" target="_blank" rel="noopener" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Source ↗</a>
         {% endif %}
       </div>
-      {% if is_youtube %}
-      <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Full Screen ↗</button>
+      </div>
+
       {% endif %}
     </div>
   </div>
