@@ -48,6 +48,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       transcriptEl.classList.add("flex-1");
     }
     transcriptCard?.classList.add("hidden");
+
+    // Default to Transcript tab on Desktop Video mode
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("tab-active"));
+    document.querySelector('.tab-btn[data-tab="transcript"]')?.classList.add("tab-active");
+    document.querySelectorAll("[data-panel]").forEach(p => p.classList.add("hidden"));
+    if (panelTranscript) panelTranscript.classList.remove("hidden");
   } else if (isYoutube) {
     // Mobile YouTube: hide Transcript tab, activate Vocab instead
     const transcriptTab = document.querySelector('.tab-btn[data-tab="transcript"]');
@@ -842,7 +848,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese vocab ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
     }).join("") : `<p class="panel-empty">No vocab</p>`;
   }
 
@@ -858,7 +864,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese grammar ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()}">${esc(item.level)}</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
     }).join("") : `<p class="panel-empty">No grammar</p>`;
   }
 
@@ -873,7 +879,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         example: item.context,
         tags: "japanese expression"
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
     }).join("") : `<p class="panel-empty">No expressions</p>`;
   }
 
@@ -889,7 +895,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: "context-specific",
         tags: "japanese context-specific"
       }).replace(/'/g, "&#39;");
-      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(item.word||item.pattern)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific">ctx</span><button class="btn-anki ml-auto text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div></div></div>`;
+      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(item.word||item.pattern)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific ml-auto">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
     }).join("") : `<p class="panel-empty">No ctx</p>`;
   }
 });
