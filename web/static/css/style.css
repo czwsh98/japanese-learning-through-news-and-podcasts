@@ -378,13 +378,14 @@
   column-gap: 6px;
   align-items: start;
   padding: 7px 10px;
+  border-left: 3px solid transparent;
   border-radius: 6px;
   cursor: pointer;
-  transition: background-color 0.12s;
+  transition: background-color 0.12s, border-color 0.12s;
   margin-bottom: 2px;
 }
 .modal-seg:hover { background-color: #1a2332; }
-.modal-seg-active { background-color: #0f2240 !important; }
+.modal-seg-active { background-color: #0f2240 !important; border-left-color: #3b82f6; }
 
 .modal-seg-time {
   font-size: 10px;
