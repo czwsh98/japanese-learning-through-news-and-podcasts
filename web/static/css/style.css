@@ -316,6 +316,28 @@
   color: #93c5fd;
 }
 
+/* ── FAB discovery hint ──────────────────────────────────────────────────── */
+
+.fab-hint {
+  position: fixed;
+  bottom: 72px;
+  right: 72px; /* left of FAB (16px margin + 48px button + 8px gap) */
+  z-index: 51;
+  background: #1e3a5f;
+  border: 1px solid #3b82f6;
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.5s;
+}
+.fab-hint-fade { opacity: 0; }
+
 /* ── YouTube embed container ─────────────────────────────────────────────── */
 
 .yt-container {
@@ -339,9 +361,8 @@
   opacity: 0.45;
   transition: opacity 0.2s, background-color 0.12s, border-color 0.12s;
 }
-.compact-mode .segment.segment-active {
-  opacity: 1;
-}
+.compact-mode .segment.seg-nb-near   { opacity: 0.72; }
+.compact-mode .segment.segment-active { opacity: 1; }
 
 /* ── Full transcript modal ───────────────────────────────────────────────── */
 
@@ -456,6 +477,13 @@
   transition: background 0.15s, color 0.15s;
 }
 .jump-now-pill:hover { background: #1d4ed8; color: #fff; }
+
+.jump-now-pill.pill-fixed {
+  position: fixed;
+  bottom: 64px; /* above the mobile drawer trigger bar */
+  left: 50%;
+  transform: translateX(-50%);
+}
 
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 

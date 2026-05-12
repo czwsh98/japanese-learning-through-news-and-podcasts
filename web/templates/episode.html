@@ -204,6 +204,7 @@
 <div id="drawer-overlay" class="hidden fixed inset-0 bg-black/60 z-40 md:hidden"></div>
 
 <!-- Mobile floating translation FAB -->
+<span id="fab-hint" class="fab-hint hidden">Translations</span>
 <div id="fab-translate" class="fixed z-50 md:hidden" style="bottom: 60px; right: 16px;">
   <div id="fab-tray" class="fab-tray-hidden flex flex-col items-end gap-2 mb-2">
     <button id="fab-zh-btn" class="fab-pill">ZH</button>
@@ -211,9 +212,12 @@
   </div>
   <button id="fab-main" aria-label="Toggle translations"
           class="w-12 h-12 rounded-full border flex items-center justify-center shadow-xl transition-colors duration-150
-                 bg-gray-900 border-gray-700 text-gray-400"
-          style="font-size: 11px; font-weight: 700; letter-spacing: 0.5px;">
-    SUB
+                 bg-gray-900 border-gray-700 text-gray-400">
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/>
+      <path d="M7 15h4M15 15h2M7 11h2M11 11h6"/>
+    </svg>
   </button>
 </div>
 

@@ -81,12 +81,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   function markUserNavigation() {
     if (programmaticScroll) return;
     autoFollow = false;
-    if (!inYtDesktopMode()) jumpPill?.classList.remove("hidden");
+    jumpPill?.classList.remove("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
       jumpPill?.classList.add("hidden");
-      if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
+      if (useYoutube) { if (currentIdx >= 0) updateNearbySegments(currentIdx); }
+      else            { if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true); }
     }, AUTO_FOLLOW_INACTIVITY_MS);
   }
 
@@ -100,7 +101,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
 
   function scrollActiveIntoView(idx, force) {
-    if (inYtDesktopMode()) return; // active segment is always visible in compact mode
+    if (useYoutube) return; // segments managed by updateNearbySegments
     const el = document.getElementById(`seg-${idx}`);
     if (!el || (!force && !autoFollow)) return;
 
@@ -108,25 +109,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     const elRect        = el.getBoundingClientRect();
 
     if (transcriptEl.scrollHeight > transcriptEl.clientHeight) {
-      if (useYoutube) {
-        // Pin active line to top of compact panel
-        const absoluteTop  = elRect.top - containerRect.top + transcriptEl.scrollTop;
-        const targetScroll = Math.max(0, absoluteTop - 8);
-        if (!force && Math.abs(transcriptEl.scrollTop - targetScroll) < 5) return;
+      // Desktop audio: scroll within the transcript panel
+      const inView = elRect.top >= containerRect.top && elRect.bottom <= containerRect.bottom;
+      if (!force && inView) return;
 
-        setProgrammaticScroll(transcriptEl);
-        transcriptEl.scrollTo({ top: targetScroll, behavior: "smooth" });
-      } else {
-        // Audio mode: center the active line in the panel
-        const inView = elRect.top >= containerRect.top && elRect.bottom <= containerRect.bottom;
-        if (!force && inView) return;
-
-        setProgrammaticScroll(transcriptEl);
-        el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
-      }
+      setProgrammaticScroll(transcriptEl);
+      el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
     } else {
-      // Mobile audio: transcript flows with the page
-      const inView = elRect.top >= 120 && elRect.bottom <= (window.innerHeight - 180);
+      // Mobile audio: transcript flows with the page — measure actual sticky element bounds
+      const audioWrap = document.getElementById("audio-player-wrap");
+      const drawerBar = document.getElementById("drawer-trigger-bar");
+      const topClear  = audioWrap ? audioWrap.getBoundingClientRect().bottom : 120;
+      const botClear  = drawerBar ? window.innerHeight - drawerBar.getBoundingClientRect().top : 120;
+      const inView    = elRect.top >= topClear && elRect.bottom <= (window.innerHeight - botClear);
       if (!force && inView) return;
 
       setProgrammaticScroll(window);
@@ -206,17 +201,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   loadingEl.classList.add("hidden");
   transcriptEl.classList.remove("hidden");
-  if (isYoutube) transcriptEl.classList.add("compact-mode");
+  if (isYoutube) {
+    transcriptEl.classList.add("compact-mode");
+    updateNearbySegments(-1);
+  }
 
   if (!isTouch && window.innerWidth >= 768) {
     const nav = document.querySelector("nav");
     if (nav) document.documentElement.style.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
     document.body.classList.add("ep-desktop");
-    if (isYoutube) {
-      document.body.classList.add("yt-mode");
-      updateNearbySegments(-1);
-    }
+    if (isYoutube) document.body.classList.add("yt-mode");
   }
+
+  updatePillPosition();
 
   // ── Seek helper ───────────────────────────────────────────────────────────
 
@@ -236,8 +233,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     autoFollow = true;
     jumpPill.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
-    if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
+    if (useYoutube) { if (currentIdx >= 0) updateNearbySegments(currentIdx); }
+    else            { if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true); }
   });
+
+  function updatePillPosition() {
+    jumpPill?.classList.toggle("pill-fixed", isTouch && !useYoutube);
+  }
 
   // Transcript click-to-seek
   transcriptEl.addEventListener("click", e => {
@@ -300,10 +302,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       ytPlayer?.seekTo(currentTime, true);
       transcriptEl.classList.add("compact-mode");
       btnTogglePlayer.textContent = "Audio only";
-      if (!isTouch && window.innerWidth >= 768) {
-        document.body.classList.add("yt-mode");
-        updateNearbySegments(currentIdx);
-      }
+      updateNearbySegments(currentIdx);
+      if (!isTouch && window.innerWidth >= 768) document.body.classList.add("yt-mode");
     } else {
       ytPlayerWrap?.classList.add("hidden");
       audioPlayerWrap?.classList.remove("hidden");
@@ -312,10 +312,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       transcriptEl.classList.remove("compact-mode");
       btnTogglePlayer.textContent = "Video";
       document.body.classList.remove("yt-mode");
-      segments.forEach((_, i) => document.getElementById(`seg-${i}`)?.classList.remove("seg-nb-hidden"));
+      segments.forEach((_, i) => {
+        const el = document.getElementById(`seg-${i}`);
+        if (el) el.classList.remove("seg-nb-hidden", "seg-nb-near");
+      });
     }
 
-    if (currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+    updatePillPosition();
+    if (!useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
   });
 
   // ── Translation toggles ───────────────────────────────────────────────────
@@ -331,8 +335,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh);
     transcriptEl.querySelectorAll(".translation-en").forEach(el => el.classList.toggle("hidden", !showEn));
     transcriptEl.querySelectorAll(".translation-zh").forEach(el => el.classList.toggle("hidden", !showZh));
-    // Re-snap after row heights change (wait for reflow)
-    if (useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
   }
 
   document.getElementById("toggle-en")?.addEventListener("click", () => { showEn = !showEn; syncTranslationUI(); });
@@ -353,6 +355,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   fabEnBtn?.addEventListener("click", e => { e.stopPropagation(); showEn = !showEn; syncTranslationUI(); });
   fabZhBtn?.addEventListener("click", e => { e.stopPropagation(); showZh = !showZh; syncTranslationUI(); });
   document.addEventListener("click",  () => { if (fabOpen) closeFab(); });
+
+  // One-time discovery hint for the translation FAB
+  const fabHint = document.getElementById("fab-hint");
+  if (fabHint && !localStorage.getItem("jp-fab-seen")) {
+    localStorage.setItem("jp-fab-seen", "1");
+    fabHint.classList.remove("hidden");
+    setTimeout(() => {
+      fabHint.classList.add("fab-hint-fade");
+      setTimeout(() => fabHint.classList.add("hidden"), 500);
+    }, 3500);
+  }
 
   // ── Side-panel tab switching ──────────────────────────────────────────────
 
@@ -477,14 +490,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  // Show only nearby segments in desktop video mode (±1 around current)
+  // Show only nearby segments in video mode (±2 around current, both mobile and desktop)
   function updateNearbySegments(idx) {
-    const WINDOW = 1;
+    const WINDOW = 2;
     segments.forEach((_, i) => {
       const el = document.getElementById(`seg-${i}`);
       if (!el) return;
-      const show = idx < 0 ? (i < 3) : (Math.abs(i - idx) <= WINDOW);
-      el.classList.toggle("seg-nb-hidden", !show);
+      const dist = idx < 0 ? (i < 3 ? 0 : Infinity) : Math.abs(i - idx);
+      el.classList.toggle("seg-nb-hidden", dist > WINDOW);
+      el.classList.toggle("seg-nb-near",   dist === 1);
     });
   }
 
@@ -496,7 +510,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (el) { el.classList.add("segment-active"); scrollActiveIntoView(idx, false); }
     }
 
-    if (inYtDesktopMode()) updateNearbySegments(idx);
+    if (useYoutube) updateNearbySegments(idx);
 
     // Keep modal in sync when it's open
     document.querySelectorAll(".modal-seg.modal-seg-active")
