@@ -15,13 +15,17 @@ A personal pipeline that turns Japanese YouTube videos, news broadcasts, podcast
 
 A local Flask app at `localhost:5000` lets you browse every processed episode:
 
-- **Audio player** synced to the transcript — click any line to seek
+- **Embedded YouTube player** for YouTube episodes, with a toggle to switch to audio-only; audio-only mode uses the same full-height transcript layout as podcast episodes
+- **Audio player** for podcasts and audio-only mode, synced to the transcript — click any line to seek
+- **Auto-scrolling transcript** — follows playback automatically; scroll away and a **↓ Now playing** pill appears to snap back; resumes auto-follow after 8 s of inactivity
+- **Playback speed control** — 0.5× to 2×, desktop buttons or mobile stepper
 - **Inline highlights** — vocabulary and grammar items underlined in the transcript, colour-coded by level: N5 green → N4 teal → N3 blue → N2 amber → N1 rose → context-specific violet; solid underline for vocab, dashed for grammar
-- **Hover tooltips** — word, reading, level badge, English and Chinese gloss
-- **EN / ZH translation toggles** per segment
+- **Hover / tap tooltips** — word, reading, level badge, English and Chinese gloss
+- **EN / ZH translation toggles** — desktop header buttons; mobile floating caption button (CC)
+- **Compact transcript** for YouTube video mode — shows ±2 segments around the current line with gradient opacity (±1 at 72%, ±2 at 45%); panel is non-scrollable since the window updates automatically
+- **Full transcript modal** (YouTube mode only) — opens the complete transcript with its own **↓ Now playing** pill for navigating while watching
 - **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; JLPT tabs filtered to the episode's chosen level; Ctx tab always shows context-specific terms
 - **Upload page** — paste a URL or drag-and-drop an audio file, choose your JLPT level
-- **Re-translate button** — re-run only the translation step on an existing episode
 
 ## Supported input sources
 

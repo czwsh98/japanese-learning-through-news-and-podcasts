@@ -20,6 +20,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const panelContext      = document.getElementById("panel-context");
   const modalTranscriptEl = document.getElementById("modal-transcript");
   const jumpPill          = document.getElementById("jump-now-pill");
+  const modalJumpPill     = document.getElementById("modal-jump-pill");
+  const transcriptCard    = document.getElementById("transcript-card");
 
   let segments   = [];
   let highlights = [];
@@ -301,7 +303,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       audio?.pause();
       ytPlayer?.seekTo(currentTime, true);
       transcriptEl.classList.add("compact-mode");
+      transcriptEl.classList.remove("flex-1");
+      transcriptEl.style.height = "35vh";
+      transcriptCard?.classList.remove("flex-1");
       btnTogglePlayer.textContent = "Audio only";
+      btnFullTranscript?.classList.remove("hidden");
       updateNearbySegments(currentIdx);
       if (!isTouch && window.innerWidth >= 768) document.body.classList.add("yt-mode");
     } else {
@@ -309,8 +315,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       audioPlayerWrap?.classList.remove("hidden");
       ytPlayer?.pauseVideo();
       if (audio) audio.currentTime = currentTime;
+      if (transcriptModal && !transcriptModal.classList.contains("hidden")) closeModal();
       transcriptEl.classList.remove("compact-mode");
+      transcriptEl.classList.add("flex-1");
+      transcriptEl.style.height = "";
+      transcriptCard?.classList.add("flex-1");
       btnTogglePlayer.textContent = "Video";
+      btnFullTranscript?.classList.add("hidden");
       document.body.classList.remove("yt-mode");
       segments.forEach((_, i) => {
         const el = document.getElementById(`seg-${i}`);
@@ -460,13 +471,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   const modalClose        = document.getElementById("modal-close");
   const btnFullTranscript = document.getElementById("btn-full-transcript");
 
+  let modalProgrammaticScroll = false;
+
+  function scrollModalToActive() {
+    if (!modalTranscriptEl || currentIdx < 0) return;
+    const el = document.getElementById(`modal-seg-${currentIdx}`);
+    if (!el) return;
+    modalProgrammaticScroll = true;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    if ("onscrollend" in modalTranscriptEl) {
+      modalTranscriptEl.addEventListener("scrollend", () => { modalProgrammaticScroll = false; }, { once: true });
+    } else {
+      setTimeout(() => { modalProgrammaticScroll = false; }, 1200);
+    }
+  }
+
   function openModal() {
     transcriptModal.classList.remove("hidden");
     document.body.style.overflow = "hidden";
-    if (currentIdx >= 0) {
-      const el = document.getElementById(`modal-seg-${currentIdx}`);
-      if (el) setTimeout(() => el.scrollIntoView({ block: "center" }), 50);
-    }
+    modalJumpPill?.classList.add("hidden");
+    setTimeout(scrollModalToActive, 50);
   }
   function closeModal() {
     transcriptModal.classList.add("hidden");
@@ -477,6 +501,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   modalClose?.addEventListener("click", closeModal);
   modalBackdrop?.addEventListener("click", closeModal);
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+
+  modalTranscriptEl?.addEventListener("scroll", () => {
+    if (!modalProgrammaticScroll) modalJumpPill?.classList.remove("hidden");
+  }, { passive: true });
+
+  modalJumpPill?.addEventListener("click", () => {
+    modalJumpPill.classList.add("hidden");
+    scrollModalToActive();
+  });
 
   modalTranscriptEl?.addEventListener("click", e => {
     if (isTouch && e.target.closest("[data-hl]")) return;
@@ -520,7 +553,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (modalEl) {
         modalEl.classList.add("modal-seg-active");
         if (transcriptModal && !transcriptModal.classList.contains("hidden")) {
-          modalEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          scrollModalToActive();
         }
       }
     }

@@ -453,6 +453,7 @@
   body.ep-desktop.yt-mode #transcript {
     height: auto !important;
     flex: none !important;
+    overflow: hidden !important;
   }
 }
 
@@ -495,10 +496,10 @@
     padding-bottom: 72px; /* clear the fixed trigger bar */
   }
 
-  /* Video mode: keep the transcript as a fixed-height scroll container */
+  /* Video mode: fixed-height, no scroll (nearby segments managed by JS) */
   #transcript.compact-mode {
     height: 35vh !important;
-    overflow-y: auto !important;
+    overflow: hidden !important;
     padding-bottom: 0 !important;
   }
 
