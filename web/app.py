@@ -49,8 +49,8 @@ log = logging.getLogger(__name__)
 
 app = Flask(
     __name__,
-    static_folder="../frontend/dist/assets",
-    template_folder="../frontend/dist",
+    static_folder="static",
+    template_folder="templates",
 )
 CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB

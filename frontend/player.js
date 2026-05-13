@@ -666,9 +666,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // 3. Update scroll logic targets
     updatePillPosition();
-    // Debug logs START
-    console.log("player.js: repositionTranscript called, updatePillPosition finished. jumpPill classList:", jumpPill?.classList.value);
-    // Debug logs END
   }
 
   // ── Initial Render ────────────────────────────────────────────────────────
@@ -768,9 +765,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
-      // Debug logs START
-      console.log("player.js: Adding 'hidden' to jumpPill after inactivity. Current classList:", jumpPill?.classList.value);
-      // Debug logs END
       jumpPill?.classList.add("hidden");
       if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
     }, AUTO_FOLLOW_INACTIVITY_MS);
@@ -782,9 +776,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   jumpPill?.addEventListener("click", () => {
     autoFollow = true;
-    // Debug logs START
-    console.log("player.js: jumpPill clicked, adding 'hidden'. Current classList:", jumpPill.classList.value);
-    // Debug logs END
     jumpPill.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
