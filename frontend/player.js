@@ -36,6 +36,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     metaObj = await fetchOfflineOrNetwork(`/api/episode/${dateStr}/meta`, 'meta.json');
   } catch (err) {
     console.error("Meta fetch error", err);
+    const headerTitle = document.getElementById("ep-title");
+    if (headerTitle) headerTitle.innerText = "Failed to load episode";
+    const navTitle = document.getElementById("nav-title");
+    if (navTitle) navTitle.innerText = "Error";
+    showToast("Could not load episode data. Check your connection and try again.");
+    return;
   }
 
   const videoId = metaObj.video_id || "";
@@ -203,9 +209,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
 
         const blob = new Blob(chunks, { type: "audio/mpeg" });
-        const base64data = await new Promise(resolve => {
+        const base64data = await new Promise((resolve, reject) => {
           const fr = new FileReader();
-          fr.onloadend = () => resolve(fr.result.split(",")[1]);
+          fr.onloadend = () => {
+            const comma = fr.result.indexOf(",");
+            if (comma === -1) { reject(new Error("FileReader produced unexpected data URL")); return; }
+            resolve(fr.result.slice(comma + 1));
+          };
+          fr.onerror = () => reject(new Error("FileReader failed: " + fr.error));
           fr.readAsDataURL(blob);
         });
 
@@ -295,69 +306,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // ── AnkiConnect Integration ──────────────────────────────────────────────
-
-  const ANKI_URL = "http://localhost:8765";
-
-  async function invokeAnki(action, version, params = {}) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.addEventListener("error", () => reject("Failed to issue request to AnkiConnect."));
-      xhr.addEventListener("load", () => {
-        try {
-          const response = JSON.parse(xhr.responseText);
-          if (response.error) throw response.error;
-          resolve(response.result);
-        } catch (e) {
-          reject(e);
-        }
-      });
-      xhr.open("POST", ANKI_URL);
-      xhr.send(JSON.stringify({ action, version, params }));
-    });
-  }
-
-  async function syncToAnki(card) {
-    const deckName = "Japanese Pipeline";
-    const modelName = "Japanese Pipeline Model";
-
-    // 1. Ensure deck exists
-    await invokeAnki("createDeck", 6, { deck: deckName });
-
-    // 2. Ensure model exists
-    const models = await invokeAnki("modelNames", 6);
-    if (!models.includes(modelName)) {
-      await invokeAnki("createModel", 6, {
-        modelName,
-        inOrderFields: ["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"],
-        css: ".card { font-family: 'Hiragino Sans', 'Meiryo', sans-serif; text-align: center; color: #d1d5db; background-color: #111827; padding: 20px; } .ja { font-size: 32px; color: #fff; margin-bottom: 10px; } .reading { font-size: 18px; color: #9ca3af; } .translation { margin-top: 15px; font-size: 16px; } .en { color: #93c5fd; } .zh { color: #6ee7b7; } .example { margin-top: 15px; font-style: italic; color: #6b7280; font-size: 14px; border-top: 1px solid #374151; padding-top: 10px; }",
-        cardTemplates: [{
-          Name: "Recognition",
-          Front: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div></div>",
-          Back: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div><hr><div class='translation'><div class='en'>{{English}}</div><div class='zh'>{{Chinese}}</div></div><div class='example'>{{Example}}</div></div>"
-        }]
-      });
-    }
-
-    // 3. Add note
-    return await invokeAnki("addNote", 6, {
-      note: {
-        deckName,
-        modelName,
-        fields: {
-          Front: card.front,
-          Reading: card.reading || "",
-          English: card.en || "",
-          Chinese: card.zh || "",
-          Example: card.example || "",
-          Level: card.level || "",
-          Type: card.type || ""
-        },
-        tags: (card.tags || "japanese").split(" "),
-        options: { allowDuplicate: false }
-      }
-    });
-  }
+  // ── Vocab Storage Integration ───────────────────────────────────────────
 
   async function handleAnkiSync(e) {
     const btn = e.target.closest(".btn-anki");
@@ -365,17 +314,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     e.stopPropagation();
 
     const cardData = JSON.parse(btn.dataset.card);
+    cardData.source_episode = dateStr;
     const originalHTML = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
 
     try {
-      await syncToAnki(cardData);
-      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      btn.title = "Synced!";
+      const resp = await fetch(`${API_BASE}/api/vocab`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cardData)
+      });
+      const result = await resp.json();
+      if (result.status === "exists") {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
+        btn.title = "Already saved";
+      } else {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.title = "Saved!";
+      }
     } catch (err) {
       console.error(err);
-      showToast("AnkiConnect error: " + err + "\n\nMake sure Anki is open and AnkiConnect is installed.");
+      showToast("Error saving to vocab: " + err.message);
       btn.innerHTML = originalHTML;
       btn.disabled = false;
     }
