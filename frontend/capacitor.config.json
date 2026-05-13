@@ -2,6 +2,7 @@
   "appId": "com.ziweichen.japanesepipeline",
   "appName": "Mimichan",
   "webDir": "dist",
+  "backgroundColor": "#000000",
   "server": {
     "url": "https://mimichan.up.railway.app",
     "cleartext": false

@@ -126,12 +126,34 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Download logic
   const btnDownload = document.getElementById("btn-download-offline");
+
+  async function isEpisodeDownloaded() {
+    try {
+      await Filesystem.readFile({
+        path: `japanese_pipeline/${dateStr}/audio.mp3`,
+        directory: Directory.Data,
+        encoding: null,
+      });
+      return true;
+    } catch { return false; }
+  }
+
+  function markDownloaded() {
+    if (!btnDownload) return;
+    btnDownload.classList.add("text-green-400");
+    btnDownload.title = "Downloaded for offline use";
+  }
+
+  // Reflect existing download state on page load
+  isEpisodeDownloaded().then(yes => { if (yes) markDownloaded(); });
+
   if (btnDownload) {
     btnDownload.addEventListener("click", async () => {
+      if (btnDownload.classList.contains("text-green-400")) return;
       try {
         btnDownload.classList.add("animate-pulse");
         btnDownload.style.pointerEvents = "none";
-        
+
         const endpoints = [
           { ep: `/api/episode/${dateStr}/meta`, file: 'meta.json' },
           { ep: `/api/episode/${dateStr}/transcript`, file: 'transcript.json' },
@@ -144,10 +166,9 @@ document.addEventListener("DOMContentLoaded", async () => {
             headers: { "Authorization": AUTH_HEADER }
           });
           if (r.ok) {
-            const text = await r.text();
             await Filesystem.writeFile({
               path: `japanese_pipeline/${dateStr}/${item.file}`,
-              data: text,
+              data: await r.text(),
               directory: Directory.Data,
               encoding: "utf8",
               recursive: true
@@ -155,27 +176,44 @@ document.addEventListener("DOMContentLoaded", async () => {
           }
         }
 
+        // Stream audio with progress tracking
         const aRes = await fetch(`${API_BASE}/episode/${dateStr}/audio`, {
           headers: { "Authorization": AUTH_HEADER }
         });
-        const aBlob = await aRes.blob();
+        const contentLength = aRes.headers.get("content-length");
+        const total = contentLength ? parseInt(contentLength) : 0;
+        const reader = aRes.body.getReader();
+        const chunks = [];
+        let received = 0;
 
-        const reader = new FileReader();
-        reader.readAsDataURL(aBlob);
-        reader.onloadend = async () => {
-          const base64data = reader.result.split(',')[1];
-          await Filesystem.writeFile({
-            path: `japanese_pipeline/${dateStr}/audio.mp3`,
-            data: base64data,
-            directory: Directory.Data,
-            recursive: true
-          });
-          
-          btnDownload.classList.remove("animate-pulse");
-          btnDownload.classList.add("text-green-400");
-          btnDownload.style.pointerEvents = "auto";
-          showToast("Episode downloaded for offline use!", "success");
-        };
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          if (total) {
+            btnDownload.title = `Downloading audio… ${Math.round((received / total) * 100)}%`;
+          }
+        }
+
+        const blob = new Blob(chunks, { type: "audio/mpeg" });
+        const base64data = await new Promise(resolve => {
+          const fr = new FileReader();
+          fr.onloadend = () => resolve(fr.result.split(",")[1]);
+          fr.readAsDataURL(blob);
+        });
+
+        await Filesystem.writeFile({
+          path: `japanese_pipeline/${dateStr}/audio.mp3`,
+          data: base64data,
+          directory: Directory.Data,
+          recursive: true
+        });
+
+        btnDownload.classList.remove("animate-pulse");
+        btnDownload.style.pointerEvents = "auto";
+        markDownloaded();
+        showToast("Episode downloaded for offline use!", "success");
       } catch (err) {
         console.error(err);
         showToast("Download failed: " + err.message);

@@ -4,13 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Episode — 日本語 Pipeline</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <style>html,body{background:#000}</style>
   <link href="style.css" rel="stylesheet" />
 </head>
 <body class="bg-black text-gray-200 antialiased font-sans flex flex-col h-screen overflow-hidden selection:bg-purple-900 selection:text-white">
 
   <!-- Top Navigation -->
-  <header class="h-14 box-content border-b border-gray-800 flex items-center px-4 shrink-0 bg-black z-10 relative" style="padding-top: env(safe-area-inset-top);">
+  <header class="h-14 box-content border-b border-gray-800 flex items-center px-4 shrink-0 bg-black z-10 relative" style="padding-top: calc(env(safe-area-inset-top) + 12px);">
     <div class="font-bold text-lg tracking-tight text-white mr-auto"><a href="index.html">日本語</a></div>
     <span class="text-gray-700 mx-2">|</span>
     <span class="text-gray-400 text-sm truncate max-w-xs" id="nav-title">Loading...</span>
