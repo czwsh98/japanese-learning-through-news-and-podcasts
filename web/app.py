@@ -24,6 +24,7 @@ from flask import (
     send_file,
     url_for,
 )
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
@@ -54,8 +55,19 @@ app = Flask(
     static_folder="static",
     template_folder="templates",
 )
+# Trust X-Forwarded-Proto/Host from Railway's edge proxy so url_for generates
+# https:// URLs and redirects work correctly behind TLS termination.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+
+
+@app.before_request
+def _enforce_https():
+    # Only redirect when the request arrived over plain HTTP through the proxy.
+    # X-Forwarded-Proto is set by Railway; absent locally so this is a no-op in dev.
+    if request.headers.get("X-Forwarded-Proto") == "http":
+        return redirect(request.url.replace("http://", "https://", 1), code=301)
 
 # ── Background job tracking ───────────────────────────────────────────────────
 
