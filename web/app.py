@@ -121,12 +121,7 @@ def _pipeline_thread(
                 meta["duration"] = int(whisper_result["duration"])
                 meta["level"] = level
             else:
-                # Captions unavailable — fall back to yt-dlp + Whisper
-                _set_step(job_id, "No captions — downloading audio…", 1)
-                from lib.downloader import download_latest
-                audio_path, meta = download_latest([source_url], ep_dir)
-                if not audio_path:
-                    raise RuntimeError("Could not download audio — check the URL")
+                raise RuntimeError("YouTube captions unavailable for this video")
         elif source_url and audio_path is None:
             from lib.downloader import download_latest
             _set_step(job_id, "Downloading audio…", 1)
