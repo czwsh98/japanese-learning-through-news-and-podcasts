@@ -78,6 +78,7 @@ _jobs_lock = threading.Lock()
 _MAX_JOBS = 50  # prune old jobs when exceeding this count
 
 _vocab_lock = threading.Lock()
+_sources_lock = threading.Lock()
 
 
 def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
@@ -261,11 +262,11 @@ def subscriptions_add():
         return render_template("subscriptions.html", error="Name and URL are required.",
                                sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []))
 
-    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
-    if "sources" not in sources_data: sources_data["sources"] = []
-    sources_data["sources"].append({"name": name, "url": url, "description": desc})
-
-    SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    with _sources_lock:
+        sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+        if "sources" not in sources_data: sources_data["sources"] = []
+        sources_data["sources"].append({"name": name, "url": url, "description": desc})
+        SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
     return redirect(url_for("subscriptions_page"))
 
 
@@ -275,10 +276,10 @@ def subscriptions_delete():
     if not url:
         abort(400)
 
-    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
-    sources_data["sources"] = [s for s in sources_data.get("sources", []) if s["url"] != url]
-
-    SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    with _sources_lock:
+        sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+        sources_data["sources"] = [s for s in sources_data.get("sources", []) if s["url"] != url]
+        SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
     return redirect(url_for("subscriptions_page"))
 
 
@@ -289,7 +290,8 @@ def vocab_page():
 
 @app.route("/api/vocab", methods=["GET"])
 def api_vocab_get():
-    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
+    with _vocab_lock:
+        data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
     items = data.get("items", [])
     
     q = request.args.get("q", "").lower().strip()

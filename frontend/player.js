@@ -313,7 +313,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!btn) return;
     e.stopPropagation();
 
-    const cardData = JSON.parse(btn.dataset.card);
+    let cardData;
+    try { cardData = JSON.parse(btn.dataset.card); } catch { return; }
     cardData.source_episode = dateStr;
     const originalHTML = btn.innerHTML;
     btn.disabled = true;
@@ -1071,7 +1072,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     container.addEventListener("click", e => {
       const span = e.target.closest("[data-hl]");
       if (!span || span === activeSpan) { tooltip.classList.add("hidden"); activeSpan = null; return; }
-      let hl = JSON.parse(span.dataset.hl);
+      let hl; try { hl = JSON.parse(span.dataset.hl); } catch { return; }
       const rect = span.getBoundingClientRect();
       const db = document.getElementById("drawer-trigger-bar");
       const bc = db ? (window.innerHeight - db.getBoundingClientRect().top + 8) : 56;
@@ -1083,7 +1084,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (isTouch) { setupTouchTooltips(transcriptEl); document.addEventListener("scroll", () => tooltip.classList.add("hidden"), { passive: true }); }
   else {
     document.addEventListener("mousemove", e => { if (!tooltip.classList.contains("hidden")) { tooltip.style.left = (e.clientX + 14) + "px"; tooltip.style.top = (e.clientY + 14) + "px"; } });
-    document.addEventListener("mouseover", e => { const span = e.target.closest("[data-hl]"); if (span) showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14); });
+    document.addEventListener("mouseover", e => { const span = e.target.closest("[data-hl]"); if (span) { try { showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14); } catch {} } });
     document.addEventListener("mouseout", e => { if (!e.relatedTarget?.closest("[data-hl]")) tooltip.classList.add("hidden"); });
   }
 
