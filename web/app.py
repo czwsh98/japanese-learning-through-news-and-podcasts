@@ -65,6 +65,8 @@ _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 _MAX_JOBS = 50  # prune old jobs when exceeding this count
 
+_vocab_lock = threading.Lock()
+
 
 def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
     with _jobs_lock:
@@ -295,35 +297,35 @@ def api_vocab_get():
 @app.route("/api/vocab", methods=["POST"])
 def api_vocab_add():
     new_item = request.json
-    if not new_item or "front" not in new_item:
+    if not new_item or not new_item.get("front"):
         return jsonify({"error": "Invalid data"}), 400
-    
-    word = new_item.get("front")
-    
-    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
-    items = data.get("items", [])
-    
-    # Deduplicate by word
-    if any(i.get("word") == word for i in items):
-        return jsonify({"status": "exists"}), 200
-    
-    item = {
-        "id": str(uuid.uuid4())[:8],
-        "word": word,
-        "reading": new_item.get("reading", ""),
-        "en": new_item.get("en", ""),
-        "zh": new_item.get("zh", ""),
-        "example": new_item.get("example", ""),
-        "level": new_item.get("level", ""),
-        "type": new_item.get("type", ""),
-        "source_episode": new_item.get("source_episode", ""),
-        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    }
-    
-    items.append(item)
-    data["items"] = items
-    VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    
+
+    word = new_item["front"]
+
+    with _vocab_lock:
+        data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
+        items = data.get("items", [])
+
+        if any(i.get("word") == word for i in items):
+            return jsonify({"status": "exists"}), 200
+
+        item = {
+            "id": str(uuid.uuid4())[:8],
+            "word": word,
+            "reading": new_item.get("reading", ""),
+            "en": new_item.get("en", ""),
+            "zh": new_item.get("zh", ""),
+            "example": new_item.get("example", ""),
+            "level": new_item.get("level", ""),
+            "type": new_item.get("type", ""),
+            "source_episode": new_item.get("source_episode", ""),
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+        items.append(item)
+        data["items"] = items
+        VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
     return jsonify({"status": "success", "id": item["id"]}), 201
 
 
@@ -331,16 +333,18 @@ def api_vocab_add():
 def api_vocab_delete(item_id):
     if not VOCAB_FILE.exists():
         return jsonify({"error": "Not found"}), 404
-    
-    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
-    items = data.get("items", [])
-    new_items = [i for i in items if i.get("id") != item_id]
-    
-    if len(items) == len(new_items):
-        return jsonify({"error": "Not found"}), 404
-        
-    data["items"] = new_items
-    VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    with _vocab_lock:
+        data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+        new_items = [i for i in items if i.get("id") != item_id]
+
+        if len(items) == len(new_items):
+            return jsonify({"error": "Not found"}), 404
+
+        data["items"] = new_items
+        VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
     return jsonify({"status": "deleted"}), 200
 
 
@@ -356,8 +360,8 @@ def vocab_export():
     import io
     output = io.StringIO()
     writer = csv.writer(output)
-    
-    # Header: Front, Reading, English, Chinese, Example, Level, Type
+
+    writer.writerow(["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"])
     for i in items:
         writer.writerow([
             i.get("word", ""),
