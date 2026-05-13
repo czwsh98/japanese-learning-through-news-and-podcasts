@@ -2,3 +2,12 @@ providers = ["node", "python"]
 
 [phases.setup]
 nixPkgs = ["ffmpeg", "yt-dlp"]
+
+[phases.build]
+cmds = [
+  "cd frontend && npm install && npm run build",
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "gunicorn --bind 0.0.0.0:$PORT web.app:app"
