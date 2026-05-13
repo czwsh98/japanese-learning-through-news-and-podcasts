@@ -515,11 +515,17 @@
 /* ── Mobile (≤ 767px) ────────────────────────────────────────────────────── */
 
 @media (max-width: 767px) {
-  /* Transcript: scrolls inside its card container (mirrors modal behaviour).
-     Height is set dynamically by JS (sizeMobileTranscript). */
+  /* Page-scroll mode: transcript grows to content, page scrolls (not container). */
+  #transcript-card {
+    overflow: visible;
+  }
+  #transcript-card-body {
+    overflow: visible;
+    flex: none; /* size to content, not flex-1 (which collapses to 0 in auto-height parent) */
+  }
   #transcript {
-    max-height: none !important;
-    overflow-y: auto;
+    height: auto !important;
+    overflow-y: visible;
     padding-bottom: 72px; /* clear the fixed trigger bar */
   }
 

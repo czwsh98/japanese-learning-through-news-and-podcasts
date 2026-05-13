@@ -548,12 +548,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  sizeMobileTranscript();
-  window.addEventListener("resize", () => {
-    checkLayout();
-    sizeMobileTranscript();
-  }, { passive: true });
-  window.visualViewport?.addEventListener("resize", sizeMobileTranscript, { passive: true });
+  window.addEventListener("resize", checkLayout, { passive: true });
 
   updatePillPosition();
 
@@ -623,7 +618,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   transcriptEl.addEventListener("scroll", () => { if (!programmaticScroll) markUserNavigation(); }, { passive: true });
-  transcriptEl.addEventListener("touchmove", () => { if (isTouch && !useYoutube) markUserNavigation(); }, { passive: true });
+  window.addEventListener("scroll",    () => { if (!isDesktopLayout && !useYoutube) markUserNavigation(); }, { passive: true });
   window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
 
   jumpPill?.addEventListener("click", () => {
@@ -634,24 +629,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   function updatePillPosition() {
-    // pill-fixed was needed when the transcript scrolled the whole page on mobile.
-    // Now the transcript is a bounded container on all layouts, so the pill sits
-    // position:absolute at the bottom of the card — never needs fixed positioning.
-    jumpPill?.classList.remove("pill-fixed");
-  }
-
-  // Size the transcript to fill the space between the sticky audio player and the
-  // bottom drawer bar, mirroring the max-h approach used by the full-screen modal.
-  function sizeMobileTranscript() {
-    if (isDesktopLayout || isYoutube) return;
-    const cardBody = document.getElementById("transcript-card-body");
-    const drawerBar = document.getElementById("drawer-trigger-bar");
-    if (!cardBody) return;
-    const top = cardBody.getBoundingClientRect().top + window.scrollY;
-    const drawerH = drawerBar ? drawerBar.offsetHeight : 48;
-    // Subtract top offset from document origin, page bottom padding, and drawer bar
-    const available = (window.visualViewport ? window.visualViewport.height : window.innerHeight) - top - drawerH - 8;
-    transcriptEl.style.height = Math.max(200, available) + "px";
+    // Page-scroll mode (mobile, not YouTube video): pill must be fixed so it
+    // stays visible as the page scrolls. Compact/desktop: absolute inside card.
+    const pageScroll = !isDesktopLayout && !useYoutube;
+    jumpPill?.classList.toggle("pill-fixed", pageScroll);
   }
 
   async function handleExplain(e) {
