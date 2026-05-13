@@ -55,47 +55,65 @@ def _write_cards(path: Path, analysis: dict) -> None:
     rows: list[dict] = []
 
     for v in analysis.get("vocab", []):
+        word = v.get("word", "").strip()
+        en   = v.get("en", "").strip()
+        zh   = v.get("zh", "").strip()
+        if not word or not en:
+            log.warning(f"Skipping incomplete vocab card: {v}")
+            continue
         lvl = (v.get("level") or "").strip()
         rows.append({
-            "type": "vocab",
-            "front": v["word"],
-            "back": f"{v['en']} / {v['zh']}",
-            "reading": v.get("reading", ""),
-            "en": v["en"],
-            "zh": v["zh"],
+            "type":     "vocab",
+            "front":    word,
+            "back":     f"{en} / {zh}",
+            "reading":  v.get("reading", ""),
+            "en":       en,
+            "zh":       zh,
             "register": v.get("register", ""),
-            "level": lvl,
-            "example": v.get("example", ""),
-            "tags": " ".join([t for t in ["japanese", "vocab", lvl] if t]).strip(),
+            "level":    lvl,
+            "example":  v.get("example", ""),
+            "tags":     " ".join(t for t in ["japanese", "vocab", lvl] if t),
         })
 
     for g in analysis.get("grammar", []):
+        pattern    = g.get("pattern", "").strip()
+        meaning_en = g.get("meaning_en", "").strip()
+        meaning_zh = g.get("meaning_zh", "").strip()
+        if not pattern or not meaning_en:
+            log.warning(f"Skipping incomplete grammar card: {g}")
+            continue
         lvl = (g.get("level") or "").strip()
         rows.append({
-            "type": "grammar",
-            "front": g["pattern"],
-            "back": f"{g['meaning_en']} / {g['meaning_zh']}",
-            "reading": g.get("reading", ""),
-            "en": g["meaning_en"],
-            "zh": g["meaning_zh"],
+            "type":     "grammar",
+            "front":    pattern,
+            "back":     f"{meaning_en} / {meaning_zh}",
+            "reading":  g.get("reading", ""),
+            "en":       meaning_en,
+            "zh":       meaning_zh,
             "register": "",
-            "level": lvl,
-            "example": g.get("example", ""),
-            "tags": " ".join([t for t in ["japanese", "grammar", lvl] if t]).strip(),
+            "level":    lvl,
+            "example":  g.get("example", ""),
+            "tags":     " ".join(t for t in ["japanese", "grammar", lvl] if t),
         })
 
     for e in analysis.get("expressions", []):
+        expression = e.get("expression", "").strip()
+        en         = e.get("en", "").strip()
+        zh         = e.get("zh", "").strip()
+        if not expression or not en:
+            log.warning(f"Skipping incomplete expression card: {e}")
+            continue
         rows.append({
-            "type": "expression",
-            "front": e["expression"],
-            "back": f"{e['en']} / {e['zh']}",
-            "reading": e.get("reading", ""),
-            "en": e["en"],
-            "zh": e["zh"],
+            "type":     "expression",
+            "front":    expression,
+            "back":     f"{en} / {zh}",
+            "reading":  e.get("reading", ""),
+            "en":       en,
+            "zh":       zh,
             "register": "",
-            "level": "",
-            "example": e.get("context", ""),
-            "tags": "japanese expression",
+            "level":    "",
+            "example":  e.get("context", ""),
+            "tags":     "japanese expression",
         })
 
     with open(path, "w", newline="", encoding="utf-8") as fh:

@@ -183,8 +183,8 @@ def _unique_ep_slug(base: str) -> str:
 
 
 def _make_response_cached(response):
-    """Add immutable cache headers to a response (for static episode data)."""
-    response.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    """Add cache headers to a response for episode data that may be re-generated."""
+    response.headers["Cache-Control"] = "public, max-age=300, must-revalidate"
     return response
 
 
