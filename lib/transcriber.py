@@ -218,6 +218,40 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
         }
 
 
+# ── YouTube transcript API ────────────────────────────────────────────────────
+
+def fetch_youtube_transcript(video_id: str) -> dict | None:
+    """Fetch YouTube captions via transcript API. Returns whisper-format dict or None."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        log.info(f"Fetching YouTube captions for {video_id} ...")
+        snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
+        raw = [
+            {
+                "index": i,
+                "start": round(float(s["start"]), 3),
+                "end":   round(float(s["start"]) + float(s["duration"]), 3),
+                "ja":    s["text"].strip().replace("\n", " "),
+            }
+            for i, s in enumerate(snippets)
+        ]
+        segments = _clean_segments(raw)
+        if not segments:
+            log.warning("YouTube captions empty after cleaning — falling back to Whisper")
+            return None
+        duration = segments[-1]["end"]
+        log.info(f"YouTube captions: {len(segments)} segments, {duration:.1f}s")
+        return {
+            "language": "ja",
+            "duration": duration,
+            "text": " ".join(s["ja"] for s in segments),
+            "segments": segments,
+        }
+    except Exception as exc:
+        log.warning(f"YouTube captions unavailable ({exc}) — falling back to Whisper")
+        return None
+
+
 # ── Local mlx-whisper ─────────────────────────────────────────────────────────
 
 def _transcribe_local(audio_path: Path) -> dict:

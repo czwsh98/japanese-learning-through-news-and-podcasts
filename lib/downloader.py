@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import urllib.parse
@@ -130,6 +131,38 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     size_kb = audio_path.stat().st_size // 1024
     log.info(f"Downloaded {size_kb:,} KB → {audio_path}")
     return audio_path, meta
+
+
+# ── YouTube oEmbed metadata ───────────────────────────────────────────────────
+
+_YT_ID_RE = re.compile(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})')
+
+
+def fetch_youtube_meta_oembed(url: str) -> dict:
+    """Fetch YouTube title/channel/thumbnail via oEmbed (no auth, works from any IP)."""
+    m = _YT_ID_RE.search(url)
+    video_id = m.group(1) if m else ""
+    meta = {
+        "title": url, "channel": "", "upload_date": date.today().strftime("%Y%m%d"),
+        "duration": 0, "url": url, "thumbnail": "", "description": "",
+        "video_id": video_id, "source": "url",
+    }
+    try:
+        resp = _req.get(
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        meta.update({
+            "title":     data.get("title", url),
+            "channel":   data.get("author_name", ""),
+            "thumbnail": data.get("thumbnail_url", ""),
+        })
+    except Exception as exc:
+        log.warning(f"oEmbed fetch failed: {exc}")
+    return meta
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
