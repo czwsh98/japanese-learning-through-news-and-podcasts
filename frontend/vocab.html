@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Vocab Bank — 日本語 Pipeline</title>
+  <style>html,body{background:#000}</style>
+  <link href="style.css" rel="stylesheet" />
+</head>
+<body class="bg-gray-950 text-gray-100 antialiased font-sans flex flex-col h-screen overflow-hidden selection:bg-purple-900 selection:text-white">
+
+  <!-- Top Navigation -->
+  <nav class="border-b border-gray-800 px-6 flex items-center gap-4 shrink-0 bg-gray-950 z-40 relative" style="padding-top: calc(env(safe-area-inset-top) + 12px); padding-bottom: 12px;">
+    <a href="index.html" class="font-bold text-white tracking-tight">Mimichan</a>
+    <span class="text-gray-700">|</span>
+    <a href="index.html" class="text-gray-400 hover:text-white text-sm transition-colors">Episodes</a>
+    <a href="vocab.html" class="text-white text-sm font-medium">Vocab</a>
+    <a href="upload.html" class="text-gray-400 hover:text-white text-sm transition-colors">Upload</a>
+  </nav>
+
+  <!-- Main Content -->
+  <main class="flex-1 overflow-y-auto p-4" id="app-content">
+    <div class="max-w-2xl mx-auto">
+
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-5">
+        <div>
+          <h1 class="text-2xl font-bold">Vocab Bank</h1>
+          <p class="text-sm text-gray-500 mt-0.5" id="vocab-count">Loading…</p>
+        </div>
+        <a id="export-link" href="#" class="inline-flex items-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export CSV
+        </a>
+      </div>
+
+      <!-- Search & Filters -->
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-3 mb-4 flex flex-col gap-3">
+        <div class="relative">
+          <input type="text" id="search-input" placeholder="Search word, reading, or meaning…"
+                 class="w-full bg-gray-950 border border-gray-800 rounded-lg pl-9 pr-4 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors">
+          <svg class="absolute left-3 top-2.5 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </div>
+        <div class="flex gap-2">
+          <select id="level-filter" class="flex-1 bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors text-gray-300">
+            <option value="all">All Levels</option>
+            <option value="n5">N5</option>
+            <option value="n4">N4</option>
+            <option value="n3">N3</option>
+            <option value="n2">N2</option>
+            <option value="n1">N1</option>
+            <option value="context-specific">Context</option>
+          </select>
+          <select id="type-filter" class="flex-1 bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors text-gray-300">
+            <option value="all">All Types</option>
+            <option value="vocab">Vocab</option>
+            <option value="grammar">Grammar</option>
+            <option value="expression">Phrase</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Card list -->
+      <div id="vocab-list" class="space-y-3">
+        <div class="py-20 text-center text-gray-600 animate-pulse">Loading vocabulary…</div>
+      </div>
+
+      <!-- Empty state -->
+      <div id="empty-state" class="hidden py-24 text-center border border-dashed border-gray-800 rounded-2xl">
+        <div class="text-5xl mb-4">📚</div>
+        <p class="text-lg font-medium mb-2">Your bank is empty</p>
+        <p class="text-sm text-gray-500 mb-6">Save words from any episode player to see them here.</p>
+        <a href="index.html" class="text-blue-400 hover:text-blue-300 text-sm font-medium">Browse Episodes →</a>
+      </div>
+
+    </div>
+  </main>
+
+  <script type="module" src="vocab.js"></script>
+</body>
+</html>
