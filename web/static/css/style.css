@@ -82,12 +82,12 @@
   grid-template-columns: 52px 1fr;
   column-gap: 6px;
   align-items: start;
-  padding: 6px 10px 6px 10px;
+  padding: 12px 16px;
   border-left: 3px solid transparent;
   border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.12s, border-color 0.12s;
-  margin-bottom: 1px;
+  margin-bottom: 8px;
 }
 .segment:hover { background-color: #1a2332; }
 
@@ -113,7 +113,7 @@
 
 .segment-ja {
   font-size: 16px;
-  line-height: 1.8;
+  line-height: 1.75;
 }
 
 .translation-en,
@@ -125,16 +125,16 @@
   gap: 5px;
 }
 .translation-en { color: #60a5fa; }
-.translation-zh { color: #34d399; }
+.translation-zh { color: #34d399; font-weight: 300; opacity: 0.75; }
 
 .trans-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: #4b5563;
-  background: #1f2937;
-  border-radius: 3px;
-  padding: 1px 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #6b7280;
+  background: rgba(255,255,255,0.1);
+  border-radius: 999px;
+  padding: 2px 6px;
   flex-shrink: 0;
   user-select: none;
 }
@@ -270,6 +270,21 @@
   line-height: 1.5;
 }
 .card-register    { font-size: 10px; color: #4b5563; margin-top: 3px; }
+
+/* ── Stats chips ─────────────────────────────────────────────────────────── */
+
+.stat-chip {
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  background: rgba(255,255,255,0.08);
+  color: #9ca3af;
+  white-space: nowrap;
+}
+.stat-chip-ctx {
+  color: #a78bfa;
+  background: rgba(167,139,250,0.08);
+}
 
 /* ── Empty state ─────────────────────────────────────────────────────────── */
 .panel-empty {
@@ -517,10 +532,18 @@
 
   .segment {
     grid-template-columns: 1fr;
-    padding: 10px 6px;
+    padding: 12px 10px;
   }
   .segment-time { display: none; }
   .segment-ja   { font-size: 18px; }
+
+  /* Episode title: clamp to 2 lines on mobile */
+  #ep-title.ep-title-clamped {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
 
   /* Side panel becomes a slide-up bottom drawer */
   #side-panel {

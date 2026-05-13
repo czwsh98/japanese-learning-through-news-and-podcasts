@@ -482,13 +482,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   const ctxCount    = ctxVocab.length + ctxGrammar.length;
   if (vocabCount + grammarCount + exprCount > 0) {
     const statsEl = document.createElement("div");
-    statsEl.className = "text-xs text-gray-500 px-3 py-1.5 border-b border-gray-800 flex items-center gap-3 flex-wrap";
-    const parts = [];
-    if (vocabCount)  parts.push(`<span class="text-gray-400">${vocabCount}</span> vocab`);
-    if (grammarCount) parts.push(`<span class="text-gray-400">${grammarCount}</span> grammar`);
-    if (exprCount)   parts.push(`<span class="text-gray-400">${exprCount}</span> expressions`);
-    if (ctxCount)    parts.push(`<span style="color:#a78bfa">${ctxCount}</span> context-specific`);
-    statsEl.innerHTML = parts.join(' <span class="text-gray-700">·</span> ');
+    statsEl.className = "px-3 py-2 border-b border-gray-800 flex items-center gap-2 flex-wrap";
+    const chips = [];
+    if (vocabCount)   chips.push(`<span class="stat-chip"><span class="text-gray-200 font-medium">${vocabCount}</span> vocab</span>`);
+    if (grammarCount) chips.push(`<span class="stat-chip"><span class="text-gray-200 font-medium">${grammarCount}</span> grammar</span>`);
+    if (exprCount)    chips.push(`<span class="stat-chip"><span class="text-gray-200 font-medium">${exprCount}</span> phrases</span>`);
+    if (ctxCount)     chips.push(`<span class="stat-chip stat-chip-ctx"><span class="font-medium">${ctxCount}</span> ctx</span>`);
+    statsEl.innerHTML = chips.join("");
     const panelHeader = transcriptCard?.querySelector(".border-b.border-gray-800");
     if (panelHeader) panelHeader.after(statsEl);
   }
