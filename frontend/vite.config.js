@@ -14,6 +14,7 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         episode: resolve(__dirname, 'episode.html'),
         upload: resolve(__dirname, 'upload.html'),
+        vocab: resolve(__dirname, 'vocab.html'),
       },
     },
   },
