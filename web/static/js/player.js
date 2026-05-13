@@ -651,7 +651,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       handleExplain(e);
       return;
     }
-    if (isTouch && e.target.closest("[data-hl]")) return;
+    if (e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
     if (seg) seekTo(parseFloat(seg.dataset.start));
   });
@@ -853,7 +853,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       handleExplain(e);
       return;
     }
-    if (isTouch && e.target.closest("[data-hl]")) return;
+    if (e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
     if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); document.body.style.overflow = ""; }
   });
