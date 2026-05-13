@@ -31,7 +31,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   let ytPlayer   = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-  const isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
+  let isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
+  let modalProgrammaticScroll = false;
+  let modalProgrammaticScrollTimer = null;
 
   // ── Layout initialization ─────────────────────────────────────────────────
   // Tabbed sidebar with transcript tab only applies to desktop/iPad YouTube.
@@ -321,11 +323,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     const el = document.getElementById(`modal-seg-${currentIdx}`);
     if (!el) return;
     modalProgrammaticScroll = true;
+    if (modalProgrammaticScrollTimer) clearTimeout(modalProgrammaticScrollTimer);
     el.scrollIntoView({ behavior: "smooth", block: "center" });
-    if ("onscrollend" in modalTranscriptEl) {
+    if ("onscrollend" in window) {
       modalTranscriptEl.addEventListener("scrollend", () => { modalProgrammaticScroll = false; }, { once: true });
     } else {
-      setTimeout(() => { modalProgrammaticScroll = false; }, 1200);
+      const onScroll = () => {
+        clearTimeout(modalProgrammaticScrollTimer);
+        modalProgrammaticScrollTimer = setTimeout(() => {
+          modalProgrammaticScroll = false;
+          modalTranscriptEl.removeEventListener("scroll", onScroll);
+        }, 100);
+      };
+      modalTranscriptEl.addEventListener("scroll", onScroll, { passive: true });
+      modalProgrammaticScrollTimer = setTimeout(() => {
+        modalProgrammaticScroll = false;
+        modalTranscriptEl.removeEventListener("scroll", onScroll);
+      }, 300);
     }
   }
 
@@ -460,9 +474,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     
     // 3. Update scroll logic targets
     updatePillPosition();
-    // Debug logs START
-    console.log("player.js: repositionTranscript called, updatePillPosition finished. jumpPill classList:", jumpPill?.classList.value);
-    // Debug logs END
   }
 
   // ── Initial Render ────────────────────────────────────────────────────────
@@ -508,8 +519,41 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (isYoutube) document.body.classList.add("yt-mode");
   }
 
+  function checkLayout() {
+    const newIsDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
+    if (newIsDesktopLayout !== isDesktopLayout) {
+      isDesktopLayout = newIsDesktopLayout;
+      repositionTranscript();
+      if (isYoutube) {
+        if (!isDesktopLayout && useYoutube) {
+          transcriptEl.classList.add("compact-mode");
+          transcriptEl.style.height = "35vh";
+          updateNearbySegments(currentIdx);
+        } else {
+          transcriptEl.classList.remove("compact-mode");
+          transcriptEl.style.height = "";
+          segments.forEach((_, i) => {
+            const el = document.getElementById(`seg-${i}`);
+            if (el) el.classList.remove("seg-nb-hidden", "seg-nb-near");
+          });
+        }
+      }
+      if (isDesktopLayout) {
+        document.body.classList.add("ep-desktop");
+        if (useYoutube) document.body.classList.add("yt-mode");
+      } else {
+        document.body.classList.remove("ep-desktop");
+        document.body.classList.remove("yt-mode");
+      }
+    }
+  }
+
   sizeMobileTranscript();
-  window.addEventListener("resize", sizeMobileTranscript, { passive: true });
+  window.addEventListener("resize", () => {
+    checkLayout();
+    sizeMobileTranscript();
+  }, { passive: true });
+  window.visualViewport?.addEventListener("resize", sizeMobileTranscript, { passive: true });
 
   updatePillPosition();
 
@@ -548,10 +592,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   function setProgrammaticScroll(scrollTarget) {
     programmaticScroll = true;
     if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer);
-    if ("onscrollend" in scrollTarget) {
+    if ("onscrollend" in window) {
       scrollTarget.addEventListener("scrollend", () => { programmaticScroll = false; }, { once: true });
     } else {
-      programmaticScrollTimer = setTimeout(() => { programmaticScroll = false; }, 1200);
+      const onScroll = () => {
+        clearTimeout(programmaticScrollTimer);
+        programmaticScrollTimer = setTimeout(() => {
+          programmaticScroll = false;
+          scrollTarget.removeEventListener("scroll", onScroll);
+        }, 100);
+      };
+      scrollTarget.addEventListener("scroll", onScroll, { passive: true });
+      programmaticScrollTimer = setTimeout(() => {
+        programmaticScroll = false;
+        scrollTarget.removeEventListener("scroll", onScroll);
+      }, 300);
     }
   }
 
@@ -562,23 +617,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     autoFollowTimer = setTimeout(() => {
       autoFollow = true;
-      // Debug logs START
-      console.log("player.js: Adding 'hidden' to jumpPill after inactivity. Current classList:", jumpPill?.classList.value);
-      // Debug logs END
       jumpPill?.classList.add("hidden");
       if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
     }, AUTO_FOLLOW_INACTIVITY_MS);
   }
 
   transcriptEl.addEventListener("scroll", () => { if (!programmaticScroll) markUserNavigation(); }, { passive: true });
-  window.addEventListener("touchmove", () => { if (isTouch && !useYoutube) markUserNavigation(); }, { passive: true });
+  transcriptEl.addEventListener("touchmove", () => { if (isTouch && !useYoutube) markUserNavigation(); }, { passive: true });
   window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
 
   jumpPill?.addEventListener("click", () => {
     autoFollow = true;
-    // Debug logs START
-    console.log("player.js: jumpPill clicked, adding 'hidden'. Current classList:", jumpPill.classList.value);
-    // Debug logs END
     jumpPill.classList.add("hidden");
     if (autoFollowTimer) clearTimeout(autoFollowTimer);
     if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
@@ -601,7 +650,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const top = cardBody.getBoundingClientRect().top + window.scrollY;
     const drawerH = drawerBar ? drawerBar.offsetHeight : 48;
     // Subtract top offset from document origin, page bottom padding, and drawer bar
-    const available = document.documentElement.clientHeight - top - drawerH - 8;
+    const available = (window.visualViewport ? window.visualViewport.height : window.innerHeight) - top - drawerH - 8;
     transcriptEl.style.height = Math.max(200, available) + "px";
   }
 
@@ -841,11 +890,26 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const transcriptModal = document.getElementById("transcript-modal");
   const modalClose = document.getElementById("modal-close");
-  const btnFullTranscript = document.getElementById("btn-full-transcript");
-  let modalProgrammaticScroll = false;
-  btnFullTranscript?.addEventListener("click", () => { transcriptModal.classList.remove("hidden"); document.body.style.overflow = "hidden"; setTimeout(scrollModalToActive, 50); });
-  modalClose?.addEventListener("click", () => { transcriptModal.classList.add("hidden"); document.body.style.overflow = ""; });
-  document.addEventListener("keydown", e => { if (e.key === "Escape") { transcriptModal?.classList.add("hidden"); document.body.style.overflow = ""; } });
+  const btnFullTranscriptNodes = document.querySelectorAll(".btn-full-transcript");
+  let bodyScrollPos = 0;
+  
+  function lockBodyScroll() {
+    bodyScrollPos = window.scrollY;
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${bodyScrollPos}px`;
+    document.body.style.width = "100%";
+  }
+  
+  function unlockBodyScroll() {
+    document.body.style.position = "";
+    document.body.style.top = "";
+    document.body.style.width = "";
+    window.scrollTo(0, bodyScrollPos);
+  }
+
+  btnFullTranscriptNodes.forEach(btn => btn.addEventListener("click", () => { transcriptModal.classList.remove("hidden"); lockBodyScroll(); setTimeout(scrollModalToActive, 50); }));
+  modalClose?.addEventListener("click", () => { transcriptModal.classList.add("hidden"); unlockBodyScroll(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !transcriptModal?.classList.contains("hidden")) { transcriptModal?.classList.add("hidden"); unlockBodyScroll(); } });
   modalTranscriptEl?.addEventListener("scroll", () => { if (!modalProgrammaticScroll) modalJumpPill?.classList.remove("hidden"); }, { passive: true });
   modalJumpPill?.addEventListener("click", () => { modalJumpPill.classList.add("hidden"); scrollModalToActive(); });
   modalTranscriptEl?.addEventListener("click", e => {
@@ -855,7 +919,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (e.target.closest("[data-hl]")) return;
     const seg = e.target.closest("[data-start]");
-    if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); document.body.style.overflow = ""; }
+    if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); unlockBodyScroll(); }
   });
   if (isTouch && modalTranscriptEl) setupTouchTooltips(modalTranscriptEl);
 

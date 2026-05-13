@@ -1,8 +1,8 @@
 import { Filesystem, Directory } from '@capacitor/filesystem';
 
-const API_BASE = "http://192.168.1.253:5000";
+const API_BASE = "https://mimichan.up.railway.app";
 const AUTH_HEADER = "";
-const API_BASE_MEDIA = "http://192.168.1.253:5000";
+const API_BASE_MEDIA = "https://mimichan.up.railway.app";
 
 document.addEventListener("DOMContentLoaded", async () => {
   const urlParams = new URLSearchParams(window.location.search);

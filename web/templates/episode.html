@@ -127,7 +127,7 @@
       <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
         <span class="text-xs text-gray-500">Transcript</span>
         {% if is_youtube %}
-        <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
+        <button class="btn-full-transcript text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
           Full Screen ↗
         </button>
         {% endif %}
@@ -188,7 +188,7 @@
         {% endif %}
       </div>
       {% if is_youtube %}
-      <button id="btn-full-transcript" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Full Screen ↗</button>
+      <button class="btn-full-transcript text-[10px] text-gray-500 hover:text-gray-300 transition-colors">Full Screen ↗</button>
       {% endif %}
     </div>
   </div>
@@ -202,7 +202,7 @@
 
 <!-- Mobile floating translation FAB -->
 <span id="fab-hint" class="fab-hint hidden">Translations</span>
-<div id="fab-translate" class="fixed z-50 md:hidden" style="bottom: 60px; right: 16px;">
+<div id="fab-translate" class="fixed z-50 md:hidden" style="bottom: calc(60px + env(safe-area-inset-bottom, 0px)); right: 16px;">
   <div id="fab-tray" class="fab-tray-hidden flex flex-col items-end gap-2 mb-2">
     <button id="fab-zh-btn" class="fab-pill">ZH</button>
     <button id="fab-en-btn" class="fab-pill">EN</button>
@@ -219,7 +219,7 @@
 </div>
 
 <!-- Mobile drawer trigger bar -->
-<div id="drawer-trigger-bar" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-gray-950 border-t border-gray-800 px-4 py-2.5 flex items-center">
+<div id="drawer-trigger-bar" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-gray-950 border-t border-gray-800 px-4 flex items-center" style="padding-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));">
   <button id="btn-open-drawer" class="flex-1 flex items-center justify-center gap-2 text-sm text-gray-300 font-medium">
     <span id="drawer-label">Vocab · Grammar · Phrases</span>
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"

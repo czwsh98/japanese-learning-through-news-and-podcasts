@@ -3,6 +3,7 @@
   "appName": "Mimichan",
   "webDir": "dist",
   "server": {
-    "cleartext": true
+    "url": "https://mimichan.up.railway.app",
+    "cleartext": false
   }
 }
