@@ -9,7 +9,8 @@ A personal pipeline that turns Japanese YouTube videos, news broadcasts, podcast
 3. **Translates** each segment into English and Simplified Chinese via **Google Gemini Flash**
 4. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
 5. **Writes** per-episode flat files: `transcript.json`, `subtitles.vtt`, `analysis.json`, `cards.csv`, `meta.json`
-6. **Exports** Anki-ready flashcards as `cards.csv` (download/import into Anki)
+6. **Saves** words and phrases you care about to a persistent **Vocab Bank** across all episodes
+7. **Exports** your saved vocab bank or per-episode flashcards as CSV for Anki import
 
 ## Web UI
 
@@ -24,8 +25,10 @@ A local Flask app at `localhost:5000` lets you browse every processed episode:
 - **EN / ZH translation toggles** — desktop header buttons; mobile floating caption button (CC)
 - **Compact transcript** for YouTube video mode — shows ±2 segments around the current line with gradient opacity (±1 at 72%, ±2 at 45%); panel is non-scrollable since the window updates automatically
 - **Full transcript modal** (YouTube mode only) — opens the complete transcript with its own **↓ Now playing** pill for navigating while watching
-- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; JLPT tabs filtered to the episode's chosen level; Ctx tab always shows context-specific terms
+- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; JLPT tabs filtered to the episode's chosen level; Ctx tab always shows context-specific terms; save any card to the Vocab Bank with one click
+- **Vocab Bank** (`/vocab`) — browse, search, filter, and delete words saved across all episodes; export the full bank as a CSV for Anki; already-saved words show a greyed-out button in the episode player
 - **Upload page** — paste a URL or drag-and-drop an audio file, choose your JLPT level
+- **Subscriptions page** — manage the list of sources used by the scheduled CLI pipeline
 
 ## Supported input sources
 
@@ -104,6 +107,7 @@ OPENAI_ANALYSIS_MODEL=gpt-4o-mini      # default analysis model
 USE_LOCAL_WHISPER=1                    # set to use local mlx-whisper (Apple Silicon)
 MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
 EPISODES_DIR=episodes
+VOCAB_FILE=vocab.json          # path to the persistent vocab bank (created automatically)
 ```
 
 Edit `sources.json` to point to your preferred sources for the scheduled CLI pipeline:
@@ -155,16 +159,22 @@ launchctl load ~/Library/LaunchAgents/com.japanese.pipeline.plist
 ```
 ├── pipeline.py          # CLI orchestrator
 ├── sources.json         # Sources for the scheduled CLI pipeline
+├── vocab.json           # Persistent vocab bank (created automatically on first save)
 ├── lib/
 │   ├── downloader.py    # yt-dlp + Apple Podcasts + direct audio download
 │   ├── transcriber.py   # Whisper (OpenAI API or local mlx-whisper)
 │   ├── translator.py    # Gemini Flash — EN + ZH translation
 │   ├── analyzer.py      # gpt-4o-mini — JLPT vocabulary & grammar analysis
-│   ├── writer.py        # Writes flat files per episode
-│   └── (no AnkiConnect) # Use cards.csv import instead
+│   └── writer.py        # Writes flat files per episode
 ├── web/
-│   ├── app.py           # Flask web UI
-│   ├── templates/       # Jinja2 HTML templates
+│   ├── app.py           # Flask web UI + vocab bank API
+│   ├── templates/
+│   │   ├── base.html
+│   │   ├── index.html       # Episode browser
+│   │   ├── episode.html     # Player + transcript + side panel
+│   │   ├── vocab.html       # Vocab Bank page
+│   │   ├── upload.html
+│   │   └── subscriptions.html
 │   └── static/          # CSS, JS, player
 └── episodes/            # Per-episode output (gitignored)
     └── 2026-05-04/
@@ -185,6 +195,20 @@ launchctl load ~/Library/LaunchAgents/com.japanese.pipeline.plist
 | `subtitles.vtt` | WebVTT subtitle file for the audio player |
 | `analysis.json` | Highlights, vocab flashcards, grammar patterns, expressions |
 | `cards.csv` | Anki-importable CSV (type / front / back / reading / en / zh / level / example) |
+
+### Vocab Bank (`vocab.json`)
+
+A single JSON file at the project root that accumulates words saved across all episodes. Items are stored with full metadata (word, reading, EN/ZH gloss, example sentence, JLPT level, type, source episode, timestamp) and deduplicated by surface form.
+
+**Web API:**
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/vocab` | GET | Vocab Bank page |
+| `/api/vocab` | GET | List all items; filter by `?q=`, `?level=`, `?type=` |
+| `/api/vocab` | POST | Save an item from the episode player |
+| `/api/vocab/<id>` | DELETE | Remove an item |
+| `/vocab/export.csv` | GET | Download full bank as Anki-importable CSV |
 
 ## API usage and cost
 
