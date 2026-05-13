@@ -117,6 +117,9 @@
         stateProcessing.classList.add("hidden");
         stateError.classList.remove("hidden");
         errorMsg.textContent = data.error || "An unknown error occurred.";
+      } else {
+        // Unknown status (e.g. job not found on this worker) — keep retrying
+        setTimeout(poll, INTERVAL);
       }
     } catch (e) {
       // Network hiccup — retry
