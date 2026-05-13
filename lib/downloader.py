@@ -91,12 +91,13 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     log.info(f"yt-dlp cookies: {'loaded' if cookies else 'not set'}")
 
     cookie_args = ["--cookies", cookies] if cookies else []
+    yt_args = ["--extractor-args", "youtube:player_client=ios,web", *cookie_args]
 
     # Fetch metadata
     info_cmd = [
         "yt-dlp", "--playlist-items", "1",
         "--dump-json", "--no-warnings", "--quiet",
-        *cookie_args,
+        *yt_args,
         url,
     ]
     result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=min(60, _TIMEOUT))
@@ -112,10 +113,10 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
 
     dl_cmd = [
         "yt-dlp", "--playlist-items", "1",
-        "-x", "--audio-format", "mp3", "--audio-quality", "192",
+        "-x", "--audio-format", "mp3", "--audio-quality", "0",
         "--no-warnings", "--quiet",
         "-o", str(episode_dir / "audio.%(ext)s"),
-        *cookie_args,
+        *yt_args,
         url,
     ]
     log.info(f"Downloading {meta['title']!r} from {url}")
