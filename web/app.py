@@ -195,7 +195,7 @@ def index():
     episodes = []
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):
-            if not ep.is_dir():
+            if not ep.is_dir() or not _SLUG_RE.match(ep.name):
                 continue
             meta_file = ep / "meta.json"
             meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
@@ -543,14 +543,15 @@ def api_episodes():
     out = []
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):
-            if ep.is_dir():
-                meta_file = ep / "meta.json"
-                meta = (
-                    json.loads(meta_file.read_text(encoding="utf-8"))
-                    if meta_file.exists()
-                    else {}
-                )
-                out.append({"date": ep.name, "meta": meta})
+            if not ep.is_dir() or not _SLUG_RE.match(ep.name):
+                continue
+            meta_file = ep / "meta.json"
+            meta = (
+                json.loads(meta_file.read_text(encoding="utf-8"))
+                if meta_file.exists()
+                else {}
+            )
+            out.append({"date": ep.name, "meta": meta})
     return jsonify(out)
 
 
