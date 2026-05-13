@@ -37,6 +37,8 @@ EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
 _sources_env = os.environ.get("SOURCES_FILE", "")
 SOURCES_FILE = (Path(_sources_env) if Path(_sources_env).is_absolute()
                 else _PROJECT_ROOT / (_sources_env or "sources.json"))
+VOCAB_FILE = (Path(os.environ.get("VOCAB_FILE", "")) if os.environ.get("VOCAB_FILE")
+              else _PROJECT_ROOT / "vocab.json")
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
@@ -264,6 +266,120 @@ def subscriptions_delete():
 
     SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
     return redirect(url_for("subscriptions_page"))
+
+
+@app.route("/vocab")
+def vocab_page():
+    return render_template("vocab.html")
+
+
+@app.route("/api/vocab", methods=["GET"])
+def api_vocab_get():
+    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
+    items = data.get("items", [])
+    
+    q = request.args.get("q", "").lower().strip()
+    level = request.args.get("level", "").lower().strip()
+    vtype = request.args.get("type", "").lower().strip()
+    
+    if q:
+        items = [i for i in items if q in i.get("word", "").lower() or q in i.get("reading", "").lower() or q in i.get("en", "").lower() or q in i.get("zh", "").lower()]
+    if level and level != "all":
+        items = [i for i in items if i.get("level", "").lower() == level]
+    if vtype and vtype != "all":
+        items = [i for i in items if i.get("type", "").lower() == vtype]
+        
+    return jsonify(items)
+
+
+@app.route("/api/vocab", methods=["POST"])
+def api_vocab_add():
+    new_item = request.json
+    if not new_item or "front" not in new_item:
+        return jsonify({"error": "Invalid data"}), 400
+    
+    word = new_item.get("front")
+    
+    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
+    items = data.get("items", [])
+    
+    # Deduplicate by word
+    if any(i.get("word") == word for i in items):
+        return jsonify({"status": "exists"}), 200
+    
+    item = {
+        "id": str(uuid.uuid4())[:8],
+        "word": word,
+        "reading": new_item.get("reading", ""),
+        "en": new_item.get("en", ""),
+        "zh": new_item.get("zh", ""),
+        "example": new_item.get("example", ""),
+        "level": new_item.get("level", ""),
+        "type": new_item.get("type", ""),
+        "source_episode": new_item.get("source_episode", ""),
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    }
+    
+    items.append(item)
+    data["items"] = items
+    VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    
+    return jsonify({"status": "success", "id": item["id"]}), 201
+
+
+@app.route("/api/vocab/<item_id>", methods=["DELETE"])
+def api_vocab_delete(item_id):
+    if not VOCAB_FILE.exists():
+        return jsonify({"error": "Not found"}), 404
+    
+    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
+    items = data.get("items", [])
+    new_items = [i for i in items if i.get("id") != item_id]
+    
+    if len(items) == len(new_items):
+        return jsonify({"error": "Not found"}), 404
+        
+    data["items"] = new_items
+    VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return jsonify({"status": "deleted"}), 200
+
+
+@app.route("/vocab/export.csv")
+def vocab_export():
+    if not VOCAB_FILE.exists():
+        return "No vocab found", 404
+        
+    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
+    items = data.get("items", [])
+    
+    import csv
+    import io
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Header: Front, Reading, English, Chinese, Example, Level, Type
+    for i in items:
+        writer.writerow([
+            i.get("word", ""),
+            i.get("reading", ""),
+            i.get("en", ""),
+            i.get("zh", ""),
+            i.get("example", ""),
+            i.get("level", ""),
+            i.get("type", "")
+        ])
+        
+    mem = io.BytesIO()
+    mem.write(output.getvalue().encode('utf-8'))
+    mem.seek(0)
+    output.close()
+    
+    return send_file(
+        mem,
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=f"vocab-export-{time.strftime('%Y%m%d')}.csv"
+    )
 
 
 @app.route("/upload", methods=["GET"])
