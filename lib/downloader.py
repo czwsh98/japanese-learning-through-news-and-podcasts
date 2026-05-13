@@ -26,6 +26,12 @@ log = logging.getLogger(__name__)
 _TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
 _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm"}
 
+# ── VPS download proxy ────────────────────────────────────────────────────────
+
+_VPS_URL   = os.environ.get("VPS_DOWNLOAD_URL", "").rstrip("/")
+_VPS_TOKEN = os.environ.get("VPS_DOWNLOAD_TOKEN", "")
+_YT_RE     = re.compile(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})')
+
 # ── YouTube cookies ───────────────────────────────────────────────────────────
 
 _cookies_file: str | None = None
@@ -79,6 +85,36 @@ def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Pat
 
     size_kb = audio_path.stat().st_size // 1024
     log.info(f"Downloaded {size_kb:,} KB → {audio_path}")
+    return audio_path, meta
+
+
+# ── VPS proxy download (YouTube) ─────────────────────────────────────────────
+
+def _download_vps(url: str, episode_dir: Path) -> tuple[Path, dict]:
+    """Stream YouTube audio from the Japan VPS proxy, then fetch meta via oEmbed."""
+    audio_path = episode_dir / "audio.mp3"
+
+    meta = fetch_youtube_meta_oembed(url)
+
+    if audio_path.exists():
+        log.info("Audio already present, skipping VPS download")
+        return audio_path, meta
+
+    log.info(f"Downloading via VPS proxy: {url[:80]}…")
+    with _req.post(
+        f"{_VPS_URL}/download",
+        json={"url": url},
+        headers={"X-Token": _VPS_TOKEN},
+        timeout=_TIMEOUT,
+        stream=True,
+    ) as resp:
+        resp.raise_for_status()
+        with open(audio_path, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=65_536):
+                fh.write(chunk)
+
+    size_kb = audio_path.stat().st_size // 1024
+    log.info(f"VPS download complete: {size_kb:,} KB → {audio_path}")
     return audio_path, meta
 
 
@@ -196,7 +232,11 @@ def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, 
                 "video_id": ""}
         return _download_direct(url, episode_dir, meta)
 
-    # ── yt-dlp (YouTube, RSS feeds, SoundCloud, NHK, …) ─────────────────────
+    # ── YouTube: use VPS proxy if configured ─────────────────────────────────
+    if _VPS_URL and _VPS_TOKEN and _YT_RE.search(url):
+        return _download_vps(url, episode_dir)
+
+    # ── yt-dlp (RSS feeds, SoundCloud, NHK, …) ──────────────────────────────
     return _download_ytdlp(url, episode_dir)
 
 

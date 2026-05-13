@@ -31,15 +31,11 @@ for _var in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
         print(f"ERROR: {_var} not set. Copy .env.example → .env and fill in your keys.")
         sys.exit(1)
 
-import re
-
 from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
-from lib.downloader import download_latest, fetch_youtube_meta_oembed
-from lib.transcriber import transcribe_audio, fetch_youtube_transcript
+from lib.downloader import download_latest
+from lib.transcriber import transcribe_audio
 from lib.translator import translate_segments
 from lib.writer import write_episode_files
-
-_YT_RE = re.compile(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})')
 
 _PROJECT_ROOT = Path(__file__).parent
 _episodes_env = os.environ.get("EPISODES_DIR", "")
@@ -125,7 +121,6 @@ def run(episode_date: date, url_override: str | None, dry_run: bool,
     log.info(bar)
 
     pipeline_start = time.perf_counter()
-    whisper_result: dict | None = None
 
     # ── Checkpoint helpers ───────────────────────────────────────────────────
     transcript_file = ep_dir / "transcript.json"
@@ -147,34 +142,17 @@ def run(episode_date: date, url_override: str | None, dry_run: bool,
     def _has_analysis():
         return not force and analysis_file.exists()
 
-    # ── Step 1: Download / fetch captions ───────────────────────────────────
-    urls = [url_override] if url_override else load_source_urls()
-    yt_url = next((u for u in urls if _YT_RE.search(u)), None)
-
-    if yt_url and not dry_run:
-        log.info("Step 1/5 — Fetch YouTube captions (no audio download)")
-        with _timed("Fetch captions"):
-            video_id = _YT_RE.search(yt_url).group(1)
-            whisper_result = fetch_youtube_transcript(video_id)
-            if not whisper_result:
-                log.error("YouTube captions unavailable — aborting")
-                return False
-            meta = fetch_youtube_meta_oembed(yt_url)
-            meta["duration"] = int(whisper_result["duration"])
-            meta["level"] = level
-        audio_path = None
-    else:
-        log.info("Step 1/5 — Download audio")
-        with _timed("Download"):
-            audio_path, meta = download_latest(urls, ep_dir, dry_run=dry_run)
-            if not audio_path:
-                log.error("Download failed — aborting")
-                return False
+    # ── Step 1: Download ────────────────────────────────────────────────────
+    log.info("Step 1/5 — Download audio")
+    with _timed("Download"):
+        urls = [url_override] if url_override else load_source_urls()
+        audio_path, meta = download_latest(urls, ep_dir, dry_run=dry_run)
+        if not audio_path:
+            log.error("Download failed — aborting")
+            return False
 
     # ── Step 2: Transcribe ──────────────────────────────────────────────────
-    if whisper_result is not None:
-        log.info("Step 2/5 — Transcribe (SKIPPED — captions loaded in step 1)")
-    elif _has_transcript() and not dry_run:
+    if _has_transcript() and not dry_run:
         log.info("Step 2/5 — Transcribe (SKIPPED — transcript.json exists, use --force to redo)")
         whisper_result = json.loads(transcript_file.read_text(encoding="utf-8"))
         # Ensure top-level keys exist for downstream steps

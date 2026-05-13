@@ -97,44 +97,25 @@ def _pipeline_thread(
     level: str,
 ) -> None:
     """Runs the full pipeline in a background thread."""
-    from lib.transcriber import transcribe_audio, fetch_youtube_transcript
+    from lib.transcriber import transcribe_audio
     from lib.translator import translate_segments
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files
 
     total_steps = 5
-    whisper_result = None
 
     try:
-        # ── Step 1: Transcript ───────────────────────────────────────────────
-        is_youtube = bool(source_url and ("youtube.com" in source_url or "youtu.be" in source_url))
-
-        if is_youtube:
-            # Try YouTube captions first — no download needed
-            _set_step(job_id, "Fetching YouTube captions…", 1)
-            m = re.search(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})', source_url)
-            if m:
-                whisper_result = fetch_youtube_transcript(m.group(1))
-            if whisper_result:
-                from lib.downloader import fetch_youtube_meta_oembed
-                meta = fetch_youtube_meta_oembed(source_url)
-                meta["duration"] = int(whisper_result["duration"])
-                meta["level"] = level
-            else:
-                raise RuntimeError("YouTube captions unavailable for this video")
-        elif source_url and audio_path is None:
+        # ── Step 1: Download ────────────────────────────────────────────────
+        if source_url and audio_path is None:
             from lib.downloader import download_latest
             _set_step(job_id, "Downloading audio…", 1)
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
 
-        # ── Step 2: Transcribe (only if captions weren't fetched) ────────────
-        if whisper_result is None:
-            _set_step(job_id, "Transcribing with Whisper…", 2)
-            whisper_result = transcribe_audio(audio_path)
-        else:
-            _set_step(job_id, "Captions loaded", 2)
+        # ── Step 2: Transcribe ───────────────────────────────────────────────
+        _set_step(job_id, "Transcribing with Whisper…", 2)
+        whisper_result = transcribe_audio(audio_path)
 
         # ── Step 3: Translate ────────────────────────────────────────────────
         _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
