@@ -34,16 +34,25 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 _episodes_env = os.environ.get("EPISODES_DIR", "")
 EPISODES_DIR = (Path(_episodes_env) if Path(_episodes_env).is_absolute()
                 else _PROJECT_ROOT / (_episodes_env or "episodes"))
-SOURCES_FILE = _PROJECT_ROOT / "sources.json"
+_sources_env = os.environ.get("SOURCES_FILE", "")
+SOURCES_FILE = (Path(_sources_env) if Path(_sources_env).is_absolute()
+                else _PROJECT_ROOT / (_sources_env or "sources.json"))
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
 # Slug pattern: YYYY-MM-DD or YYYY-MM-DD-N
 _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
+from flask_cors import CORS
+
 log = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder="../frontend/dist/assets",
+    template_folder="../frontend/dist",
+)
+CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 
 # ── Background job tracking ───────────────────────────────────────────────────
@@ -434,6 +443,88 @@ def api_transcript(date_str: str):
 def api_analysis(date_str: str):
     resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
     return _make_response_cached(resp)
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    from lib.analyzer import LEVELS, DEFAULT_LEVEL
+
+    level = request.form.get("level", DEFAULT_LEVEL).strip()
+    if level not in LEVELS:
+        level = DEFAULT_LEVEL
+
+    source_url = request.form.get("source_url", "").strip()
+    job_id     = str(uuid.uuid4())
+    base_slug  = date.today().isoformat()
+    slug       = _unique_ep_slug(base_slug)
+    ep_dir     = EPISODES_DIR / slug
+    ep_dir.mkdir(parents=True, exist_ok=True)
+
+    audio_path: Path | None = None
+    meta: dict = {}
+
+    if source_url:
+        title_override = request.form.get("title", "").strip()
+        meta = {
+            "title":       title_override or source_url,
+            "channel":     "",
+            "upload_date": date.today().strftime("%Y%m%d"),
+            "duration":    0,
+            "url":         source_url,
+            "thumbnail":   "",
+            "description": "",
+            "video_id":    "",
+            "source":      "url",
+            "level":       level,
+        }
+    else:
+        if "audio" not in request.files:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"error": "No file or URL provided."}), 400
+        f = request.files["audio"]
+        if not f.filename:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"error": "No file selected."}), 400
+        suffix = Path(f.filename).suffix.lower()
+        if suffix not in UPLOAD_EXTENSIONS:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"error": f"Unsupported format '{suffix}'."}), 400
+        title      = request.form.get("title", "").strip() or Path(f.filename).stem
+        audio_path = ep_dir / f"audio{suffix}"
+        f.save(audio_path)
+        meta = {
+            "title":             title,
+            "channel":           "Upload",
+            "upload_date":       date.today().strftime("%Y%m%d"),
+            "duration":          0,
+            "url":               "",
+            "thumbnail":         "",
+            "description":       f"Uploaded file: {f.filename}",
+            "video_id":          "",
+            "source":            "upload",
+            "original_filename": f.filename,
+            "level":             level,
+        }
+
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status":      "processing",
+            "slug":        slug,
+            "step":        "Starting…",
+            "step_num":    0,
+            "total_steps": 5,
+            "error":       "",
+            "started_at":  time.time(),
+        }
+
+    _prune_old_jobs()
+    threading.Thread(
+        target=_pipeline_thread,
+        args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        daemon=True,
+    ).start()
+
+    return jsonify({"job_id": job_id, "slug": slug})
 
 
 @app.route("/api/explain", methods=["POST"])
