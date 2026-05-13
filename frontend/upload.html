@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Add Episode — 日本語 Pipeline</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="style.css" rel="stylesheet" />
+</head>
+<body class="bg-black text-gray-200 antialiased font-sans flex flex-col h-screen overflow-hidden selection:bg-purple-900 selection:text-white">
+
+  <header class="h-14 box-content border-b border-gray-800 flex items-center px-4 shrink-0 bg-black z-10 relative" style="padding-top: env(safe-area-inset-top);">
+    <a href="index.html" class="p-2 -ml-2 text-gray-400 hover:text-white rounded-md hover:bg-gray-800 transition-colors mr-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </a>
+    <div class="font-bold text-lg tracking-tight text-white">Add Episode</div>
+  </header>
+
+  <main class="flex-1 overflow-y-auto p-4">
+    <div class="max-w-lg mx-auto space-y-6">
+
+      <!-- Form -->
+      <div id="form-section">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+
+          <!-- URL input -->
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">YouTube or Podcast URL</label>
+            <input id="input-url" type="url" placeholder="https://youtube.com/watch?v=..." autocomplete="off"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-gray-500" />
+          </div>
+
+          <div class="flex items-center gap-3 text-xs text-gray-600">
+            <div class="flex-1 h-px bg-gray-800"></div>
+            <span>or upload a file</span>
+            <div class="flex-1 h-px bg-gray-800"></div>
+          </div>
+
+          <!-- File upload -->
+          <div>
+            <label id="file-label"
+              class="flex items-center justify-center gap-2 border border-dashed border-gray-700 rounded-lg px-4 py-4 cursor-pointer hover:border-gray-500 transition-colors text-sm text-gray-500">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span id="file-label-text">Choose audio file</span>
+              <input id="input-file" type="file" accept=".mp3,.mp4,.m4a,.wav,.ogg,.webm,.flac,.aac,.opus" class="hidden" />
+            </label>
+          </div>
+
+          <!-- Title (optional) -->
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">Title <span class="text-gray-600">(optional)</span></label>
+            <input id="input-title" type="text" placeholder="Leave blank to auto-detect"
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-gray-500" />
+          </div>
+
+          <!-- Level -->
+          <div>
+            <label class="block text-xs text-gray-400 mb-1.5">JLPT Level</label>
+            <div class="grid grid-cols-5 gap-1.5">
+              <button data-level="beginner"              class="level-btn text-xs py-2 rounded-lg border border-gray-700 text-gray-400 hover:border-green-600 hover:text-green-400 transition-colors">N5</button>
+              <button data-level="beginner-intermediate" class="level-btn text-xs py-2 rounded-lg border border-gray-700 text-gray-400 hover:border-teal-600 hover:text-teal-400 transition-colors">N4</button>
+              <button data-level="intermediate"          class="level-btn text-xs py-2 rounded-lg border border-gray-700 text-gray-400 hover:border-blue-600 hover:text-blue-400 transition-colors">N3</button>
+              <button data-level="intermediate-advanced" class="level-btn text-xs py-2 rounded-lg border border-gray-700 text-gray-400 hover:border-amber-600 hover:text-amber-400 transition-colors">N2</button>
+              <button data-level="advanced"              class="level-btn text-xs py-2 rounded-lg border border-gray-700 border-rose-700 text-rose-400 transition-colors level-active">N1</button>
+            </div>
+          </div>
+
+          <!-- Error -->
+          <p id="form-error" class="hidden text-sm text-red-500"></p>
+
+          <!-- Submit -->
+          <button id="btn-submit"
+            class="w-full bg-white text-black font-semibold rounded-lg py-2.5 text-sm hover:bg-gray-200 transition-colors">
+            Process Episode
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress -->
+      <div id="progress-section" class="hidden">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium text-white">Processing…</span>
+            <span id="progress-step-label" class="text-xs text-gray-500">Step 0 / 5</span>
+          </div>
+          <div class="w-full bg-gray-800 rounded-full h-1.5">
+            <div id="progress-bar" class="bg-white h-1.5 rounded-full transition-all duration-500" style="width:0%"></div>
+          </div>
+          <p id="progress-step-text" class="text-sm text-gray-400">Starting…</p>
+        </div>
+      </div>
+
+      <!-- Done -->
+      <div id="done-section" class="hidden">
+        <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-4 text-center">
+          <div class="text-3xl">✓</div>
+          <p class="text-white font-medium">Episode ready</p>
+          <a id="done-link" href="#"
+            class="block w-full bg-white text-black font-semibold rounded-lg py-2.5 text-sm hover:bg-gray-200 transition-colors">
+            Open Episode
+          </a>
+          <button onclick="resetForm()"
+            class="block w-full text-sm text-gray-500 hover:text-gray-300 transition-colors py-1">
+            Add another
+          </button>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div id="error-section" class="hidden">
+        <div class="bg-gray-900 border border-red-900 rounded-xl p-5 space-y-3">
+          <p class="text-sm font-medium text-red-400">Processing failed</p>
+          <p id="error-message" class="text-sm text-gray-400"></p>
+          <button onclick="resetForm()"
+            class="text-sm text-gray-500 hover:text-gray-300 transition-colors">
+            Try again
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <style>
+    .level-active { border-color: currentColor !important; }
+  </style>
+
+  <script>
+    const API_BASE = "http://192.168.1.253:5000";
+
+    let selectedLevel = "advanced";
+    let pollTimer = null;
+
+    // Level buttons
+    document.querySelectorAll('.level-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.level-btn').forEach(b => b.classList.remove('level-active'));
+        btn.classList.add('level-active');
+        selectedLevel = btn.dataset.level;
+      });
+    });
+
+    // File label
+    document.getElementById('input-file').addEventListener('change', e => {
+      const f = e.target.files[0];
+      document.getElementById('file-label-text').textContent = f ? f.name : 'Choose audio file';
+    });
+
+    // Submit
+    document.getElementById('btn-submit').addEventListener('click', async () => {
+      const url   = document.getElementById('input-url').value.trim();
+      const file  = document.getElementById('input-file').files[0];
+      const title = document.getElementById('input-title').value.trim();
+      const errEl = document.getElementById('form-error');
+
+      if (!url && !file) {
+        errEl.textContent = 'Provide a URL or choose a file.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      errEl.classList.add('hidden');
+
+      const fd = new FormData();
+      fd.append('level', selectedLevel);
+      if (title) fd.append('title', title);
+      if (url)  fd.append('source_url', url);
+      else      fd.append('audio', file);
+
+      document.getElementById('btn-submit').disabled = true;
+      document.getElementById('btn-submit').textContent = 'Submitting…';
+
+      try {
+        const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+        showProgress(data.job_id, data.slug);
+      } catch (err) {
+        document.getElementById('btn-submit').disabled = false;
+        document.getElementById('btn-submit').textContent = 'Process Episode';
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      }
+    });
+
+    function showProgress(jobId, slug) {
+      document.getElementById('form-section').classList.add('hidden');
+      document.getElementById('progress-section').classList.remove('hidden');
+      poll(jobId, slug);
+    }
+
+    function poll(jobId, slug) {
+      pollTimer = setTimeout(async () => {
+        try {
+          const res  = await fetch(`${API_BASE}/api/job/${jobId}/status`);
+          const data = await res.json();
+
+          const pct = data.total_steps > 0 ? Math.round((data.step_num / data.total_steps) * 100) : 0;
+          document.getElementById('progress-bar').style.width = pct + '%';
+          document.getElementById('progress-step-text').textContent = data.step || '…';
+          document.getElementById('progress-step-label').textContent = `Step ${data.step_num} / ${data.total_steps}`;
+
+          if (data.status === 'done') {
+            showDone(slug);
+          } else if (data.status === 'error') {
+            showError(data.error || 'Unknown error');
+          } else {
+            poll(jobId, slug);
+          }
+        } catch {
+          poll(jobId, slug);
+        }
+      }, 1500);
+    }
+
+    function showDone(slug) {
+      document.getElementById('progress-section').classList.add('hidden');
+      document.getElementById('done-section').classList.remove('hidden');
+      document.getElementById('done-link').href = `episode.html?id=${slug}`;
+    }
+
+    function showError(msg) {
+      document.getElementById('progress-section').classList.add('hidden');
+      document.getElementById('error-section').classList.remove('hidden');
+      document.getElementById('error-message').textContent = msg;
+    }
+
+    function resetForm() {
+      clearTimeout(pollTimer);
+      document.getElementById('form-section').classList.remove('hidden');
+      document.getElementById('progress-section').classList.add('hidden');
+      document.getElementById('done-section').classList.add('hidden');
+      document.getElementById('error-section').classList.add('hidden');
+      document.getElementById('btn-submit').disabled = false;
+      document.getElementById('btn-submit').textContent = 'Process Episode';
+      document.getElementById('input-url').value = '';
+      document.getElementById('input-title').value = '';
+      document.getElementById('input-file').value = '';
+      document.getElementById('file-label-text').textContent = 'Choose audio file';
+    }
+  </script>
+</body>
+</html>

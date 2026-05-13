@@ -1,0 +1,8 @@
+{
+  "appId": "com.ziweichen.japanesepipeline",
+  "appName": "Mimichan",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true
+  }
+}
