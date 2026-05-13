@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Vocab Bank — 日本語 Pipeline{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl">
+  <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+    <div>
+      <h1 class="text-2xl font-bold">Vocab Bank</h1>
+      <p class="text-sm text-gray-500 mt-1" id="vocab-count">0 items saved</p>
+    </div>
+    <a href="/vocab/export.csv" class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors shadow-lg shadow-blue-900/20">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Export to Anki (.csv)
+    </a>
+  </div>
+
+  <!-- Search & Filters -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6 flex flex-col md:flex-row gap-4">
+    <div class="flex-1 relative">
+      <input type="text" id="search-input" placeholder="Search word, reading, or meaning..." 
+             class="w-full bg-gray-950 border border-gray-800 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors">
+      <svg class="absolute left-3 top-2.5 text-gray-500" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    </div>
+    <div class="flex gap-3">
+      <select id="level-filter" class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors text-gray-300">
+        <option value="all">All Levels</option>
+        <option value="n5">N5</option>
+        <option value="n4">N4</option>
+        <option value="n3">N3</option>
+        <option value="n2">N2</option>
+        <option value="n1">N1</option>
+        <option value="context-specific">Context</option>
+      </select>
+      <select id="type-filter" class="bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 transition-colors text-gray-300">
+        <option value="all">All Types</option>
+        <option value="vocab">Vocab</option>
+        <option value="grammar">Grammar</option>
+        <option value="expression">Phrase</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="vocab-list" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <!-- Items will be rendered here -->
+    <div class="col-span-full py-20 text-center text-gray-600">
+      <div class="animate-pulse">Loading vocabulary...</div>
+    </div>
+  </div>
+
+  <!-- Empty State -->
+  <div id="empty-state" class="hidden py-24 text-center border border-dashed border-gray-800 rounded-2xl">
+    <div class="text-5xl mb-4">📚</div>
+    <p class="text-lg font-medium mb-2">Your bank is empty</p>
+    <p class="text-sm text-gray-500 mb-6">Save words or phrases from any episode to see them here.</p>
+    <a href="/" class="text-blue-400 hover:text-blue-300 text-sm font-medium">Browse Episodes →</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  var vocabList = document.getElementById('vocab-list');
+  var vocabCount = document.getElementById('vocab-count');
+  var searchInput = document.getElementById('search-input');
+  var levelFilter = document.getElementById('level-filter');
+  var typeFilter = document.getElementById('type-filter');
+  var emptyState = document.getElementById('empty-state');
+
+  var allItems = [];
+
+  function esc(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function fetchVocab() {
+    fetch('/api/vocab')
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        allItems = data;
+        renderItems(allItems);
+      })
+      .catch(function(err) {
+        console.error(err);
+        vocabList.innerHTML = '<div class="col-span-full text-red-500 text-center py-10">Failed to load vocabulary.</div>';
+      });
+  }
+
+  function renderItems(items) {
+    vocabCount.textContent = items.length + " item" + (items.length === 1 ? "" : "s") + " found";
+
+    if (items.length === 0) {
+      vocabList.innerHTML = '';
+      vocabList.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+      return;
+    }
+
+    emptyState.classList.add('hidden');
+    vocabList.classList.remove('hidden');
+
+    var html = '';
+    for (var idx = 0; idx < items.length; idx++) {
+      var item = items[idx];
+      var level = (item.level || "").toLowerCase();
+      var typeLabel = item.type === 'expression' ? 'phrase' : (item.type || '');
+
+      html += '<div class="card bg-gray-900 border-gray-800 hover:border-gray-700 transition-colors" data-id="' + item.id + '">';
+      html += '<div class="card-front">';
+      html += '<span class="text-lg font-bold text-white">' + esc(item.word) + '</span>';
+      if (item.reading) {
+        html += '<span class="card-reading">【' + esc(item.reading) + '】</span>';
+      }
+      html += '<span class="card-level card-level-' + level + ' ml-auto">' + esc(item.level || 'ctx') + '</span>';
+      html += '</div>';
+      html += '<div class="card-body">';
+      html += '<div class="card-en text-blue-400 font-medium">' + esc(item.en) + '</div>';
+      html += '<div class="card-zh text-emerald-400 opacity-80">' + esc(item.zh) + '</div>';
+      if (item.example) {
+        html += '<div class="card-example text-xs text-gray-500 italic mt-2 border-t border-gray-800/50 pt-2">' + esc(item.example) + '</div>';
+      }
+      html += '<div class="flex items-center justify-between mt-3 pt-2 border-t border-gray-800/50">';
+      html += '<span class="text-[10px] text-gray-600 uppercase tracking-wider font-bold">' + esc(typeLabel) + '</span>';
+      html += '<button onclick="deleteItem(\'' + item.id + '\')" class="p-1.5 rounded-md text-gray-600 hover:text-red-400 hover:bg-red-950/50 transition-all" title="Remove from bank">';
+      html += '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>';
+      html += '</button>';
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+    }
+    vocabList.innerHTML = html;
+  }
+
+  function deleteItem(id) {
+    if (!confirm('Remove this item from your vocab bank?')) return;
+
+    fetch('/api/vocab/' + id, { method: 'DELETE' })
+      .then(function(resp) {
+        if (resp.ok) {
+          allItems = allItems.filter(function(i) { return i.id !== id; });
+          filterItems();
+        }
+      })
+      .catch(function(err) {
+        console.error(err);
+        alert('Failed to delete item.');
+      });
+  }
+
+  function filterItems() {
+    var q = searchInput.value.toLowerCase();
+    var level = levelFilter.value.toLowerCase();
+    var type = typeFilter.value.toLowerCase();
+
+    var filtered = allItems.filter(function(item) {
+      var matchesSearch = !q ||
+        item.word.toLowerCase().indexOf(q) !== -1 ||
+        (item.reading && item.reading.toLowerCase().indexOf(q) !== -1) ||
+        item.en.toLowerCase().indexOf(q) !== -1 ||
+        item.zh.toLowerCase().indexOf(q) !== -1;
+
+      var matchesLevel = level === 'all' || (item.level && item.level.toLowerCase() === level);
+      var matchesType = type === 'all' || (item.type && item.type.toLowerCase() === type);
+
+      return matchesSearch && matchesLevel && matchesType;
+    });
+
+    renderItems(filtered);
+  }
+
+  searchInput.addEventListener('input', filterItems);
+  levelFilter.addEventListener('change', filterItems);
+  typeFilter.addEventListener('change', filterItems);
+
+  fetchVocab();
+</script>
+{% endblock %}
+

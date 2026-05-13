@@ -68,87 +68,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // ── AnkiConnect Integration ──────────────────────────────────────────────
+  // ── Vocab Storage Integration ───────────────────────────────────────────
 
-  const ANKI_URL = "http://localhost:8765";
-
-  async function invokeAnki(action, version, params = {}) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.addEventListener("error", () => reject("Failed to issue request to AnkiConnect."));
-      xhr.addEventListener("load", () => {
-        try {
-          const response = JSON.parse(xhr.responseText);
-          if (response.error) throw response.error;
-          resolve(response.result);
-        } catch (e) {
-          reject(e);
-        }
-      });
-      xhr.open("POST", ANKI_URL);
-      xhr.send(JSON.stringify({ action, version, params }));
-    });
-  }
-
-  async function syncToAnki(card) {
-    const deckName = "Japanese Pipeline";
-    const modelName = "Japanese Pipeline Model";
-
-    // 1. Ensure deck exists
-    await invokeAnki("createDeck", 6, { deck: deckName });
-
-    // 2. Ensure model exists
-    const models = await invokeAnki("modelNames", 6);
-    if (!models.includes(modelName)) {
-      await invokeAnki("createModel", 6, {
-        modelName,
-        inOrderFields: ["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"],
-        css: ".card { font-family: 'Hiragino Sans', 'Meiryo', sans-serif; text-align: center; color: #d1d5db; background-color: #111827; padding: 20px; } .ja { font-size: 32px; color: #fff; margin-bottom: 10px; } .reading { font-size: 18px; color: #9ca3af; } .translation { margin-top: 15px; font-size: 16px; } .en { color: #93c5fd; } .zh { color: #6ee7b7; } .example { margin-top: 15px; font-style: italic; color: #6b7280; font-size: 14px; border-top: 1px solid #374151; padding-top: 10px; }",
-        cardTemplates: [{
-          Name: "Recognition",
-          Front: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div></div>",
-          Back: "<div class='card'><div class='ja'>{{Front}}</div><div class='reading'>{{Reading}}</div><hr><div class='translation'><div class='en'>{{English}}</div><div class='zh'>{{Chinese}}</div></div><div class='example'>{{Example}}</div></div>"
-        }]
-      });
-    }
-
-    // 3. Add note
-    return await invokeAnki("addNote", 6, {
-      note: {
-        deckName,
-        modelName,
-        fields: {
-          Front: card.front,
-          Reading: card.reading || "",
-          English: card.en || "",
-          Chinese: card.zh || "",
-          Example: card.example || "",
-          Level: card.level || "",
-          Type: card.type || ""
-        },
-        tags: (card.tags || "japanese").split(" "),
-        options: { allowDuplicate: false }
-      }
-    });
-  }
-
-  async function handleAnkiSync(e) {
+  async function handleSaveVocab(e) {
     const btn = e.target.closest(".btn-anki");
     if (!btn) return;
     e.stopPropagation();
     
     const cardData = JSON.parse(btn.dataset.card);
+    cardData.source_episode = dateStr;
+    
     const originalHTML = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
 
     try {
-      await syncToAnki(cardData);
-      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-      btn.title = "Synced!";
+      const resp = await fetch("/api/vocab", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cardData)
+      });
+      const result = await resp.json();
+      
+      if (result.status === "exists") {
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
+        btn.title = "Already saved";
+      } else {
+        savedWords.add(cardData.front);  // keep in-session state in sync
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.title = "Saved!";
+      }
     } catch (err) {
       console.error(err);
-      showToast("AnkiConnect error: " + err + "\n\nMake sure Anki is open and AnkiConnect is installed.");
+      showToast("Error saving to vocab: " + err.message);
       btn.innerHTML = originalHTML;
       btn.disabled = false;
     }
@@ -390,10 +342,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let transcriptData = { segments: [] };
   let analysisData   = { highlights: [], vocab: [], grammar: [], expressions: [] };
+  let savedWords     = new Set();  // words already in the global vocab bank
 
-  const [transcriptResult, analysisResult] = await Promise.allSettled([
+  const [transcriptResult, analysisResult, vocabResult] = await Promise.allSettled([
     fetch(`/api/episode/${dateStr}/transcript`).then(r => { if (!r.ok) throw r; return r.json(); }),
     fetch(`/api/episode/${dateStr}/analysis`).then(r => { if (!r.ok) throw r; return r.json(); }),
+    fetch("/api/vocab").then(r => r.json()).catch(() => []),
   ]);
 
   if (transcriptResult.status === "fulfilled") {
@@ -405,6 +359,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (analysisResult.status === "fulfilled") {
     analysisData = analysisResult.value;
+  }
+
+  // Build the set of already-saved words from the vocab bank
+  if (vocabResult.status === "fulfilled" && Array.isArray(vocabResult.value)) {
+    vocabResult.value.forEach(item => { if (item.word) savedWords.add(item.word); });
   }
 
   segments   = transcriptData.segments || [];
@@ -480,10 +439,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   renderTranscript();
   renderModalTranscript();
-  renderVocab(analysisData.vocab        || []);
-  renderGrammar(analysisData.grammar    || []);
-  renderExpressions(analysisData.expressions || []);
-  renderContext([...ctxVocab, ...ctxGrammar]);
+  renderVocab(analysisData.vocab        || [], savedWords);
+  renderGrammar(analysisData.grammar    || [], savedWords);
+  renderExpressions(analysisData.expressions || [], savedWords);
+  renderContext([...ctxVocab, ...ctxGrammar],    savedWords);
   repositionTranscript();
 
   // Stats bar
@@ -831,7 +790,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   const sidePanel = document.getElementById("side-panel");
-  sidePanel?.addEventListener("click", handleAnkiSync);
+  sidePanel?.addEventListener("click", handleSaveVocab);
   const drawerOverlay = document.getElementById("drawer-overlay");
   const btnOpenDrawer = document.getElementById("btn-open-drawer");
   const drawerHandle  = document.getElementById("drawer-handle");
@@ -904,13 +863,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   if (isTouch && modalTranscriptEl) setupTouchTooltips(modalTranscriptEl);
 
-  // side-panel renderers
+  function savedBtnHTML(isSaved) {
+    if (isSaved) {
+      return `<button class="btn-anki text-gray-400 p-1" title="Already saved" disabled><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>`;
+    }
+    return `<button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Save to vocab"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>`;
+  }
+
   /**
    * Renders the vocabulary cards.
    * @param {Array<{word: string, reading: string, en: string, zh: string, level: string}>} v Vocabulary array
+   * @param {Set<string>} saved Already-saved word set
    */
-  function renderVocab(v) {
+  function renderVocab(v, saved) {
+    saved = saved || savedWords;
     panelVocab.innerHTML = v.length ? v.map(item => {
+      const isSaved = saved.has(item.word);
       const cardJson = JSON.stringify({
         type: "vocab",
         front: item.word,
@@ -921,16 +889,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese vocab ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false).replace('>', ` data-card='${cardJson}'>`)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No vocab</p>`;
   }
 
   /**
    * Renders the grammar cards.
    * @param {Array<{pattern: string, reading: string, meaning_en: string, meaning_zh: string, level: string}>} g Grammar array
+   * @param {Set<string>} saved Already-saved word set
    */
-  function renderGrammar(g) {
+  function renderGrammar(g, saved) {
+    saved = saved || savedWords;
     panelGrammar.innerHTML = g.length ? g.map(item => {
+      const isSaved = saved.has(item.pattern);
       const cardJson = JSON.stringify({
         type: "grammar",
         front: item.pattern,
@@ -941,16 +912,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese grammar ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false).replace('>', ` data-card='${cardJson}'>`)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No grammar</p>`;
   }
 
   /**
    * Renders the expressions cards.
    * @param {Array<{expression: string, reading: string, en: string, zh: string}>} e Expressions array
+   * @param {Set<string>} saved Already-saved word set
    */
-  function renderExpressions(e) {
+  function renderExpressions(e, saved) {
+    saved = saved || savedWords;
     panelExpr.innerHTML = e.length ? e.map(item => {
+      const isSaved = saved.has(item.expression);
       const cardJson = JSON.stringify({
         type: "expression",
         front: item.expression,
@@ -960,19 +934,23 @@ document.addEventListener("DOMContentLoaded", async () => {
         example: item.context,
         tags: "japanese expression"
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false).replace('>', ` data-card='${cardJson}'>`)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No expressions</p>`;
   }
 
   /**
    * Renders the context-specific vocabulary and grammar cards.
    * @param {Array<Object>} c Context array
+   * @param {Set<string>} saved Already-saved word set
    */
-  function renderContext(c) {
+  function renderContext(c, saved) {
+    saved = saved || savedWords;
     panelContext.innerHTML = c.length ? c.map(item => {
+      const word = item.word || item.pattern;
+      const isSaved = saved.has(word);
       const cardJson = JSON.stringify({
         type: "context-specific",
-        front: item.word || item.pattern,
+        front: word,
         reading: item.reading,
         en: item.en || item.meaning_en,
         zh: item.zh || item.meaning_zh,
@@ -980,7 +958,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: "context-specific",
         tags: "japanese context-specific"
       }).replace(/'/g, "&#39;");
-      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(item.word||item.pattern)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific ml-auto">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div><div class="flex justify-end mt-1"><button class="btn-anki text-gray-500 hover:text-blue-400 p-1" title="Sync to Anki" data-card='${cardJson}'><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></div></div></div>`;
+      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(word)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific ml-auto">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false).replace('>', ` data-card='${cardJson}'>`)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No ctx</p>`;
   }
 });
