@@ -743,7 +743,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadingEl.classList.add("hidden");
   transcriptEl.classList.remove("hidden");
 
-  if (isYoutube) {
+  if (useYoutube) {
     if (!isDesktopLayout) transcriptEl.classList.add("compact-mode");
     updateNearbySegments(-1);
   }
@@ -752,7 +752,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const nav = document.querySelector("nav");
     if (nav) document.documentElement.style.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
     document.body.classList.add("ep-desktop");
-    if (isYoutube) document.body.classList.add("yt-mode");
+    if (useYoutube) document.body.classList.add("yt-mode");
   }
 
   sizeMobileTranscript();
@@ -1000,16 +1000,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   function syncTranslationUI() {
     document.getElementById("toggle-en")?.classList.toggle("active", showEn);
     document.getElementById("toggle-zh")?.classList.toggle("active", showZh);
-    const fabEn = document.getElementById("fab-en-btn");
-    const fabZh = document.getElementById("fab-zh-btn");
-    const fabMain = document.getElementById("fab-main");
-    if (fabEn) fabEn.classList.toggle("active", showEn);
-    if (fabZh) fabZh.classList.toggle("active", showZh);
-    if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh);
+    fabEnBtn?.classList.toggle("active", showEn);
+    fabZhBtn?.classList.toggle("active", showZh);
+    fabMain?.classList.toggle("fab-on", showEn || showZh);
+    // Use inline style.display instead of the 'hidden' class — in Tailwind v4
+    // hidden is display:none without !important, so the CSS display:flex on
+    // .translation-en/.translation-zh wins the cascade and ignores the class.
     [transcriptEl, modalTranscriptEl].forEach(container => {
       if (!container) return;
-      container.querySelectorAll(".translation-en").forEach(el => el.classList.toggle("hidden", !showEn));
-      container.querySelectorAll(".translation-zh").forEach(el => el.classList.toggle("hidden", !showZh));
+      container.querySelectorAll(".translation-en").forEach(el => { el.style.display = showEn ? "flex" : "none"; });
+      container.querySelectorAll(".translation-zh").forEach(el => { el.style.display = showZh ? "flex" : "none"; });
     });
   }
 
@@ -1027,6 +1027,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   function openTray() { fabOpen = true; fabTray?.classList.replace("fab-tray-hidden", "fab-tray-visible"); }
   function closeTray() { fabOpen = false; fabTray?.classList.replace("fab-tray-visible", "fab-tray-hidden"); }
   document.addEventListener("click", closeTray);
+
+  // Apply correct initial visibility (Tailwind hidden class loses to CSS display:flex in v4)
+  syncTranslationUI();
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
 
