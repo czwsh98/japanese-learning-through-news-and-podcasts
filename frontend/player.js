@@ -48,7 +48,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.title = `${metaObj.title || dateStr} — 日本語 Pipeline`;
   const navTitle = document.getElementById("nav-title");
   if (navTitle) navTitle.innerText = metaObj.title || dateStr;
-  const headerTitle = document.getElementById("header-title");
+  const headerTitle = document.getElementById("ep-title");
   if (headerTitle) headerTitle.innerText = metaObj.title || dateStr;
 
   let metaHtml = "";
@@ -142,6 +142,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!btnDownload) return;
     btnDownload.classList.add("text-green-400");
     btnDownload.title = "Downloaded for offline use";
+    try {
+      const OFFLINE_KEY = "mimichan_offline_episodes";
+      const map = JSON.parse(localStorage.getItem(OFFLINE_KEY) || "{}");
+      map[dateStr] = { date: dateStr, meta: metaObj };
+      localStorage.setItem(OFFLINE_KEY, JSON.stringify(map));
+    } catch (e) {}
   }
 
   // Reflect existing download state on page load
@@ -957,7 +963,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (audio) audio.currentTime = currentTime;
       if (!isDesktopLayout) {
         transcriptEl.classList.remove("compact-mode");
-        sizeMobileTranscript();
+        // Clear any inline height/overflow left from compact-mode so the RAF
+        // measurement isn't contaminated by stale values.
+        transcriptEl.style.removeProperty("height");
+        transcriptEl.style.removeProperty("overflow");
       }
       btnTogglePlayer.textContent = "Watch video";
       document.body.classList.remove("yt-mode");
@@ -968,7 +977,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     repositionTranscript();
     updatePillPosition();
-    if (!useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+    if (!useYoutube) {
+      // Reset auto-follow so the transcript immediately starts tracking again.
+      autoFollow = true;
+      if (autoFollowTimer) clearTimeout(autoFollowTimer);
+      jumpPill?.classList.add("hidden");
+
+      if (!isDesktopLayout) {
+        // Size the transcript after the browser has reflowed the new layout
+        // (audio player visible, YouTube player hidden), then scroll to the
+        // active segment so it's in view.
+        requestAnimationFrame(() => {
+          sizeMobileTranscript();
+          if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
+        });
+      } else if (currentIdx >= 0) {
+        setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+      }
+    }
   });
 
   function syncTranslationUI() {

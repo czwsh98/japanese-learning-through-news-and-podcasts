@@ -6,6 +6,13 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["/Users/ziweichen/japanese-pipeline/web/app.py"],
       "port": 5000
+    },
+    {
+      "name": "frontend-vite",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "/Users/ziweichen/japanese-pipeline/frontend",
+      "port": 5173
     }
   ]
 }
