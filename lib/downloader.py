@@ -6,10 +6,12 @@ Supported inputs
 - RSS/Atom podcast feed URLs (handled by yt-dlp)
 - Direct audio file URLs (streamed with requests)
 """
+import base64
 import json
 import logging
 import os
 import subprocess
+import tempfile
 import urllib.parse
 from datetime import date
 from pathlib import Path
@@ -22,6 +24,31 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
 _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm"}
+
+# ── YouTube cookies ───────────────────────────────────────────────────────────
+
+_cookies_file: str | None = None
+
+
+def _get_cookies_file() -> str | None:
+    """Decode YOUTUBE_COOKIES_B64 into a temp file on first call; return path."""
+    global _cookies_file
+    if _cookies_file:
+        return _cookies_file
+    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+    if not b64:
+        return None
+    try:
+        content = base64.b64decode(b64).decode("utf-8")
+        fd, path = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
+        os.write(fd, content.encode("utf-8"))
+        os.close(fd)
+        _cookies_file = path
+        log.info("YouTube cookies loaded from YOUTUBE_COOKIES_B64")
+    except Exception as exc:
+        log.error(f"Failed to decode YOUTUBE_COOKIES_B64: {exc}")
+        return None
+    return _cookies_file
 
 
 def _is_direct_audio(url: str) -> bool:
@@ -60,10 +87,13 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     """Use yt-dlp to download the first item from *url*."""
     audio_path = episode_dir / "audio.mp3"
 
+    cookies = _get_cookies_file()
+
     # Fetch metadata
     info_cmd = [
         "yt-dlp", "--playlist-items", "1",
         "--dump-json", "--no-warnings", "--quiet",
+        *(["--cookies", cookies] if cookies else []),
         url,
     ]
     result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=min(60, _TIMEOUT))
@@ -82,6 +112,7 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
         "-x", "--audio-format", "mp3", "--audio-quality", "192",
         "--no-warnings", "--quiet",
         "-o", str(episode_dir / "audio.%(ext)s"),
+        *(["--cookies", cookies] if cookies else []),
         url,
     ]
     log.info(f"Downloading {meta['title']!r} from {url}")
