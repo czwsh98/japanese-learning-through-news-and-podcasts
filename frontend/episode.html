@@ -5,6 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Episode — 日本語 Pipeline</title>
   <style>html,body{background:#000}</style>
+  <script>
+    (function(){
+      var d=sessionStorage.getItem("navDir");
+      if(d){document.documentElement.dataset.nav=d;sessionStorage.removeItem("navDir");}
+      document.addEventListener("click",function(e){
+        var a=e.target.closest("a[href]");if(!a)return;
+        var h=a.getAttribute("href")||"";
+        if(h.includes("episode.html"))sessionStorage.setItem("navDir","forward");
+        else if(h.includes("index.html"))sessionStorage.setItem("navDir","back");
+      },true);
+    })();
+  </script>
   <link href="style.css" rel="stylesheet" />
 </head>
 <body class="bg-gray-950 text-gray-100 antialiased font-sans flex flex-col h-screen overflow-hidden selection:bg-purple-900 selection:text-white">

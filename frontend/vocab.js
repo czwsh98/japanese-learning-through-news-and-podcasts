@@ -1,5 +1,16 @@
 const API_BASE = "https://mimichan.up.railway.app";
 
+const VOCAB_STORE_KEY = "mimichan_vocab";
+function vocabLocalRead() {
+  try { return JSON.parse(localStorage.getItem(VOCAB_STORE_KEY) || "[]"); } catch { return []; }
+}
+function vocabLocalWrite(items) {
+  try { localStorage.setItem(VOCAB_STORE_KEY, JSON.stringify(items)); } catch {}
+}
+function vocabLocalRemove(id) {
+  vocabLocalWrite(vocabLocalRead().filter(i => i.id !== id));
+}
+
 const vocabList  = document.getElementById("vocab-list");
 const vocabCount = document.getElementById("vocab-count");
 const searchInput = document.getElementById("search-input");
@@ -77,19 +88,15 @@ function filterItems() {
   renderItems(filtered);
 }
 
-async function deleteItem(id) {
+function deleteItem(id) {
   if (!confirm("Remove this item from your vocab bank?")) return;
-  try {
-    const resp = await fetch(`${API_BASE}/api/vocab/${id}`, { method: "DELETE" });
-    if (resp.ok) {
-      allItems = allItems.filter(i => i.id !== id);
-      filterItems();
-    } else {
-      alert("Failed to delete item.");
-    }
-  } catch (err) {
-    console.error(err);
-    alert("Failed to delete item.");
+  // Remove locally first — works offline
+  vocabLocalRemove(id);
+  allItems = allItems.filter(i => i.id !== id);
+  filterItems();
+  // Sync to server in background; local-only items (id starts with "local_") skip server
+  if (!String(id).startsWith("local_")) {
+    fetch(`${API_BASE}/api/vocab/${id}`, { method: "DELETE" }).catch(() => {});
   }
 }
 
@@ -104,15 +111,30 @@ levelFilter.addEventListener("change", filterItems);
 typeFilter.addEventListener("change",  filterItems);
 
 async function fetchVocab() {
+  let items = null;
   try {
     const resp = await fetch(`${API_BASE}/api/vocab`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    allItems = await resp.json();
-    renderItems(allItems);
-  } catch (err) {
-    console.error(err);
-    vocabList.innerHTML = `<div class="py-10 text-center text-red-400 text-sm">Failed to load vocab. Check your connection.</div>`;
+    if (resp.ok) {
+      items = await resp.json();
+      vocabLocalWrite(items); // keep cache in sync
+    }
+  } catch {}
+
+  if (!items) {
+    items = vocabLocalRead();
+    if (items.length) {
+      const banner = document.createElement("div");
+      banner.className = "text-xs text-amber-500 bg-amber-950/40 border border-amber-900/50 rounded-lg px-3 py-2 mb-3 flex items-center gap-2";
+      banner.textContent = "Offline — showing locally cached vocab";
+      vocabList.before(banner);
+    } else {
+      vocabList.innerHTML = `<div class="py-10 text-center text-red-400 text-sm">Could not load vocab. Check your connection.</div>`;
+      return;
+    }
   }
+
+  allItems = items;
+  renderItems(allItems);
 }
 
 fetchVocab();

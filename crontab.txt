@@ -20,4 +20,4 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 # │  │  │  ┌── month (*)
 # │  │  │  │  ┌── day of week (*)
 # │  │  │  │  │
-  0  3  *  *  *  cd /Users/ziweichen/japanese-pipeline && python3 pipeline.py >> pipeline.log 2>&1
+  0  3  *  *  *  cd /Users/YOUR_USERNAME/japanese-pipeline && python3 pipeline.py >> pipeline.log 2>&1

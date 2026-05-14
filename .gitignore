@@ -21,3 +21,9 @@ venv/
 # IDE
 .idea/
 .vscode/
+
+# Claude Code local config
+.claude/
+
+# Runtime data — not source files
+vocab.json

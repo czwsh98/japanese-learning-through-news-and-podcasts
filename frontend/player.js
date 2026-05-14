@@ -4,6 +4,21 @@ const API_BASE = "https://mimichan.up.railway.app";
 const AUTH_HEADER = "";
 const API_BASE_MEDIA = "https://mimichan.up.railway.app";
 
+const VOCAB_STORE_KEY = "mimichan_vocab";
+function vocabLocalRead() {
+  try { return JSON.parse(localStorage.getItem(VOCAB_STORE_KEY) || "[]"); } catch { return []; }
+}
+function vocabLocalWrite(items) {
+  try { localStorage.setItem(VOCAB_STORE_KEY, JSON.stringify(items)); } catch {}
+}
+function vocabLocalAdd(item) {
+  const items = vocabLocalRead();
+  const idx = items.findIndex(i => i.word === item.word);
+  if (idx >= 0) items[idx] = item;
+  else items.unshift(item);
+  vocabLocalWrite(items);
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   const urlParams = new URLSearchParams(window.location.search);
   const dateStr = urlParams.get('id');
@@ -156,10 +171,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (e) {}
   }
 
+  // Download button is only meaningful in the native app (Capacitor Filesystem API).
+  // Hide it in mobile browsers where it would silently fail.
+  if (!isCapacitor && btnDownload) btnDownload.classList.add("hidden");
+
   // Reflect existing download state on page load
   isEpisodeDownloaded().then(yes => { if (yes) markDownloaded(); });
 
-  if (btnDownload) {
+  if (isCapacitor && btnDownload) {
     btnDownload.addEventListener("click", async () => {
       if (btnDownload.classList.contains("text-green-400")) return;
       try {
@@ -245,9 +264,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("yt-player-wrap")?.classList.remove("hidden");
       document.getElementById("audio-player-wrap")?.classList.add("hidden");
     }
-    // Always show toggle button for YouTube episodes so user can switch to video
-    document.getElementById("btn-toggle-player")?.classList.remove("hidden");
-    document.getElementById("btn-toggle-player").textContent = useYoutube ? "Audio only" : "Watch video";
+    // On iOS (Capacitor) YouTube episodes always play as audio — no toggle shown.
+    if (!isCapacitor) {
+      document.getElementById("btn-toggle-player")?.classList.remove("hidden");
+      document.getElementById("btn-toggle-player").textContent = useYoutube ? "Audio only" : "Watch video";
+    }
     document.querySelectorAll("#btn-full-transcript").forEach(btn => btn.classList.remove("hidden"));
   }
   const transcriptEl = document.getElementById("transcript");
@@ -308,7 +329,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Vocab Storage Integration ───────────────────────────────────────────
 
-  async function handleAnkiSync(e) {
+  function handleAnkiSync(e) {
     const btn = e.target.closest(".btn-anki");
     if (!btn) return;
     e.stopPropagation();
@@ -316,28 +337,39 @@ document.addEventListener("DOMContentLoaded", async () => {
     let cardData;
     try { cardData = JSON.parse(btn.dataset.card); } catch { return; }
     cardData.source_episode = dateStr;
-    const originalHTML = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+    const front = cardData.front;
+    if (savedWords.has(front)) return;
 
-    try {
-      const resp = await fetch(`${API_BASE}/api/vocab`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cardData)
-      });
-      const result = await resp.json();
-      const front = cardData.front;
-      savedWords.add(front);
-      btn.innerHTML = SAVED_ICON;
-      btn.title = result.status === "exists" ? "Already saved" : "Saved!";
-      btn.className = "btn-anki text-green-500 p-1";
-    } catch (err) {
-      console.error(err);
-      showToast("Error saving to vocab: " + err.message);
-      btn.innerHTML = originalHTML;
-      btn.disabled = false;
-    }
+    // Save to localStorage immediately so it persists even if server is offline
+    vocabLocalAdd({
+      id: `local_${Date.now()}`,
+      word: front,
+      reading: cardData.reading || "",
+      en: cardData.en || "",
+      zh: cardData.zh || "",
+      example: cardData.example || "",
+      level: cardData.level || "",
+      type: cardData.type || "",
+      source_episode: dateStr,
+      saved_at: new Date().toISOString()
+    });
+    savedWords.add(front);
+    btn.innerHTML = SAVED_ICON;
+    btn.title = "Saved!";
+    btn.className = "btn-anki text-green-500 p-1";
+
+    // Sync to server in background; update local id with real server id on success
+    fetch(`${API_BASE}/api/vocab`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cardData)
+    }).then(r => r.ok ? r.json() : null).then(result => {
+      if (result?.id) {
+        const items = vocabLocalRead();
+        const idx = items.findIndex(i => i.word === front && String(i.id).startsWith("local_"));
+        if (idx >= 0) { items[idx].id = result.id; vocabLocalWrite(items); }
+      }
+    }).catch(() => {});
   }
 
   // ── Helpers (Hoisted or defined before use) ────────────────────────────────
@@ -690,7 +722,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const SAVED_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   fetch(`${API_BASE}/api/vocab`)
-    .then(r => r.ok ? r.json() : [])
+    .then(r => r.ok ? r.json() : null)
+    .then(items => {
+      if (items) vocabLocalWrite(items);
+      return items || vocabLocalRead();
+    })
+    .catch(() => vocabLocalRead())
     .then(items => {
       if (!items.length) return;
       items.forEach(item => savedWords.add(item.word || item.front));
@@ -704,8 +741,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           }
         } catch {}
       });
-    })
-    .catch(() => {});
+    });
 
   // Stats bar
   const vocabCount = (analysisData.vocab || []).length + ctxVocab.length;
@@ -1194,3 +1230,4 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).join("") : `<p class="panel-empty">No ctx</p>`;
   }
 });
+

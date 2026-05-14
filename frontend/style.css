@@ -577,3 +577,29 @@
     -webkit-overflow-scrolling: touch;
   }
 }
+
+/* ── Cross-document page transitions ─────────────────────────────────────── */
+@view-transition { navigation: auto; }
+
+@keyframes vt-slide-in-right  { from { transform: translateX(100%); } }
+@keyframes vt-slide-out-left  { to   { transform: translateX(-22%); opacity: 0.4; } }
+@keyframes vt-slide-in-left   { from { transform: translateX(-22%); opacity: 0.4; } }
+@keyframes vt-slide-out-right { to   { transform: translateX(100%); } }
+
+html[data-nav="forward"] ::view-transition-new(root) {
+  animation: vt-slide-in-right 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+html[data-nav="forward"] ::view-transition-old(root) {
+  animation: vt-slide-out-left 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+html[data-nav="back"] ::view-transition-new(root) {
+  animation: vt-slide-in-left 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+html[data-nav="back"] ::view-transition-old(root) {
+  animation: vt-slide-out-right 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Swipe-to-back: smooth spring-back when gesture is cancelled */
+html.swipe-returning {
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}

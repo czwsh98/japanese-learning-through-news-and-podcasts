@@ -15,7 +15,7 @@
     launchctl start com.japanese.pipeline
 
   Check logs:
-    tail -f /Users/ziweichen/japanese-pipeline/pipeline.log
+    tail -f /Users/YOUR_USERNAME/japanese-pipeline/pipeline.log
 -->
 <plist version="1.0">
 <dict>
@@ -26,11 +26,11 @@
   <array>
     <string>/usr/bin/env</string>
     <string>python3</string>
-    <string>/Users/ziweichen/japanese-pipeline/pipeline.py</string>
+    <string>/Users/YOUR_USERNAME/japanese-pipeline/pipeline.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/ziweichen/japanese-pipeline</string>
+  <string>/Users/YOUR_USERNAME/japanese-pipeline</string>
 
   <!-- 03:00 daily -->
   <key>StartCalendarInterval</key>
@@ -40,9 +40,9 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/Users/ziweichen/japanese-pipeline/pipeline.log</string>
+  <string>/Users/YOUR_USERNAME/japanese-pipeline/pipeline.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/ziweichen/japanese-pipeline/pipeline.log</string>
+  <string>/Users/YOUR_USERNAME/japanese-pipeline/pipeline.log</string>
 
   <!-- Inherit user PATH so yt-dlp/ffmpeg are found -->
   <key>EnvironmentVariables</key>
@@ -50,7 +50,7 @@
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key>
-    <string>/Users/ziweichen</string>
+    <string>/Users/YOUR_USERNAME</string>
   </dict>
 
   <!-- Re-run if missed while machine was asleep -->
