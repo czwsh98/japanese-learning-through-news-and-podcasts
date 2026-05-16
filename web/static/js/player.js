@@ -786,6 +786,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.querySelectorAll("[data-panel]").forEach(p => p.classList.add("hidden"));
       document.querySelector(`[data-panel="${btn.dataset.tab}"]`).classList.remove("hidden");
       if (drawerLabel) drawerLabel.textContent = btn.textContent.trim();
+      if (btn.dataset.tab === "transcript" && currentIdx >= 0) {
+        requestAnimationFrame(() => scrollActiveIntoView(currentIdx, true));
+      }
     });
   });
 
@@ -823,10 +826,32 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (isTouch) { setupTouchTooltips(transcriptEl); document.addEventListener("scroll", () => tooltip.classList.add("hidden"), { passive: true }); }
   else {
-    document.addEventListener("mousemove", e => { if (!tooltip.classList.contains("hidden")) { tooltip.style.left = (e.clientX + 14) + "px"; tooltip.style.top = (e.clientY + 14) + "px"; } });
-    document.addEventListener("mouseover", e => { const span = e.target.closest("[data-hl]"); if (span) showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14); });
-    document.addEventListener("mouseout", e => { if (!e.relatedTarget?.closest("[data-hl]")) tooltip.classList.add("hidden"); });
+    // Anchor the tooltip at the hovered word (don't chase the cursor) so the
+    // user can move into it and click the Jisho link. Stays open while the
+    // pointer is over the word or the tooltip itself.
+    let hoveredSpan = null;
+    document.addEventListener("mouseover", e => {
+      const span = e.target.closest("[data-hl]");
+      if (span && span !== hoveredSpan) {
+        showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14);
+        hoveredSpan = span;
+      }
+    });
+    document.addEventListener("mouseout", e => {
+      const to = e.relatedTarget;
+      if (!to || (!to.closest?.("[data-hl]") && !tooltip.contains(to))) {
+        tooltip.classList.add("hidden");
+        hoveredSpan = null;
+      }
+    });
   }
+
+  // Clicking anywhere in the tooltip except a link dismisses it. Keeps the
+  // (now interactive) tooltip from blocking the page and preserves
+  // tap-to-dismiss on touch when it overlaps a segment.
+  tooltip.addEventListener("click", e => {
+    if (!e.target.closest("a")) tooltip.classList.add("hidden");
+  });
 
   const transcriptModal = document.getElementById("transcript-modal");
   const modalClose = document.getElementById("modal-close");

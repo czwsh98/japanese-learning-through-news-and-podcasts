@@ -539,6 +539,16 @@
   .segment {
     grid-template-columns: 1fr;
     padding: 12px 10px;
+    /* Page-scroll auto-follow targets window scroll; keep the active line
+       clear of the sticky nav + audio player (top) and the fixed drawer
+       trigger bar (bottom) so it isn't hidden behind them. */
+    scroll-margin-top: 150px;
+    scroll-margin-bottom: 72px;
+  }
+  /* Compact (video) mode doesn't page-scroll — no offset needed. */
+  #transcript.compact-mode .segment {
+    scroll-margin-top: 0;
+    scroll-margin-bottom: 0;
   }
   .segment-time { display: none; }
   .segment-ja   { font-size: 18px; }
