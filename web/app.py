@@ -48,6 +48,8 @@ _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
 from flask_cors import CORS
 
+from web.db import db_available, init_db
+
 log = logging.getLogger(__name__)
 
 app = Flask(
@@ -60,6 +62,15 @@ app = Flask(
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+# SECRET_KEY is required for signed cookies / auth tokens (Phase 2+).
+# Falls back to an insecure default in local dev so the app still starts.
+app.config["SECRET_KEY"] = os.environ.get(
+    "SECRET_KEY", "dev-insecure-change-me-before-deploy"
+)
+
+# Connect to Postgres and ensure all tables exist.
+# Silently skips if DATABASE_URL is not set (local dev without Postgres).
+init_db()
 
 
 @app.before_request
