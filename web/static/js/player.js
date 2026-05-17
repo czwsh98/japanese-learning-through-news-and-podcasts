@@ -805,8 +805,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function showTooltip(hl, x, y) {
     const lvl = (hl.level || "").toLowerCase();
-    const jishoUrl = `https://jisho.org/search/${encodeURIComponent(hl.word)}`;
-    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">【${esc(hl.reading)}】</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(hl.en)}</div><div class="tt-zh">${esc(hl.zh)}</div><div class="mt-2 pt-2 border-t border-gray-700 flex justify-end"><a href="${jishoUrl}" target="_blank" class="text-[10px] text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1">Search on Jisho ↗</a></div>`;
+    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">【${esc(hl.reading)}】</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(hl.en)}</div><div class="tt-zh">${esc(hl.zh)}</div>`;
     tooltip.style.left = x + "px"; tooltip.style.top = y + "px"; tooltip.classList.remove("hidden");
   }
 
@@ -826,9 +825,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (isTouch) { setupTouchTooltips(transcriptEl); document.addEventListener("scroll", () => tooltip.classList.add("hidden"), { passive: true }); }
   else {
-    // Anchor the tooltip at the hovered word (don't chase the cursor) so the
-    // user can move into it and click the Jisho link. Stays open while the
-    // pointer is over the word or the tooltip itself.
     let hoveredSpan = null;
     document.addEventListener("mouseover", e => {
       const span = e.target.closest("[data-hl]");
@@ -839,19 +835,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     document.addEventListener("mouseout", e => {
       const to = e.relatedTarget;
-      if (!to || (!to.closest?.("[data-hl]") && !tooltip.contains(to))) {
+      if (!to || !to.closest?.("[data-hl]")) {
         tooltip.classList.add("hidden");
         hoveredSpan = null;
       }
     });
   }
 
-  // Clicking anywhere in the tooltip except a link dismisses it. Keeps the
-  // (now interactive) tooltip from blocking the page and preserves
-  // tap-to-dismiss on touch when it overlaps a segment.
-  tooltip.addEventListener("click", e => {
-    if (!e.target.closest("a")) tooltip.classList.add("hidden");
-  });
+  tooltip.addEventListener("click", () => tooltip.classList.add("hidden"));
 
   const transcriptModal = document.getElementById("transcript-modal");
   const modalClose = document.getElementById("modal-close");
@@ -888,6 +879,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   if (isTouch && modalTranscriptEl) setupTouchTooltips(modalTranscriptEl);
 
+  function jishoLinkHTML(term) {
+    const url = `https://jisho.org/search/${encodeURIComponent(term)}`;
+    return `<a href="${url}" target="_blank" rel="noopener" class="text-[10px] text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1">Jisho ↗</a>`;
+  }
+
   function savedBtnHTML(isSaved, cardJson) {
     if (isSaved) {
       return `<button class="btn-anki text-gray-400 p-1" title="Already saved" disabled><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></button>`;
@@ -914,7 +910,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese vocab ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.word)}<span class="card-reading">【${esc(item.reading)}】</span><span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex items-center justify-between mt-1">${jishoLinkHTML(item.word)}${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No vocab</p>`;
   }
 
@@ -937,7 +933,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: item.level,
         tags: `japanese grammar ${item.level || ""}`.trim()
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.pattern)}<span class="card-level card-level-${(item.level||"").toLowerCase()} ml-auto">${esc(item.level)}</span></div><div class="card-body"><div class="card-en">${esc(item.meaning_en)}</div><div class="card-zh">${esc(item.meaning_zh)}</div><div class="flex items-center justify-between mt-1">${jishoLinkHTML(item.pattern)}${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No grammar</p>`;
   }
 
@@ -959,7 +955,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         example: item.context,
         tags: "japanese expression"
       }).replace(/'/g, "&#39;");
-      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
+      return `<div class="card"><div class="card-front">${esc(item.expression)}<span class="card-reading">【${esc(item.reading)}】</span></div><div class="card-body"><div class="card-en">${esc(item.en)}</div><div class="card-zh">${esc(item.zh)}</div><div class="flex items-center justify-between mt-1">${jishoLinkHTML(item.expression)}${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No expressions</p>`;
   }
 
@@ -983,7 +979,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         level: "context-specific",
         tags: "japanese context-specific"
       }).replace(/'/g, "&#39;");
-      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(word)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific ml-auto">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div><div class="flex justify-end mt-1">${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
+      return `<div class="card" style="border-color:rgba(167,139,250,0.2);"><div class="card-front">${esc(word)}${item.reading?`<span class="card-reading">【${esc(item.reading)}】</span>`:""}<span class="card-level card-level-context-specific ml-auto">ctx</span></div><div class="card-body"><div class="card-en">${esc(item.en||item.meaning_en)}</div><div class="card-zh">${esc(item.zh||item.meaning_zh)}</div><div class="flex items-center justify-between mt-1">${jishoLinkHTML(word)}${isSaved ? savedBtnHTML(true) : savedBtnHTML(false, cardJson)}</div></div></div>`;
     }).join("") : `<p class="panel-empty">No ctx</p>`;
   }
 });
