@@ -58,7 +58,7 @@ from web.auth import (
     register_user,
     set_auth_cookie,
 )
-from web.db import VocabItem, db_available, get_db, init_db
+from web.db import Episode, VocabItem, db_available, get_db, init_db
 from sqlalchemy import select
 
 log = logging.getLogger(__name__)
@@ -226,6 +226,125 @@ _MAX_JOBS = 50  # prune old jobs when exceeding this count
 _vocab_lock = threading.Lock()
 _sources_lock = threading.Lock()
 
+# ── R2 helpers ────────────────────────────────────────────────────────────────
+
+_r2_client      = None
+_r2_client_lock = threading.Lock()
+
+# Files uploaded to R2 per episode (same list as the migration script).
+_EPISODE_UPLOAD_FILES = [
+    "meta.json", "transcript.json", "analysis.json", "highlights.json",
+    "subtitles.vtt", "cards.csv",
+    "audio.mp3", "audio.m4a", "audio.wav", "audio.ogg",
+    "audio.webm", "audio.flac", "audio.aac", "audio.opus",
+]
+
+
+def _get_r2():
+    """Return a cached boto3 R2 client, or None when R2 is not configured."""
+    global _r2_client
+    if _r2_client is not None:
+        return _r2_client
+    with _r2_client_lock:
+        if _r2_client is not None:
+            return _r2_client
+        endpoint = os.environ.get("R2_ENDPOINT_URL", "")
+        key      = os.environ.get("R2_ACCESS_KEY_ID", "")
+        secret   = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+        bucket   = os.environ.get("R2_BUCKET", "")
+        if not all([endpoint, key, secret, bucket]):
+            return None
+        import boto3
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=key,
+            aws_secret_access_key=secret,
+            region_name="auto",
+        )
+    return _r2_client
+
+
+def _r2_bucket() -> str:
+    return os.environ.get("R2_BUCKET", "")
+
+
+def _r2_presigned(key: str, expires: int = 3600) -> str:
+    """Generate a presigned GET URL for an R2 object."""
+    return _get_r2().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _r2_bucket(), "Key": key},
+        ExpiresIn=expires,
+    )
+
+
+def _r2_get_json(key: str) -> dict:
+    """Fetch and JSON-parse an object from R2."""
+    obj = _get_r2().get_object(Bucket=_r2_bucket(), Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
+    """
+    Locate the audio file under r2_prefix.
+    Returns (key, mimetype) or None.
+    Uses list_objects_v2 so we don't have to guess the extension.
+    """
+    resp = _get_r2().list_objects_v2(
+        Bucket=_r2_bucket(), Prefix=r2_prefix + "audio"
+    )
+    for obj in resp.get("Contents", []):
+        name = Path(obj["Key"]).name
+        if name.startswith("audio."):
+            mt = mimetypes.guess_type(name)[0] or "audio/mpeg"
+            return obj["Key"], mt
+    return None
+
+
+def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
+    """Upload all known episode files from ep_dir to R2 at r2_prefix."""
+    mimetypes.add_type("text/vtt", ".vtt")
+    mimetypes.add_type("text/csv", ".csv")
+    s3     = _get_r2()
+    bucket = _r2_bucket()
+    for filename in _EPISODE_UPLOAD_FILES:
+        fpath = ep_dir / filename
+        if not fpath.exists():
+            continue
+        key = f"{r2_prefix}{filename}"
+        mt  = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+        try:
+            s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
+            log.info(f"R2 uploaded: {key}")
+        except Exception as exc:
+            log.error(f"R2 upload failed for {key}: {exc}")
+
+
+def _lookup_episode(slug: str) -> "Episode | None":
+    """
+    Look up an Episode row owned by the current user.
+    - Returns the Episode row if found.
+    - aborts(404) if the DB is available but the episode is not found for this user.
+    - Returns None when the DB is not available (caller falls back to local filesystem).
+    """
+    if not db_available():
+        return None
+    user = get_current_user()
+    if user is None:
+        abort(401)
+    if not _SLUG_RE.match(slug):
+        abort(400)
+    with get_db() as db:
+        row = db.execute(
+            select(Episode).where(
+                Episode.owner_user_id == user.id,
+                Episode.slug == slug,
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        abort(404)
+    return row
+
 
 def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
     with _jobs_lock:
@@ -258,6 +377,7 @@ def _pipeline_thread(
     audio_path: Path | None,
     meta: dict,
     level: str,
+    user_id=None,
 ) -> None:
     """Runs the full pipeline in a background thread."""
     from lib.transcriber import transcribe_audio
@@ -265,7 +385,7 @@ def _pipeline_thread(
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files
 
-    total_steps = 5
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
     try:
         # ── Step 1: Download ────────────────────────────────────────────────
@@ -292,9 +412,44 @@ def _pipeline_thread(
         _set_step(job_id, "Writing episode files…", 5)
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
+        # ── Step 6: Upload to R2 + persist Episode row ───────────────────────
+        if user_id and db_available() and _get_r2():
+            _set_step(job_id, "Saving to cloud storage…", 6)
+            r2_prefix = f"episodes/{user_id}/{slug}/"
+            _r2_upload_episode(ep_dir, r2_prefix)
+
+            with get_db() as db:
+                existing = db.execute(
+                    select(Episode).where(
+                        Episode.owner_user_id == user_id,
+                        Episode.slug == slug,
+                    )
+                ).scalar_one_or_none()
+                if not existing:
+                    # re-read meta (download may have enriched it)
+                    meta_path = ep_dir / "meta.json"
+                    if meta_path.exists():
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    ep_row = Episode(
+                        owner_user_id = user_id,
+                        slug          = slug,
+                        date          = slug[:10],
+                        title         = meta.get("title", slug),
+                        channel       = meta.get("channel", ""),
+                        url           = meta.get("url", ""),
+                        thumbnail     = meta.get("thumbnail", ""),
+                        duration      = meta.get("duration", 0),
+                        level         = meta.get("level", level),
+                        source        = meta.get("source", ""),
+                        r2_prefix     = r2_prefix,
+                    )
+                    db.add(ep_row)
+                else:
+                    existing.r2_prefix = r2_prefix
+
         with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["step"]   = "Complete"
+            _jobs[job_id]["status"]   = "done"
+            _jobs[job_id]["step"]     = "Complete"
             _jobs[job_id]["step_num"] = total_steps
 
     except Exception as exc:
@@ -335,13 +490,24 @@ def _find_audio(ep_dir: Path) -> Path | None:
     return None
 
 
-def _unique_ep_slug(base: str) -> str:
-    """Return a slug that doesn't already have a processed transcript."""
-    slug = base
+def _unique_ep_slug(base: str, user_id=None) -> str:
+    """Return a slug not already used for this user (DB) or on disk (fallback)."""
+    slug    = base
     counter = 2
-    while (EPISODES_DIR / slug / "transcript.json").exists():
-        slug = f"{base}-{counter}"
-        counter += 1
+    if user_id and db_available():
+        with get_db() as db:
+            while db.execute(
+                select(Episode).where(
+                    Episode.owner_user_id == user_id,
+                    Episode.slug == slug,
+                )
+            ).scalar_one_or_none() is not None:
+                slug = f"{base}-{counter}"
+                counter += 1
+    else:
+        while (EPISODES_DIR / slug / "transcript.json").exists():
+            slug = f"{base}-{counter}"
+            counter += 1
     return slug
 
 
@@ -357,41 +523,102 @@ def _make_response_cached(response):
 @login_required
 def index():
     episodes = []
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user:
+            with get_db() as db:
+                rows = db.execute(
+                    select(Episode)
+                    .where(Episode.owner_user_id == user.id)
+                    .order_by(Episode.date.desc(), Episode.created_at.desc())
+                ).scalars().all()
+            for row in rows:
+                episodes.append({
+                    "date": row.slug,
+                    "meta": {
+                        "title":     row.title,
+                        "channel":   row.channel,
+                        "url":       row.url,
+                        "thumbnail": row.thumbnail,
+                        "duration":  row.duration,
+                        "level":     row.level,
+                        "source":    row.source,
+                    },
+                    "has_audio":      bool(row.r2_prefix),
+                    "has_transcript": bool(row.r2_prefix),
+                })
+        return render_template("index.html", episodes=episodes)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):
             if not ep.is_dir() or not _SLUG_RE.match(ep.name):
                 continue
             meta_file = ep / "meta.json"
             meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
-            has_audio = _find_audio(ep) is not None
+            has_audio      = _find_audio(ep) is not None
             has_transcript = (ep / "transcript.json").exists()
-            episodes.append(
-                {
-                    "date": ep.name,
-                    "meta": meta,
-                    "has_audio": has_audio,
-                    "has_transcript": has_transcript,
-                }
-            )
+            episodes.append({
+                "date":           ep.name,
+                "meta":           meta,
+                "has_audio":      has_audio,
+                "has_transcript": has_transcript,
+            })
     return render_template("index.html", episodes=episodes)
 
 
 @app.route("/episode/<date_str>")
 @login_required
 def episode(date_str: str):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        meta = {
+            "title":     ep_row.title,
+            "channel":   ep_row.channel,
+            "url":       ep_row.url,
+            "thumbnail": ep_row.thumbnail,
+            "duration":  ep_row.duration,
+            "level":     ep_row.level,
+            "source":    ep_row.source,
+        }
+        return render_template("episode.html", date=date_str, meta=meta)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     meta_file = ep / "meta.json"
     meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
     return render_template("episode.html", date=date_str, meta=meta)
 
 
-
 @app.route("/episode/<date_str>/delete", methods=["POST"])
 @login_required
 def episode_delete(date_str: str):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            # Delete all objects under the prefix
+            paginator = _get_r2().get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
+                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                if objects:
+                    _get_r2().delete_objects(
+                        Bucket=_r2_bucket(), Delete={"Objects": objects}
+                    )
+        with get_db() as db:
+            row = db.get(Episode, ep_row.id)
+            if row:
+                db.delete(row)
+        log.info(f"Deleted episode {date_str} from DB/R2")
+        return redirect(url_for("index"))
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     shutil.rmtree(ep)
-    log.info(f"Deleted episode {date_str}")
+    log.info(f"Deleted episode {date_str} from filesystem")
     return redirect(url_for("index"))
 
 
@@ -668,10 +895,13 @@ def upload_process():
     if level not in LEVELS:
         level = DEFAULT_LEVEL
 
+    current_user = get_current_user()
+    user_id      = current_user.id if current_user else None
+
     source_url  = request.form.get("source_url", "").strip()
     job_id      = str(uuid.uuid4())
     base_slug   = date.today().isoformat()
-    slug        = _unique_ep_slug(base_slug)
+    slug        = _unique_ep_slug(base_slug, user_id=user_id)
     ep_dir      = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -730,16 +960,18 @@ def upload_process():
             "level":             level,
         }
 
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+
     # Register job and start background thread
     with _jobs_lock:
         _jobs[job_id] = {
-            "status": "processing",
-            "slug":   slug,
-            "step":   "Starting…",
-            "step_num": 0,
-            "total_steps": 5,
-            "error":  "",
-            "started_at": time.time(),
+            "status":      "processing",
+            "slug":        slug,
+            "step":        "Starting…",
+            "step_num":    0,
+            "total_steps": total_steps,
+            "error":       "",
+            "started_at":  time.time(),
         }
 
     _prune_old_jobs()
@@ -747,6 +979,7 @@ def upload_process():
     t = threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        kwargs={"user_id": user_id},
         daemon=True,
     )
     t.start()
@@ -789,6 +1022,17 @@ def api_job_status(job_id: str):
 @app.route("/episode/<date_str>/audio")
 @login_required
 def episode_audio(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            result = _r2_find_audio(ep_row.r2_prefix)
+            if result:
+                key, _ = result
+                return redirect(_r2_presigned(key, expires=7200))
+        abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     audio = _find_audio(_ep_dir(date_str))
     if not audio:
         abort(404)
@@ -799,6 +1043,14 @@ def episode_audio(date_str: str):
 @app.route("/episode/<date_str>/subtitles.vtt")
 @login_required
 def episode_vtt(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            return redirect(_r2_presigned(f"{ep_row.r2_prefix}subtitles.vtt"))
+        abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     vtt = _ep_dir(date_str) / "subtitles.vtt"
     if not vtt.exists():
         abort(404)
@@ -808,6 +1060,14 @@ def episode_vtt(date_str: str):
 @app.route("/episode/<date_str>/cards.csv")
 @login_required
 def episode_cards(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            return redirect(_r2_presigned(f"{ep_row.r2_prefix}cards.csv"))
+        abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     csv_file = _ep_dir(date_str) / "cards.csv"
     if not csv_file.exists():
         abort(404)
@@ -821,25 +1081,38 @@ def episode_cards(date_str: str):
 
 # ── JSON API ──────────────────────────────────────────────────────────────────
 
+def _episode_json_response(date_str: str, filename: str):
+    """Shared helper: serve episode JSON from R2 (DB path) or local file (fallback)."""
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            try:
+                data = _r2_get_json(f"{ep_row.r2_prefix}{filename}")
+                return _make_response_cached(jsonify(data))
+            except Exception as exc:
+                log.error(f"R2 fetch failed for {ep_row.r2_prefix}{filename}: {exc}")
+                abort(404)
+        abort(404)
+    # File fallback
+    return _make_response_cached(jsonify(_read_json(_ep_dir(date_str) / filename)))
+
+
 @app.route("/api/episode/<date_str>/meta")
 @login_required
 def api_meta(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "meta.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "meta.json")
 
 
 @app.route("/api/episode/<date_str>/transcript")
 @login_required
 def api_transcript(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "transcript.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "transcript.json")
 
 
 @app.route("/api/episode/<date_str>/analysis")
 @login_required
 def api_analysis(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "analysis.json")
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -851,10 +1124,13 @@ def api_upload():
     if level not in LEVELS:
         level = DEFAULT_LEVEL
 
+    current_user = get_current_user()
+    user_id      = current_user.id if current_user else None
+
     source_url = request.form.get("source_url", "").strip()
     job_id     = str(uuid.uuid4())
     base_slug  = date.today().isoformat()
-    slug       = _unique_ep_slug(base_slug)
+    slug       = _unique_ep_slug(base_slug, user_id=user_id)
     ep_dir     = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -904,13 +1180,15 @@ def api_upload():
             "level":             level,
         }
 
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+
     with _jobs_lock:
         _jobs[job_id] = {
             "status":      "processing",
             "slug":        slug,
             "step":        "Starting…",
             "step_num":    0,
-            "total_steps": 5,
+            "total_steps": total_steps,
             "error":       "",
             "started_at":  time.time(),
         }
@@ -919,6 +1197,7 @@ def api_upload():
     threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        kwargs={"user_id": user_id},
         daemon=True,
     ).start()
 
@@ -940,6 +1219,34 @@ def api_explain():
 @app.route("/api/episodes")
 @login_required
 def api_episodes():
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if not user:
+            return jsonify([])
+        with get_db() as db:
+            rows = db.execute(
+                select(Episode)
+                .where(Episode.owner_user_id == user.id)
+                .order_by(Episode.date.desc(), Episode.created_at.desc())
+            ).scalars().all()
+        return jsonify([
+            {
+                "date": row.slug,
+                "meta": {
+                    "title":     row.title,
+                    "channel":   row.channel,
+                    "url":       row.url,
+                    "thumbnail": row.thumbnail,
+                    "duration":  row.duration,
+                    "level":     row.level,
+                    "source":    row.source,
+                },
+            }
+            for row in rows
+        ])
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     out = []
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):
