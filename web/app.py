@@ -18,6 +18,7 @@ from flask import (
     Flask,
     abort,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -48,6 +49,15 @@ _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
 from flask_cors import CORS
 
+from web.auth import (
+    authenticate_user,
+    clear_auth_cookie,
+    get_current_user,
+    login_required,
+    logout_token,
+    register_user,
+    set_auth_cookie,
+)
 from web.db import db_available, init_db
 
 log = logging.getLogger(__name__)
@@ -71,6 +81,130 @@ app.config["SECRET_KEY"] = os.environ.get(
 # Connect to Postgres and ensure all tables exist.
 # Silently skips if DATABASE_URL is not set (local dev without Postgres).
 init_db()
+
+
+@app.context_processor
+def _inject_auth():
+    """Make current_user available in every Jinja template automatically."""
+    return {"current_user": get_current_user(), "db_available": db_available()}
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if request.method == "GET":
+        if get_current_user():
+            return redirect(url_for("index"))
+        return render_template("login.html", error=None)
+
+    email    = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+    result   = authenticate_user(email, password) if db_available() else None
+
+    if result is None:
+        return render_template("login.html", error="Invalid email or password.")
+
+    _, token = result
+    resp = make_response(redirect(url_for("index")))
+    set_auth_cookie(resp, token)
+    return resp
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register_page():
+    if request.method == "GET":
+        if get_current_user():
+            return redirect(url_for("index"))
+        return render_template("register.html", error=None)
+
+    email    = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+    confirm  = request.form.get("confirm", "")
+
+    if password != confirm:
+        return render_template("register.html", error="Passwords do not match.")
+
+    if not db_available():
+        return render_template("register.html", error="Database not configured.")
+
+    try:
+        _, token = register_user(email, password)
+    except ValueError as exc:
+        return render_template("register.html", error=str(exc))
+
+    resp = make_response(redirect(url_for("index")))
+    set_auth_cookie(resp, token)
+    return resp
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    token = request.cookies.get("session_token")
+    logout_token(token)
+    resp = make_response(redirect(url_for("login_page")))
+    clear_auth_cookie(resp)
+    return resp
+
+
+# ── Auth API (for Vite SPA / Capacitor iOS) ───────────────────────────────────
+
+@app.route("/api/auth/register", methods=["POST"])
+def api_auth_register():
+    if not db_available():
+        return jsonify({"error": "Database not configured"}), 503
+    data     = request.get_json(force=True) or {}
+    email    = data.get("email", "")
+    password = data.get("password", "")
+    confirm  = data.get("confirm", password)
+    if password != confirm:
+        return jsonify({"error": "Passwords do not match"}), 400
+    try:
+        user, token = register_user(email, password)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"token": token, "user": {"id": str(user.id), "email": user.email, "is_admin": user.is_admin}})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    if not db_available():
+        return jsonify({"error": "Database not configured"}), 503
+    data     = request.get_json(force=True) or {}
+    email    = data.get("email", "")
+    password = data.get("password", "")
+    result   = authenticate_user(email, password)
+    if result is None:
+        return jsonify({"error": "Invalid email or password"}), 401
+    user, token = result
+    return jsonify({"token": token, "user": {"id": str(user.id), "email": user.email, "is_admin": user.is_admin}})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    token = _extract_bearer()
+    logout_token(token)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/me")
+@login_required
+def api_auth_me():
+    user = get_current_user()
+    return jsonify({
+        "id":       str(user.id),
+        "email":    user.email,
+        "is_admin": user.is_admin,
+        "transcription_limit": user.transcription_limit,
+    })
+
+
+def _extract_bearer() -> str | None:
+    """Pull bearer token from Authorization header (used by SPA/iOS logout)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return request.cookies.get("session_token")
 
 
 @app.before_request
@@ -219,6 +353,7 @@ def _make_response_cached(response):
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def index():
     episodes = []
     if EPISODES_DIR.exists():
@@ -241,6 +376,7 @@ def index():
 
 
 @app.route("/episode/<date_str>")
+@login_required
 def episode(date_str: str):
     ep = _ep_dir(date_str)
     meta_file = ep / "meta.json"
@@ -250,6 +386,7 @@ def episode(date_str: str):
 
 
 @app.route("/episode/<date_str>/delete", methods=["POST"])
+@login_required
 def episode_delete(date_str: str):
     ep = _ep_dir(date_str)
     shutil.rmtree(ep)
@@ -258,12 +395,14 @@ def episode_delete(date_str: str):
 
 
 @app.route("/subscriptions", methods=["GET"])
+@login_required
 def subscriptions_page():
     sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
     return render_template("subscriptions.html", sources=sources_data.get("sources", []))
 
 
 @app.route("/subscriptions/add", methods=["POST"])
+@login_required
 def subscriptions_add():
     name = request.form.get("name", "").strip()
     url = request.form.get("url", "").strip()
@@ -282,6 +421,7 @@ def subscriptions_add():
 
 
 @app.route("/subscriptions/delete", methods=["POST"])
+@login_required
 def subscriptions_delete():
     url = request.form.get("url", "").strip()
     if not url:
@@ -295,11 +435,13 @@ def subscriptions_delete():
 
 
 @app.route("/vocab")
+@login_required
 def vocab_page():
     return render_template("vocab.html")
 
 
 @app.route("/api/vocab", methods=["GET"])
+@login_required
 def api_vocab_get():
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
@@ -320,6 +462,7 @@ def api_vocab_get():
 
 
 @app.route("/api/vocab", methods=["POST"])
+@login_required
 def api_vocab_add():
     new_item = request.json
     if not new_item or not new_item.get("front"):
@@ -355,6 +498,7 @@ def api_vocab_add():
 
 
 @app.route("/api/vocab/<item_id>", methods=["DELETE"])
+@login_required
 def api_vocab_delete(item_id):
     if not VOCAB_FILE.exists():
         return jsonify({"error": "Not found"}), 404
@@ -374,6 +518,7 @@ def api_vocab_delete(item_id):
 
 
 @app.route("/vocab/export.csv")
+@login_required
 def vocab_export():
     if not VOCAB_FILE.exists():
         return "No vocab found", 404
@@ -412,11 +557,13 @@ def vocab_export():
 
 
 @app.route("/upload", methods=["GET"])
+@login_required
 def upload_page():
     return render_template("upload.html")
 
 
 @app.route("/upload", methods=["POST"])
+@login_required
 def upload_process():
     from lib.analyzer import LEVELS, DEFAULT_LEVEL
 
@@ -514,6 +661,7 @@ def upload_process():
 # ── Job status ────────────────────────────────────────────────────────────────
 
 @app.route("/job/<job_id>")
+@login_required
 def job_page(job_id: str):
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -523,6 +671,7 @@ def job_page(job_id: str):
 
 
 @app.route("/api/job/<job_id>/status")
+@login_required
 def api_job_status(job_id: str):
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -541,6 +690,7 @@ def api_job_status(job_id: str):
 # ── Static episode assets ─────────────────────────────────────────────────────
 
 @app.route("/episode/<date_str>/audio")
+@login_required
 def episode_audio(date_str: str):
     audio = _find_audio(_ep_dir(date_str))
     if not audio:
@@ -550,6 +700,7 @@ def episode_audio(date_str: str):
 
 
 @app.route("/episode/<date_str>/subtitles.vtt")
+@login_required
 def episode_vtt(date_str: str):
     vtt = _ep_dir(date_str) / "subtitles.vtt"
     if not vtt.exists():
@@ -558,6 +709,7 @@ def episode_vtt(date_str: str):
 
 
 @app.route("/episode/<date_str>/cards.csv")
+@login_required
 def episode_cards(date_str: str):
     csv_file = _ep_dir(date_str) / "cards.csv"
     if not csv_file.exists():
@@ -573,24 +725,28 @@ def episode_cards(date_str: str):
 # ── JSON API ──────────────────────────────────────────────────────────────────
 
 @app.route("/api/episode/<date_str>/meta")
+@login_required
 def api_meta(date_str: str):
     resp = jsonify(_read_json(_ep_dir(date_str) / "meta.json"))
     return _make_response_cached(resp)
 
 
 @app.route("/api/episode/<date_str>/transcript")
+@login_required
 def api_transcript(date_str: str):
     resp = jsonify(_read_json(_ep_dir(date_str) / "transcript.json"))
     return _make_response_cached(resp)
 
 
 @app.route("/api/episode/<date_str>/analysis")
+@login_required
 def api_analysis(date_str: str):
     resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
     return _make_response_cached(resp)
 
 
 @app.route("/api/upload", methods=["POST"])
+@login_required
 def api_upload():
     from lib.analyzer import LEVELS, DEFAULT_LEVEL
 
@@ -673,6 +829,7 @@ def api_upload():
 
 
 @app.route("/api/explain", methods=["POST"])
+@login_required
 def api_explain():
     from lib.analyzer import explain_sentence
     data = request.json or {}
@@ -684,6 +841,7 @@ def api_explain():
 
 
 @app.route("/api/episodes")
+@login_required
 def api_episodes():
     out = []
     if EPISODES_DIR.exists():

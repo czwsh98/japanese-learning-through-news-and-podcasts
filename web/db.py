@@ -211,7 +211,9 @@ def init_db() -> bool:
         url = "postgresql://" + url[len("postgres://"):]
 
     _engine = create_engine(url, pool_pre_ping=True, future=True)
-    _SessionFactory = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
+    # expire_on_commit=False keeps column values accessible on detached instances
+    # after the session closes — prevents DetachedInstanceError in templates.
+    _SessionFactory = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
     Base.metadata.create_all(_engine)
     log.info("Database connected — all tables ensured")
