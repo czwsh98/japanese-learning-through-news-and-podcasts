@@ -58,7 +58,8 @@ from web.auth import (
     register_user,
     set_auth_cookie,
 )
-from web.db import db_available, init_db
+from web.db import VocabItem, db_available, get_db, init_db
+from sqlalchemy import select
 
 log = logging.getLogger(__name__)
 
@@ -440,24 +441,58 @@ def vocab_page():
     return render_template("vocab.html")
 
 
+def _vocab_item_to_dict(row: VocabItem) -> dict:
+    """Serialize a VocabItem ORM row to the same dict shape the frontend expects."""
+    return {
+        "id":             str(row.id),
+        "word":           row.word,
+        "reading":        row.reading,
+        "en":             row.en,
+        "zh":             row.zh,
+        "example":        row.example,
+        "level":          row.level,
+        "type":           row.type,
+        "source_episode": row.source_episode,
+        "saved_at":       row.saved_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.saved_at else "",
+    }
+
+
 @app.route("/api/vocab", methods=["GET"])
 @login_required
 def api_vocab_get():
+    q     = request.args.get("q", "").lower().strip()
+    level = request.args.get("level", "").lower().strip()
+    vtype = request.args.get("type", "").lower().strip()
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify([])
+        with get_db() as db:
+            stmt = select(VocabItem).where(VocabItem.user_id == user.id)
+            if level and level != "all":
+                stmt = stmt.where(VocabItem.level == level)
+            if vtype and vtype != "all":
+                stmt = stmt.where(VocabItem.type == vtype)
+            rows = db.execute(stmt).scalars().all()
+        items = [_vocab_item_to_dict(r) for r in rows]
+        if q:
+            items = [i for i in items if
+                     q in i["word"].lower() or q in i["reading"].lower() or
+                     q in i["en"].lower()   or q in i["zh"].lower()]
+        return jsonify(items)
+
+    # ── File fallback (local dev without Postgres) ────────────────────────────
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
     items = data.get("items", [])
-    
-    q = request.args.get("q", "").lower().strip()
-    level = request.args.get("level", "").lower().strip()
-    vtype = request.args.get("type", "").lower().strip()
-    
     if q:
         items = [i for i in items if q in i.get("word", "").lower() or q in i.get("reading", "").lower() or q in i.get("en", "").lower() or q in i.get("zh", "").lower()]
     if level and level != "all":
         items = [i for i in items if i.get("level", "").lower() == level]
     if vtype and vtype != "all":
         items = [i for i in items if i.get("type", "").lower() == vtype]
-        
     return jsonify(items)
 
 
@@ -470,6 +505,36 @@ def api_vocab_add():
 
     word = new_item["front"]
 
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify({"error": "Not authenticated"}), 401
+        with get_db() as db:
+            existing = db.execute(
+                select(VocabItem).where(
+                    VocabItem.user_id == user.id,
+                    VocabItem.word    == word,
+                )
+            ).scalar_one_or_none()
+            if existing:
+                return jsonify({"status": "exists", "id": str(existing.id)}), 200
+
+            row = VocabItem(
+                user_id        = user.id,
+                word           = word,
+                reading        = new_item.get("reading", ""),
+                en             = new_item.get("en", ""),
+                zh             = new_item.get("zh", ""),
+                example        = new_item.get("example", ""),
+                level          = new_item.get("level", ""),
+                type           = new_item.get("type", "vocab"),
+                source_episode = new_item.get("source_episode", ""),
+            )
+            db.add(row)
+        return jsonify({"status": "success", "id": str(row.id)}), 201
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
         items = data.get("items", [])
@@ -489,7 +554,6 @@ def api_vocab_add():
             "source_episode": new_item.get("source_episode", ""),
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-
         items.append(item)
         data["items"] = items
         VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -500,6 +564,24 @@ def api_vocab_add():
 @app.route("/api/vocab/<item_id>", methods=["DELETE"])
 @login_required
 def api_vocab_delete(item_id):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify({"error": "Not authenticated"}), 401
+        with get_db() as db:
+            row = db.execute(
+                select(VocabItem).where(
+                    VocabItem.user_id == user.id,
+                    VocabItem.id      == item_id,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return jsonify({"error": "Not found"}), 404
+            db.delete(row)
+        return jsonify({"status": "deleted"}), 200
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     if not VOCAB_FILE.exists():
         return jsonify({"error": "Not found"}), 404
 
@@ -520,17 +602,32 @@ def api_vocab_delete(item_id):
 @app.route("/vocab/export.csv")
 @login_required
 def vocab_export():
-    if not VOCAB_FILE.exists():
-        return "No vocab found", 404
-        
-    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
-    items = data.get("items", [])
-    
     import csv
     import io
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return "Not authenticated", 401
+        with get_db() as db:
+            rows = db.execute(
+                select(VocabItem).where(VocabItem.user_id == user.id)
+                .order_by(VocabItem.saved_at)
+            ).scalars().all()
+        items = [_vocab_item_to_dict(r) for r in rows]
+    else:
+        # ── File fallback ─────────────────────────────────────────────────────
+        if not VOCAB_FILE.exists():
+            return "No vocab found", 404
+        data  = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+
+    if not items:
+        return "No vocab found", 404
+
     output = io.StringIO()
     writer = csv.writer(output)
-
     writer.writerow(["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"])
     for i in items:
         writer.writerow([
@@ -540,19 +637,19 @@ def vocab_export():
             i.get("zh", ""),
             i.get("example", ""),
             i.get("level", ""),
-            i.get("type", "")
+            i.get("type", ""),
         ])
-        
+
     mem = io.BytesIO()
-    mem.write(output.getvalue().encode('utf-8'))
+    mem.write(output.getvalue().encode("utf-8"))
     mem.seek(0)
     output.close()
-    
+
     return send_file(
         mem,
         mimetype="text/csv",
         as_attachment=True,
-        download_name=f"vocab-export-{time.strftime('%Y%m%d')}.csv"
+        download_name=f"vocab-export-{time.strftime('%Y%m%d')}.csv",
     )
 
 
