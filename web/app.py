@@ -58,8 +58,8 @@ from web.auth import (
     register_user,
     set_auth_cookie,
 )
-from web.db import Episode, VocabItem, db_available, get_db, init_db
-from sqlalchemy import select
+from web.db import Episode, TranscriptionUsage, VocabItem, db_available, get_db, init_db
+from sqlalchemy import func, select
 
 log = logging.getLogger(__name__)
 
@@ -200,6 +200,22 @@ def api_auth_me():
     })
 
 
+@app.route("/api/quota")
+@login_required
+def api_quota():
+    """Return the current user's transcription quota."""
+    user = get_current_user()
+    if not db_available() or not user:
+        return jsonify({"unlimited": True, "used": 0, "limit": -1, "allowed": True})
+    allowed, used, limit = _check_quota(user)
+    return jsonify({
+        "unlimited": limit == -1,
+        "used":      used,
+        "limit":     limit,
+        "allowed":   allowed,
+    })
+
+
 def _extract_bearer() -> str | None:
     """Pull bearer token from Authorization header (used by SPA/iOS logout)."""
     auth = request.headers.get("Authorization", "")
@@ -320,6 +336,46 @@ def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
             log.error(f"R2 upload failed for {key}: {exc}")
 
 
+# ── Transcription quota helpers ───────────────────────────────────────────────
+
+# Files larger than this trigger Whisper chunking; we disallow them for non-unlimited users.
+_TRANSCRIPTION_MAX_BYTES = 23 * 1024 * 1024   # 23 MB
+
+
+def _get_whitelist() -> set:
+    """Return lowercase email set from TRANSCRIPTION_WHITELIST env var."""
+    raw = os.environ.get("TRANSCRIPTION_WHITELIST", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _is_unlimited(user) -> bool:
+    """Admins and whitelisted emails have no transcription cap."""
+    if user.is_admin:
+        return True
+    return user.email.lower() in _get_whitelist()
+
+
+def _check_quota(user) -> "tuple[bool, int, int]":
+    """
+    Returns (allowed, used, limit).
+    limit = -1 means unlimited.
+    'used' counts rows with status 'started' or 'completed'.
+    """
+    with get_db() as db:
+        used = db.execute(
+            select(func.count()).select_from(TranscriptionUsage).where(
+                TranscriptionUsage.user_id == user.id,
+                TranscriptionUsage.status.in_(["started", "completed"]),
+            )
+        ).scalar() or 0
+
+    if _is_unlimited(user):
+        return True, used, -1
+
+    limit = user.transcription_limit
+    return used < limit, used, limit
+
+
 def _lookup_episode(slug: str) -> "Episode | None":
     """
     Look up an Episode row owned by the current user.
@@ -378,6 +434,8 @@ def _pipeline_thread(
     meta: dict,
     level: str,
     user_id=None,
+    usage_id=None,
+    unlimited=False,
 ) -> None:
     """Runs the full pipeline in a background thread."""
     from lib.transcriber import transcribe_audio
@@ -387,6 +445,18 @@ def _pipeline_thread(
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
+    def _mark_usage(status: str) -> None:
+        if usage_id and db_available():
+            try:
+                with get_db() as db:
+                    row = db.get(TranscriptionUsage, usage_id)
+                    if row:
+                        row.status = status
+                        if audio_path and audio_path.exists():
+                            row.audio_bytes = audio_path.stat().st_size
+            except Exception as e:
+                log.warning(f"Could not update TranscriptionUsage {usage_id}: {e}")
+
     try:
         # ── Step 1: Download ────────────────────────────────────────────────
         if source_url and audio_path is None:
@@ -395,6 +465,14 @@ def _pipeline_thread(
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
+
+            # Size check for URL submissions (file uploads are checked before thread)
+            if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+                size_mb = audio_path.stat().st_size // (1024 * 1024)
+                raise RuntimeError(
+                    f"Audio is {size_mb} MB — only files under 23 MB are supported. "
+                    "Contact the admin if you need longer content."
+                )
 
         # ── Step 2: Transcribe ───────────────────────────────────────────────
         _set_step(job_id, "Transcribing with Whisper…", 2)
@@ -447,6 +525,8 @@ def _pipeline_thread(
                 else:
                     existing.r2_prefix = r2_prefix
 
+        _mark_usage("completed")
+
         with _jobs_lock:
             _jobs[job_id]["status"]   = "done"
             _jobs[job_id]["step"]     = "Complete"
@@ -455,6 +535,7 @@ def _pipeline_thread(
     except Exception as exc:
         tb = traceback.format_exc()
         log.error(f"Job {job_id} failed:\n{tb}")
+        _mark_usage("failed")
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"]  = str(exc)
@@ -880,10 +961,19 @@ def vocab_export():
     )
 
 
+def _quota_context(user) -> dict:
+    """Build the quota dict passed to upload.html."""
+    if not db_available() or not user:
+        return {"unlimited": True, "used": 0, "limit": -1, "allowed": True}
+    allowed, used, limit = _check_quota(user)
+    return {"unlimited": limit == -1, "used": used, "limit": limit, "allowed": allowed}
+
+
 @app.route("/upload", methods=["GET"])
 @login_required
 def upload_page():
-    return render_template("upload.html")
+    user = get_current_user()
+    return render_template("upload.html", quota=_quota_context(user))
 
 
 @app.route("/upload", methods=["POST"])
@@ -898,6 +988,21 @@ def upload_process():
     current_user = get_current_user()
     user_id      = current_user.id if current_user else None
 
+    # ── Quota check ───────────────────────────────────────────────────────────
+    unlimited = False
+    quota     = _quota_context(current_user)
+    if db_available() and current_user:
+        allowed, used, limit = _check_quota(current_user)
+        unlimited = (limit == -1)
+        if not allowed:
+            limit_str = f"{used}/{limit}"
+            return render_template(
+                "upload.html",
+                quota=quota,
+                error=f"Transcription limit reached ({limit_str}). "
+                      "Contact the admin if you need more.",
+            ), 429
+
     source_url  = request.form.get("source_url", "").strip()
     job_id      = str(uuid.uuid4())
     base_slug   = date.today().isoformat()
@@ -909,7 +1014,7 @@ def upload_process():
     meta: dict = {}
 
     if source_url:
-        # URL path — download happens inside the thread
+        # URL path — download + size check happens inside the thread
         title_override = request.form.get("title", "").strip()
         meta = {
             "title":       title_override or source_url,
@@ -924,27 +1029,39 @@ def upload_process():
             "level":       level,
         }
     else:
-        # File upload — save synchronously, process in thread
+        # File upload — save synchronously, check size, then process in thread
         if "audio" not in request.files:
             shutil.rmtree(ep_dir, ignore_errors=True)
-            return render_template("upload.html", error="No file or URL provided."), 400
+            return render_template("upload.html", quota=quota, error="No file or URL provided."), 400
 
         f = request.files["audio"]
         if not f.filename:
             shutil.rmtree(ep_dir, ignore_errors=True)
-            return render_template("upload.html", error="No file selected."), 400
+            return render_template("upload.html", quota=quota, error="No file selected."), 400
 
         suffix = Path(f.filename).suffix.lower()
         if suffix not in UPLOAD_EXTENSIONS:
             shutil.rmtree(ep_dir, ignore_errors=True)
             return render_template(
                 "upload.html",
+                quota=quota,
                 error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
             ), 400
 
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
         f.save(audio_path)
+
+        # Size cap — only enforced for non-unlimited users
+        if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+            size_mb = audio_path.stat().st_size // (1024 * 1024)
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template(
+                "upload.html",
+                quota=quota,
+                error=f"Audio file is {size_mb} MB — only files under 23 MB are supported. "
+                      "Contact the admin if you need longer content.",
+            ), 400
 
         meta = {
             "title":             title,
@@ -959,6 +1076,18 @@ def upload_process():
             "original_filename": f.filename,
             "level":             level,
         }
+
+    # ── Insert usage row ──────────────────────────────────────────────────────
+    usage_id = None
+    if db_available() and current_user:
+        with get_db() as db:
+            usage = TranscriptionUsage(
+                user_id     = current_user.id,
+                audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                status      = "started",
+            )
+            db.add(usage)
+        usage_id = str(usage.id)
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -979,7 +1108,7 @@ def upload_process():
     t = threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
-        kwargs={"user_id": user_id},
+        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
         daemon=True,
     )
     t.start()
@@ -1127,6 +1256,17 @@ def api_upload():
     current_user = get_current_user()
     user_id      = current_user.id if current_user else None
 
+    # ── Quota check ───────────────────────────────────────────────────────────
+    unlimited = False
+    if db_available() and current_user:
+        allowed, used, limit = _check_quota(current_user)
+        unlimited = (limit == -1)
+        if not allowed:
+            return jsonify({
+                "error": f"Transcription limit reached ({used}/{limit}). Contact the admin for more.",
+                "quota": {"used": used, "limit": limit},
+            }), 429
+
     source_url = request.form.get("source_url", "").strip()
     job_id     = str(uuid.uuid4())
     base_slug  = date.today().isoformat()
@@ -1166,6 +1306,14 @@ def api_upload():
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
         f.save(audio_path)
+
+        if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+            size_mb = audio_path.stat().st_size // (1024 * 1024)
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({
+                "error": f"Audio file is {size_mb} MB — only files under 23 MB are supported."
+            }), 400
+
         meta = {
             "title":             title,
             "channel":           "Upload",
@@ -1179,6 +1327,18 @@ def api_upload():
             "original_filename": f.filename,
             "level":             level,
         }
+
+    # ── Insert usage row ──────────────────────────────────────────────────────
+    usage_id = None
+    if db_available() and current_user:
+        with get_db() as db:
+            usage = TranscriptionUsage(
+                user_id     = current_user.id,
+                audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                status      = "started",
+            )
+            db.add(usage)
+        usage_id = str(usage.id)
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -1197,7 +1357,7 @@ def api_upload():
     threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
-        kwargs={"user_id": user_id},
+        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
         daemon=True,
     ).start()
 
