@@ -620,7 +620,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const resp = await fetch("/api/explain", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: jaText })
+        body: JSON.stringify({ text: jaText, episode: dateStr })
       });
       const data = await resp.json();
       if (data.explanation) {

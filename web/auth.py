@@ -124,12 +124,19 @@ def clear_auth_cookie(response):
 
 # ── Business logic ────────────────────────────────────────────────────────────
 
-def register_user(email: str, password: str) -> tuple[User, str]:
+def register_user(
+    email: str,
+    password: str,
+    allowed_emails: "set | None" = None,
+) -> tuple[User, str]:
     """
     Create a new user account and open a session.
 
     The very first user ever registered is automatically made admin
     (transcription_limit ignored — admin = unlimited in rate-limit logic).
+
+    If *allowed_emails* is a non-empty set, only addresses in that set may
+    register (the very first user is always allowed so the owner can bootstrap).
 
     Returns (user, token).
     Raises ValueError with a user-facing message on validation failure.
@@ -149,6 +156,10 @@ def register_user(email: str, password: str) -> tuple[User, str]:
 
         # First-ever user becomes admin.
         is_first = db.execute(select(func.count()).select_from(User)).scalar() == 0
+
+        # Enforce registration whitelist (skip for the bootstrap admin account).
+        if not is_first and allowed_emails and email not in allowed_emails:
+            raise ValueError("Registration is not open. Contact the administrator.")
 
         user  = User(
             email=email,

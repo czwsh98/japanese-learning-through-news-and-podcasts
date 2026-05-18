@@ -47,6 +47,10 @@ UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", "
 # Slug pattern: YYYY-MM-DD or YYYY-MM-DD-N
 _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
+# YouTube video id (matches lib/downloader.py). The DB Episode model does not
+# store video_id, so it is re-derived from the stored URL at render time.
+_YT_ID_RE = re.compile(r"(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})")
+
 from flask_cors import CORS
 
 from web.auth import (
@@ -75,13 +79,19 @@ CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
 # SECRET_KEY is required for signed cookies / auth tokens (Phase 2+).
 # Falls back to an insecure default in local dev so the app still starts.
-app.config["SECRET_KEY"] = os.environ.get(
-    "SECRET_KEY", "dev-insecure-change-me-before-deploy"
-)
+_SK_DEFAULT = "dev-insecure-change-me-before-deploy"
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", _SK_DEFAULT)
 
 # Connect to Postgres and ensure all tables exist.
 # Silently skips if DATABASE_URL is not set (local dev without Postgres).
 init_db()
+
+# Guard: refuse to serve auth-protected data with a known-public key.
+if db_available() and app.config["SECRET_KEY"] == _SK_DEFAULT:
+    raise RuntimeError(
+        "SECRET_KEY env var is not set or uses the insecure default. "
+        "Set a strong random value before running in production."
+    )
 
 
 @app.context_processor
@@ -130,7 +140,7 @@ def register_page():
         return render_template("register.html", error="Database not configured.")
 
     try:
-        _, token = register_user(email, password)
+        _, token = register_user(email, password, allowed_emails=_get_whitelist())
     except ValueError as exc:
         return render_template("register.html", error=str(exc))
 
@@ -161,7 +171,7 @@ def api_auth_register():
     if password != confirm:
         return jsonify({"error": "Passwords do not match"}), 400
     try:
-        user, token = register_user(email, password)
+        user, token = register_user(email, password, allowed_emails=_get_whitelist())
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"token": token, "user": {"id": str(user.id), "email": user.email, "is_admin": user.is_admin}})
@@ -241,6 +251,12 @@ _MAX_JOBS = 50  # prune old jobs when exceeding this count
 
 _vocab_lock = threading.Lock()
 _sources_lock = threading.Lock()
+
+# Per-user, per-episode explain call counter.  {user_id_str: {episode_slug: int}}
+# In-memory only — resets on restart, which is acceptable for a personal app.
+_EXPLAIN_LIMIT = 5
+_explain_counts: dict[str, dict[str, int]] = {}
+_explain_lock = threading.Lock()
 
 # ── R2 helpers ────────────────────────────────────────────────────────────────
 
@@ -656,6 +672,7 @@ def episode(date_str: str):
     # ── DB path ───────────────────────────────────────────────────────────────
     ep_row = _lookup_episode(date_str)
     if ep_row is not None:
+        _yt = _YT_ID_RE.search(ep_row.url or "")
         meta = {
             "title":     ep_row.title,
             "channel":   ep_row.channel,
@@ -664,6 +681,7 @@ def episode(date_str: str):
             "duration":  ep_row.duration,
             "level":     ep_row.level,
             "source":    ep_row.source,
+            "video_id":  _yt.group(1) if _yt else "",
         }
         return render_template("episode.html", date=date_str, meta=meta)
 
@@ -1368,10 +1386,26 @@ def api_upload():
 @login_required
 def api_explain():
     from lib.analyzer import explain_sentence
-    data = request.json or {}
-    text = data.get("text", "").strip()
+    data    = request.json or {}
+    text    = data.get("text", "").strip()
+    episode = data.get("episode", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
+
+    # Rate-limit: _EXPLAIN_LIMIT calls per user per episode.
+    # Admins and whitelisted users are exempt.
+    user = get_current_user()
+    if user and episode and db_available() and not _is_unlimited(user):
+        uid = str(user.id)
+        with _explain_lock:
+            user_counts = _explain_counts.setdefault(uid, {})
+            used = user_counts.get(episode, 0)
+            if used >= _EXPLAIN_LIMIT:
+                return jsonify({
+                    "error": f"Explain limit reached ({_EXPLAIN_LIMIT} per episode)."
+                }), 429
+            user_counts[episode] = used + 1
+
     explanation = explain_sentence(text)
     return jsonify({"explanation": explanation})
 
