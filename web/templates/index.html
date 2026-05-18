@@ -73,10 +73,18 @@
   <div class="text-center py-24 border border-dashed border-gray-800 rounded-2xl">
     <div class="text-5xl mb-4">🎧</div>
     <p class="text-lg font-medium mb-2">No episodes yet</p>
-    <p class="text-sm text-gray-500 mb-6">Run the pipeline to download and process your first episode.</p>
-    <code class="bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-300">
-      python pipeline.py --dry-run
-    </code>
+    <p class="text-sm text-gray-500 mb-6">
+      Paste a YouTube, Apple Podcasts, or other podcast URL to get started.
+    </p>
+    <a href="/upload"
+       class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-500 transition-colors
+              text-white text-sm font-medium rounded-lg px-5 py-2.5">
+      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+      Add your first episode
+    </a>
   </div>
   {% endif %}
 </div>
