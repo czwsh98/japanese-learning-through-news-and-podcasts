@@ -438,8 +438,10 @@ def _get_registration_whitelist() -> "set | None":
 
 
 def _is_unlimited(user) -> bool:
-    """Admins and whitelisted emails have no transcription cap."""
+    """Admins, whitelisted emails, and users with limit=-1 have no transcription cap."""
     if user.is_admin:
+        return True
+    if user.transcription_limit == -1:
         return True
     return user.email.lower() in _get_whitelist()
 
@@ -1723,6 +1725,28 @@ def admin_delete_user(user_id):
             return redirect(url_for("admin_page"))
         db.delete(target)
     log.info("Admin deleted user %s", user_id)
+    return redirect(url_for("admin_page"))
+
+
+@app.route("/admin/user/<user_id>/toggle-unlimited", methods=["POST"])
+@_admin_required
+def admin_toggle_unlimited(user_id):
+    """Toggle a non-admin user between regular (limit=3) and unlimited (limit=-1)."""
+    from web.db import User
+    _DEFAULT_LIMIT = 3
+    with get_db() as db:
+        target = db.get(User, user_id)
+        if target is None:
+            abort(404)
+        if target.is_admin:
+            return redirect(url_for("admin_page"))
+        # If already unlimited (by DB flag or whitelist), demote to regular
+        if _is_unlimited(target):
+            target.transcription_limit = _DEFAULT_LIMIT
+            log.info("Admin set user %s to regular (limit=%d)", target.email, _DEFAULT_LIMIT)
+        else:
+            target.transcription_limit = -1
+            log.info("Admin set user %s to unlimited", target.email)
     return redirect(url_for("admin_page"))
 
 

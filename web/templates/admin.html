@@ -51,14 +51,32 @@
           <td class="px-4 py-3 text-gray-500 text-xs">{{ u.joined }}</td>
           <td class="px-4 py-3 text-right">
             {% if not u.is_admin %}
-            <form method="post" action="/admin/user/{{ u.id }}/delete"
-                  onsubmit="return confirm('Delete {{ u.email }} and all their data? This cannot be undone.')"
-                  onclick="event.stopPropagation()">
-              <button type="submit"
-                class="text-xs text-red-500 hover:text-red-300 border border-red-900 hover:border-red-600 px-2 py-0.5 rounded transition-colors">
-                Delete
-              </button>
-            </form>
+            <div class="flex items-center justify-end gap-2" onclick="event.stopPropagation()">
+              {# Toggle unlimited / regular #}
+              <form method="post" action="/admin/user/{{ u.id }}/toggle-unlimited">
+                {% if u.unlimited %}
+                <button type="submit"
+                  class="text-xs text-emerald-500 hover:text-emerald-300 border border-emerald-900 hover:border-emerald-600 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                  title="Click to make regular (limit 3 jobs)">
+                  ∞ Unlimited
+                </button>
+                {% else %}
+                <button type="submit"
+                  class="text-xs text-gray-500 hover:text-emerald-400 border border-gray-700 hover:border-emerald-700 px-2 py-0.5 rounded transition-colors whitespace-nowrap"
+                  title="Click to grant unlimited access">
+                  Make ∞
+                </button>
+                {% endif %}
+              </form>
+              {# Delete #}
+              <form method="post" action="/admin/user/{{ u.id }}/delete"
+                    onsubmit="return confirm('Delete {{ u.email }} and all their data? This cannot be undone.')">
+                <button type="submit"
+                  class="text-xs text-red-500 hover:text-red-300 border border-red-900 hover:border-red-600 px-2 py-0.5 rounded transition-colors">
+                  Delete
+                </button>
+              </form>
+            </div>
             {% endif %}
           </td>
         </tr>
@@ -79,7 +97,7 @@
 
   <p class="mt-4 text-xs text-gray-600">
     {{ users | length }} user{{ 's' if users | length != 1 }}.
-    "Unlimited" = admin or in TRANSCRIPTION_WHITELIST.
+    "Unlimited" = admin, in TRANSCRIPTION_WHITELIST, or toggled via this page.
     Whisper cost estimated at $0.006/min (128 kbps avg); actual may differ.
     Click a row to see transcription history.
   </p>
