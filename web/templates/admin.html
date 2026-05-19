@@ -2,7 +2,7 @@
 {% block title %}Admin — Mimichan{% endblock %}
 
 {% block content %}
-<div class="max-w-5xl mx-auto">
+<div class="max-w-6xl mx-auto">
   <h1 class="text-2xl font-bold text-white mb-6">Admin — Users</h1>
 
   <div class="overflow-x-auto rounded-lg border border-gray-800">
@@ -13,12 +13,17 @@
           <th class="px-4 py-3 text-center">Role</th>
           <th class="px-4 py-3 text-center">Jobs Used</th>
           <th class="px-4 py-3 text-center">Job Limit</th>
+          <th class="px-4 py-3 text-center">Audio (MB)</th>
+          <th class="px-4 py-3 text-center">Est. Whisper $</th>
           <th class="px-4 py-3">Joined</th>
+          <th class="px-4 py-3"></th>
         </tr>
       </thead>
-      <tbody class="divide-y divide-gray-800">
+      <tbody class="divide-y divide-gray-800" id="user-table-body">
         {% for u in users %}
-        <tr class="hover:bg-gray-900 transition-colors">
+        {# Main user row — clickable to expand history #}
+        <tr class="hover:bg-gray-900 transition-colors cursor-pointer user-row"
+            data-uid="{{ u.id }}" data-email="{{ u.email }}">
           <td class="px-4 py-3 text-gray-100 font-mono text-xs">{{ u.email }}</td>
           <td class="px-4 py-3 text-center">
             {% if u.is_admin %}
@@ -29,23 +34,43 @@
               <span class="text-[10px] px-2 py-0.5 rounded bg-gray-800 border border-gray-700 text-gray-400">user</span>
             {% endif %}
           </td>
-          <td class="px-4 py-3 text-center">
-            <span class="font-mono {% if not u.unlimited and u.used >= u.limit %}text-red-400{% elif not u.unlimited and u.used >= u.limit - 1 %}text-amber-400{% else %}text-gray-300{% endif %}">
-              {{ u.used }}
-            </span>
+          <td class="px-4 py-3 text-center font-mono
+            {% if not u.unlimited and u.used >= u.limit %}text-red-400
+            {% elif not u.unlimited and u.used >= u.limit - 1 %}text-amber-400
+            {% else %}text-gray-300{% endif %}">
+            {{ u.used }}
           </td>
           <td class="px-4 py-3 text-center text-gray-400 font-mono">
-            {% if u.unlimited %}
-              <span class="text-emerald-400">∞</span>
-            {% else %}
-              {{ u.limit }}
-            {% endif %}
+            {% if u.unlimited %}<span class="text-emerald-400">∞</span>{% else %}{{ u.limit }}{% endif %}
+          </td>
+          <td class="px-4 py-3 text-center text-gray-400 font-mono text-xs">{{ u.audio_mb }}</td>
+          <td class="px-4 py-3 text-center font-mono text-xs
+            {% if u.whisper_cost > 1 %}text-red-400{% elif u.whisper_cost > 0.1 %}text-amber-400{% else %}text-gray-400{% endif %}">
+            ${{ "%.4f"|format(u.whisper_cost) }}
           </td>
           <td class="px-4 py-3 text-gray-500 text-xs">{{ u.joined }}</td>
+          <td class="px-4 py-3 text-right">
+            {% if not u.is_admin %}
+            <form method="post" action="/admin/user/{{ u.id }}/delete"
+                  onsubmit="return confirm('Delete {{ u.email }} and all their data? This cannot be undone.')"
+                  onclick="event.stopPropagation()">
+              <button type="submit"
+                class="text-xs text-red-500 hover:text-red-300 border border-red-900 hover:border-red-600 px-2 py-0.5 rounded transition-colors">
+                Delete
+              </button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {# Hidden expandable history row #}
+        <tr class="history-row hidden bg-gray-950" id="history-{{ u.id }}">
+          <td colspan="8" class="px-6 py-4">
+            <div class="history-content text-gray-400 text-xs">Loading…</div>
+          </td>
         </tr>
         {% else %}
         <tr>
-          <td colspan="5" class="px-4 py-8 text-center text-gray-600">No users registered yet.</td>
+          <td colspan="8" class="px-4 py-8 text-center text-gray-600">No users registered yet.</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -55,7 +80,96 @@
   <p class="mt-4 text-xs text-gray-600">
     {{ users | length }} user{{ 's' if users | length != 1 }}.
     "Unlimited" = admin or in TRANSCRIPTION_WHITELIST.
-    Job limit is the lifetime cap for regular users (default 3).
+    Whisper cost estimated at $0.006/min (128 kbps avg); actual may differ.
+    Click a row to see transcription history.
   </p>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const STATUS_COLORS = {
+    completed: 'text-emerald-400',
+    started:   'text-amber-400',
+    failed:    'text-red-400',
+  };
+  const SOURCE_ICONS = { youtube: '▶', upload: '↑', url: '🔗' };
+
+  function formatHistory(data) {
+    if (!data.history || data.history.length === 0) {
+      return '<p class="text-gray-600 italic">No transcription jobs yet.</p>';
+    }
+    const rows = data.history.map(j => {
+      const statusCls = STATUS_COLORS[j.status] || 'text-gray-400';
+      const icon = SOURCE_ICONS[j.episode_source] || '';
+      const epLink = j.episode_slug
+        ? `<a href="/episode/${j.episode_slug}" class="hover:text-white underline underline-offset-2" onclick="event.stopPropagation()">${j.episode_title}</a>`
+        : `<span class="text-gray-600">${j.episode_title}</span>`;
+      const level = j.episode_level
+        ? `<span class="ml-1 opacity-60">${j.episode_level}</span>` : '';
+      return `<tr class="border-t border-gray-800">
+        <td class="pr-4 py-2 text-gray-500">${j.created_at}</td>
+        <td class="pr-4 py-2 ${statusCls} font-semibold">${j.status}</td>
+        <td class="pr-4 py-2">${icon} ${epLink}${level}</td>
+        <td class="pr-4 py-2 text-right font-mono">${j.duration_min} min</td>
+        <td class="pr-4 py-2 text-right font-mono">${j.audio_mb} MB</td>
+        <td class="py-2 text-right font-mono ${ j.whisper_cost > 0.05 ? 'text-amber-400' : '' }">$${j.whisper_cost.toFixed(4)}</td>
+      </tr>`;
+    }).join('');
+
+    return `<table class="w-full text-xs">
+      <thead>
+        <tr class="text-gray-600 uppercase">
+          <th class="pr-4 pb-1 text-left font-normal">Date</th>
+          <th class="pr-4 pb-1 text-left font-normal">Status</th>
+          <th class="pr-4 pb-1 text-left font-normal">Episode</th>
+          <th class="pr-4 pb-1 text-right font-normal">Duration</th>
+          <th class="pr-4 pb-1 text-right font-normal">Audio</th>
+          <th class="pb-1 text-right font-normal">Whisper $</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  // Track which row is open so we can toggle
+  let openUid = null;
+
+  document.querySelectorAll('.user-row').forEach(row => {
+    row.addEventListener('click', function () {
+      const uid = this.dataset.uid;
+      const historyRow = document.getElementById('history-' + uid);
+      const contentDiv = historyRow.querySelector('.history-content');
+
+      if (openUid && openUid !== uid) {
+        // Close previously open row
+        document.getElementById('history-' + openUid).classList.add('hidden');
+      }
+
+      if (openUid === uid) {
+        historyRow.classList.add('hidden');
+        openUid = null;
+        return;
+      }
+
+      historyRow.classList.remove('hidden');
+      openUid = uid;
+
+      // Only fetch once; subsequent opens reuse cached content
+      if (contentDiv.dataset.loaded) return;
+
+      fetch('/api/admin/user/' + uid + '/history')
+        .then(r => r.json())
+        .then(data => {
+          contentDiv.innerHTML = formatHistory(data);
+          contentDiv.dataset.loaded = '1';
+        })
+        .catch(() => {
+          contentDiv.textContent = 'Failed to load history.';
+        });
+    });
+  });
+})();
+</script>
 {% endblock %}

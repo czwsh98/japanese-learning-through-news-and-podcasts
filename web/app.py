@@ -1645,14 +1645,14 @@ def _admin_required(f):
 @app.route("/admin")
 @_admin_required
 def admin_page():
-    """Admin dashboard — list all users with quota usage."""
+    """Admin dashboard — list all users with quota and cost summary."""
     from web.db import User
     with get_db() as db:
         users = db.execute(
             select(User).order_by(User.created_at)
         ).scalars().all()
 
-        # Count used jobs per user in a single query
+        # Jobs used per user (started + completed)
         usage_counts = dict(
             db.execute(
                 select(
@@ -1664,21 +1664,97 @@ def admin_page():
             ).all()
         )
 
+        # Total audio bytes processed per user (all statuses)
+        audio_totals = dict(
+            db.execute(
+                select(
+                    TranscriptionUsage.user_id,
+                    func.sum(TranscriptionUsage.audio_bytes).label("total_bytes"),
+                ).group_by(TranscriptionUsage.user_id)
+            ).all()
+        )
+
     rows = []
     for u in users:
-        used  = usage_counts.get(u.id, 0)
-        unlimited = _is_unlimited(u)
+        used        = usage_counts.get(u.id, 0)
+        unlimited   = _is_unlimited(u)
+        total_bytes = int(audio_totals.get(u.id) or 0)
+        # Whisper cost estimate: assume avg 128 kbps → 16 000 B/s
+        # duration_min = bytes / 16000 / 60 ; cost = duration_min * $0.006
+        whisper_cost = total_bytes / 16_000 / 60 * 0.006
         rows.append({
-            "id":        str(u.id),
-            "email":     u.email,
-            "is_admin":  u.is_admin,
-            "unlimited": unlimited,
-            "limit":     u.transcription_limit,
-            "used":      used,
-            "joined":    u.created_at.strftime("%Y-%m-%d %H:%M UTC") if u.created_at else "—",
+            "id":           str(u.id),
+            "email":        u.email,
+            "is_admin":     u.is_admin,
+            "unlimited":    unlimited,
+            "limit":        u.transcription_limit,
+            "used":         used,
+            "joined":       u.created_at.strftime("%Y-%m-%d %H:%M UTC") if u.created_at else "—",
+            "audio_mb":     round(total_bytes / 1_048_576, 1),
+            "whisper_cost": round(whisper_cost, 4),
         })
 
     return render_template("admin.html", users=rows)
+
+
+@app.route("/admin/user/<user_id>/delete", methods=["POST"])
+@_admin_required
+def admin_delete_user(user_id):
+    """Delete a non-admin user and all their data (cascades via FK)."""
+    from web.db import User
+    with get_db() as db:
+        target = db.get(User, user_id)
+        if target is None:
+            abort(404)
+        if target.is_admin:
+            # Safety: never delete admin accounts via the UI
+            return redirect(url_for("admin_page"))
+        db.delete(target)
+    log.info("Admin deleted user %s", user_id)
+    return redirect(url_for("admin_page"))
+
+
+@app.route("/api/admin/user/<user_id>/history")
+@_admin_required
+def admin_user_history(user_id):
+    """Return transcription history for one user (for admin detail modal)."""
+    from web.db import User
+    with get_db() as db:
+        target = db.get(User, user_id)
+        if target is None:
+            abort(404)
+
+        rows = db.execute(
+            select(TranscriptionUsage, Episode)
+            .outerjoin(Episode, TranscriptionUsage.episode_id == Episode.id)
+            .where(TranscriptionUsage.user_id == user_id)
+            .order_by(TranscriptionUsage.created_at.desc())
+        ).all()
+
+    history = []
+    for usage, ep in rows:
+        ab = usage.audio_bytes or 0
+        ep_duration = ep.duration if ep else 0   # seconds from Episode row
+        # Use real episode duration when available, else estimate from bytes
+        if ep_duration and ep_duration > 0:
+            duration_min = ep_duration / 60
+        else:
+            duration_min = ab / 16_000 / 60      # fallback estimate
+        cost = round(duration_min * 0.006, 4)
+        history.append({
+            "id":             str(usage.id),
+            "status":         usage.status,
+            "created_at":     usage.created_at.strftime("%Y-%m-%d %H:%M UTC") if usage.created_at else "—",
+            "audio_mb":       round(ab / 1_048_576, 2),
+            "whisper_cost":   cost,
+            "duration_min":   round(duration_min, 1),
+            "episode_title":  ep.title  if ep else "—",
+            "episode_slug":   ep.slug   if ep else "",
+            "episode_level":  ep.level  if ep else "",
+            "episode_source": ep.source if ep else "",
+        })
+
+    return jsonify({"email": target.email, "history": history})
 
 
 if __name__ == "__main__":
