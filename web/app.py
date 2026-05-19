@@ -181,7 +181,7 @@ def register_page():
         return render_template("register.html", error="Database not configured.")
 
     try:
-        _, token = register_user(email, password, allowed_emails=_get_whitelist())
+        _, token = register_user(email, password, allowed_emails=_get_registration_whitelist())
     except ValueError as exc:
         return render_template("register.html", error=str(exc))
 
@@ -212,7 +212,7 @@ def api_auth_register():
     if password != confirm:
         return jsonify({"error": "Passwords do not match"}), 400
     try:
-        user, token = register_user(email, password, allowed_emails=_get_whitelist())
+        user, token = register_user(email, password, allowed_emails=_get_registration_whitelist())
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"token": token, "user": {
@@ -420,9 +420,21 @@ _TRANSCRIPTION_MAX_BYTES = 23 * 1024 * 1024   # 23 MB
 
 
 def _get_whitelist() -> set:
-    """Return lowercase email set from TRANSCRIPTION_WHITELIST env var."""
+    """Return lowercase email set from TRANSCRIPTION_WHITELIST env var.
+    Used only for unlimited-quota grants — NOT for gating registration.
+    """
     raw = os.environ.get("TRANSCRIPTION_WHITELIST", "")
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _get_registration_whitelist() -> "set | None":
+    """Return lowercase email set from REGISTRATION_WHITELIST env var.
+    When set, only these addresses may register (admin/bootstrap always exempt).
+    When unset or empty, registration is open to everyone.
+    """
+    raw = os.environ.get("REGISTRATION_WHITELIST", "")
+    emails = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    return emails if emails else None
 
 
 def _is_unlimited(user) -> bool:
