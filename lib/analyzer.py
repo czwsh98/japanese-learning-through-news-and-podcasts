@@ -103,7 +103,11 @@ _SCHEMA: dict = {
 }
 
 _EMPTY = {"highlights": [], "vocab": [], "grammar": [], "expressions": []}
-_CHUNK_CHARS = 1500   # target Japanese chars per analysis chunk
+_CHUNK_CHARS  = 1500   # target Japanese chars per analysis chunk
+# Hard ceiling on analysis API calls per job.  A 60-min transcript at typical
+# speaking pace (~300 chars/min) ≈ 12 chunks; 40 gives generous headroom while
+# bounding worst-case spend to ~40 × $0.003 ≈ $0.12 of gpt-4o-mini per job.
+_MAX_CHUNKS   = 40
 
 
 def _build_system(jlpt_tiers: list[str]) -> str:
@@ -241,6 +245,12 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     chunks = _chunk_segments(segments)
+    if len(chunks) > _MAX_CHUNKS:
+        log.warning(
+            "Transcript produced %d chunks (limit %d) — truncating to cap API spend.",
+            len(chunks), _MAX_CHUNKS,
+        )
+        chunks = chunks[:_MAX_CHUNKS]
     log.info(f"Analyzing {len(segments)} segments in {len(chunks)} chunk(s) via {_MODEL}")
 
     if len(chunks) <= 1:
@@ -276,18 +286,34 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
     return merged
 
 
+# Hard caps for explain_sentence to prevent runaway token usage.
+_EXPLAIN_MAX_INPUT_CHARS = 500   # ~1-3 Japanese sentences; reject anything longer
+_EXPLAIN_MAX_TOKENS      = 600   # ~400 words — enough for a thorough breakdown
+
+
 def explain_sentence(text: str) -> str:
-    """Return a detailed grammatical breakdown of a Japanese sentence via LLM."""
+    """Return a detailed grammatical breakdown of a Japanese sentence via LLM.
+
+    Input is capped at _EXPLAIN_MAX_INPUT_CHARS before the API call to prevent
+    token-burn via oversized requests.  Output is capped via max_tokens.
+    """
+    # Truncate at the library level as a backstop (the API endpoint also
+    # validates, but defense in depth means we never pass huge text to the LLM).
+    if len(text) > _EXPLAIN_MAX_INPUT_CHARS:
+        text = text[:_EXPLAIN_MAX_INPUT_CHARS]
+        log.warning("explain_sentence: input truncated to %d chars", _EXPLAIN_MAX_INPUT_CHARS)
+
     client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     system = (
         "You are a Japanese language expert. Provide a concise but thorough grammatical breakdown "
         "of the Japanese sentence provided by the user. Explain particles, conjugations, and "
         "any difficult vocabulary or idioms. Use Markdown for formatting. "
-        "The tone should be helpful and educational. Keep it under 200 words if possible."
+        "The tone should be helpful and educational. Keep it under 200 words."
     )
     try:
         response = client.chat.completions.create(
             model=_MODEL,
+            max_tokens=_EXPLAIN_MAX_TOKENS,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"Please explain this sentence: {text}"},

@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,6 +18,7 @@ from flask import (
     Flask,
     abort,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -46,7 +47,23 @@ UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", "
 # Slug pattern: YYYY-MM-DD or YYYY-MM-DD-N
 _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
+# YouTube video id (matches lib/downloader.py). The DB Episode model does not
+# store video_id, so it is re-derived from the stored URL at render time.
+_YT_ID_RE = re.compile(r"(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})")
+
 from flask_cors import CORS
+
+from web.auth import (
+    authenticate_user,
+    clear_auth_cookie,
+    get_current_user,
+    login_required,
+    logout_token,
+    register_user,
+    set_auth_cookie,
+)
+from web.db import Episode, TranscriptionUsage, VocabItem, db_available, get_db, init_db
+from sqlalchemy import func, select, text as sa_text
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +77,210 @@ app = Flask(
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 CORS(app)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB
+# SECRET_KEY is required for signed cookies / auth tokens (Phase 2+).
+# Falls back to an insecure default in local dev so the app still starts.
+_SK_DEFAULT = "dev-insecure-change-me-before-deploy"
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", _SK_DEFAULT)
+
+# Connect to Postgres and ensure all tables exist.
+# Silently skips if DATABASE_URL is not set (local dev without Postgres).
+init_db()
+
+# Bug #1 fix: when DATABASE_URL is set (i.e. we are in production or any
+# environment that expects a DB), refuse to start if the connection failed.
+# This prevents the app from silently booting into a fully unauthenticated,
+# shared-filesystem mode due to a mis-typed env var or a transient DB outage.
+# Set REQUIRE_DB=0 explicitly to suppress this guard (e.g. during local dev
+# when DATABASE_URL is intentionally absent — the guard never fires then
+# anyway because init_db() would have already skipped cleanly).
+_DATABASE_URL_SET = bool(os.environ.get("DATABASE_URL", ""))
+if _DATABASE_URL_SET and not db_available():
+    raise RuntimeError(
+        "DATABASE_URL is set but the database connection failed. "
+        "Fix the connection or unset DATABASE_URL for local dev."
+    )
+
+# Guard: refuse to serve auth-protected data with a known-public key.
+if db_available() and app.config["SECRET_KEY"] == _SK_DEFAULT:
+    raise RuntimeError(
+        "SECRET_KEY env var is not set or uses the insecure default. "
+        "Set a strong random value before running in production."
+    )
+
+# Bug #5 fix: reconcile stale 'started' usage rows left by a previous worker
+# crash / restart.  Any row older than 30 minutes that is still 'started' will
+# never be completed — flip them to 'failed' so they don't consume quota.
+if db_available():
+    try:
+        from datetime import timedelta
+        from sqlalchemy import update as _sa_update
+        _stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        with get_db() as _db:
+            _db.execute(
+                _sa_update(TranscriptionUsage)
+                .where(
+                    TranscriptionUsage.status == "started",
+                    TranscriptionUsage.created_at < _stale_cutoff,
+                )
+                .values(status="failed")
+            )
+        log.info("Reconciled stale 'started' transcription usage rows on startup")
+    except Exception as _e:
+        log.warning("Could not reconcile stale usage rows: %s", _e)
+
+
+@app.context_processor
+def _inject_auth():
+    """Make current_user and quota info available in every Jinja template."""
+    user = get_current_user()
+    unlimited = bool(user and _is_unlimited(user))
+    return {
+        "current_user":          user,
+        "current_user_unlimited": unlimited,
+        "db_available":          db_available(),
+    }
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if request.method == "GET":
+        if get_current_user():
+            return redirect(url_for("index"))
+        return render_template("login.html", error=None)
+
+    email    = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+    result   = authenticate_user(email, password) if db_available() else None
+
+    if result is None:
+        return render_template("login.html", error="Invalid email or password.")
+
+    _, token = result
+    resp = make_response(redirect(url_for("index")))
+    set_auth_cookie(resp, token)
+    return resp
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register_page():
+    if request.method == "GET":
+        if get_current_user():
+            return redirect(url_for("index"))
+        return render_template("register.html", error=None)
+
+    email    = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+    confirm  = request.form.get("confirm", "")
+
+    if password != confirm:
+        return render_template("register.html", error="Passwords do not match.")
+
+    if not db_available():
+        return render_template("register.html", error="Database not configured.")
+
+    try:
+        _, token = register_user(email, password, allowed_emails=_get_whitelist())
+    except ValueError as exc:
+        return render_template("register.html", error=str(exc))
+
+    resp = make_response(redirect(url_for("index")))
+    set_auth_cookie(resp, token)
+    return resp
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    token = request.cookies.get("session_token")
+    logout_token(token)
+    resp = make_response(redirect(url_for("login_page")))
+    clear_auth_cookie(resp)
+    return resp
+
+
+# ── Auth API (for Vite SPA / Capacitor iOS) ───────────────────────────────────
+
+@app.route("/api/auth/register", methods=["POST"])
+def api_auth_register():
+    if not db_available():
+        return jsonify({"error": "Database not configured"}), 503
+    data     = request.get_json(force=True) or {}
+    email    = data.get("email", "")
+    password = data.get("password", "")
+    confirm  = data.get("confirm", password)
+    if password != confirm:
+        return jsonify({"error": "Passwords do not match"}), 400
+    try:
+        user, token = register_user(email, password, allowed_emails=_get_whitelist())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"token": token, "user": {
+        "id": str(user.id), "email": user.email,
+        "is_admin": user.is_admin, "is_unlimited": _is_unlimited(user),
+    }})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    if not db_available():
+        return jsonify({"error": "Database not configured"}), 503
+    data     = request.get_json(force=True) or {}
+    email    = data.get("email", "")
+    password = data.get("password", "")
+    result   = authenticate_user(email, password)
+    if result is None:
+        return jsonify({"error": "Invalid email or password"}), 401
+    user, token = result
+    return jsonify({"token": token, "user": {
+        "id": str(user.id), "email": user.email,
+        "is_admin": user.is_admin, "is_unlimited": _is_unlimited(user),
+    }})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    token = _extract_bearer()
+    logout_token(token)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/me")
+@login_required
+def api_auth_me():
+    user = get_current_user()
+    unlimited = _is_unlimited(user)
+    return jsonify({
+        "id":                  str(user.id),
+        "email":               user.email,
+        "is_admin":            user.is_admin,
+        "is_unlimited":        unlimited,
+        "transcription_limit": -1 if unlimited else user.transcription_limit,
+    })
+
+
+@app.route("/api/quota")
+@login_required
+def api_quota():
+    """Return the current user's transcription quota."""
+    user = get_current_user()
+    if not db_available() or not user:
+        return jsonify({"unlimited": True, "used": 0, "limit": -1, "allowed": True})
+    allowed, used, limit = _check_quota(user)
+    return jsonify({
+        "unlimited": limit == -1,
+        "used":      used,
+        "limit":     limit,
+        "allowed":   allowed,
+    })
+
+
+def _extract_bearer() -> str | None:
+    """Pull bearer token from Authorization header (used by SPA/iOS logout)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    return request.cookies.get("session_token")
 
 
 @app.before_request
@@ -79,6 +300,230 @@ _MAX_JOBS = 50  # prune old jobs when exceeding this count
 
 _vocab_lock = threading.Lock()
 _sources_lock = threading.Lock()
+
+# Per-user explain call counter.
+# Structure: {user_id_str: {"day": "YYYY-MM-DD", "counts": {episode_slug: int}}}
+# Resets daily per-user.  When no episode slug is sent (direct API call) we
+# use the sentinel "_global_" so the limit still applies (Bug #5 fix).
+_EXPLAIN_LIMIT = 5
+_explain_counts: dict[str, dict] = {}
+_explain_lock = threading.Lock()
+_EXPLAIN_MAX_USERS = 500   # cap dict size to avoid unbounded growth
+
+# ── R2 helpers ────────────────────────────────────────────────────────────────
+
+_r2_client      = None
+_r2_client_lock = threading.Lock()
+
+# Files uploaded to R2 per episode (same list as the migration script).
+_EPISODE_UPLOAD_FILES = [
+    "meta.json", "transcript.json", "analysis.json", "highlights.json",
+    "subtitles.vtt", "cards.csv",
+    "audio.mp3", "audio.m4a", "audio.wav", "audio.ogg",
+    "audio.webm", "audio.flac", "audio.aac", "audio.opus",
+]
+
+
+def _get_r2():
+    """Return a cached boto3 R2 client, or None when R2 is not configured."""
+    global _r2_client
+    if _r2_client is not None:
+        return _r2_client
+    with _r2_client_lock:
+        if _r2_client is not None:
+            return _r2_client
+        endpoint = os.environ.get("R2_ENDPOINT_URL", "")
+        key      = os.environ.get("R2_ACCESS_KEY_ID", "")
+        secret   = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+        bucket   = os.environ.get("R2_BUCKET", "")
+        if not all([endpoint, key, secret, bucket]):
+            return None
+        import boto3
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=key,
+            aws_secret_access_key=secret,
+            region_name="auto",
+        )
+    return _r2_client
+
+
+def _r2_bucket() -> str:
+    return os.environ.get("R2_BUCKET", "")
+
+
+def _r2_presigned(key: str, expires: int = 3600) -> str:
+    """Generate a presigned GET URL for an R2 object."""
+    return _get_r2().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _r2_bucket(), "Key": key},
+        ExpiresIn=expires,
+    )
+
+
+def _r2_get_json(key: str) -> dict:
+    """Fetch and JSON-parse an object from R2."""
+    obj = _get_r2().get_object(Bucket=_r2_bucket(), Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
+    """
+    Locate the audio file under r2_prefix.
+    Returns (key, mimetype) or None.
+    Uses list_objects_v2 so we don't have to guess the extension.
+    """
+    resp = _get_r2().list_objects_v2(
+        Bucket=_r2_bucket(), Prefix=r2_prefix + "audio"
+    )
+    for obj in resp.get("Contents", []):
+        name = Path(obj["Key"]).name
+        if name.startswith("audio."):
+            mt = mimetypes.guess_type(name)[0] or "audio/mpeg"
+            return obj["Key"], mt
+    return None
+
+
+def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
+    """Upload all known episode files from ep_dir to R2 at r2_prefix.
+
+    Bug #3 fix: raises RuntimeError if the audio file (the only truly required
+    file) fails to upload.  Other files log a warning and continue.
+    """
+    mimetypes.add_type("text/vtt", ".vtt")
+    mimetypes.add_type("text/csv", ".csv")
+    s3     = _get_r2()
+    bucket = _r2_bucket()
+    for filename in _EPISODE_UPLOAD_FILES:
+        fpath = ep_dir / filename
+        if not fpath.exists():
+            continue
+        key = f"{r2_prefix}{filename}"
+        mt  = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+        is_audio = filename.startswith("audio.")
+        try:
+            s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
+            log.info(f"R2 uploaded: {key}")
+        except Exception as exc:
+            if is_audio:
+                raise RuntimeError(
+                    f"Failed to upload audio to R2 ({key}): {exc}"
+                ) from exc
+            log.warning(f"R2 upload failed (non-critical) for {key}: {exc}")
+
+
+# ── Transcription quota helpers ───────────────────────────────────────────────
+
+# Files larger than this trigger Whisper chunking; we disallow them for non-unlimited users.
+_TRANSCRIPTION_MAX_BYTES = 23 * 1024 * 1024   # 23 MB
+
+
+def _get_whitelist() -> set:
+    """Return lowercase email set from TRANSCRIPTION_WHITELIST env var."""
+    raw = os.environ.get("TRANSCRIPTION_WHITELIST", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _is_unlimited(user) -> bool:
+    """Admins and whitelisted emails have no transcription cap."""
+    if user.is_admin:
+        return True
+    return user.email.lower() in _get_whitelist()
+
+
+def _check_quota(user) -> "tuple[bool, int, int]":
+    """
+    Returns (allowed, used, limit).
+    limit = -1 means unlimited.
+    'used' counts rows with status 'started' or 'completed'.
+    """
+    with get_db() as db:
+        used = db.execute(
+            select(func.count()).select_from(TranscriptionUsage).where(
+                TranscriptionUsage.user_id == user.id,
+                TranscriptionUsage.status.in_(["started", "completed"]),
+            )
+        ).scalar() or 0
+
+    if _is_unlimited(user):
+        return True, used, -1
+
+    limit = user.transcription_limit
+    return used < limit, used, limit
+
+
+def _atomic_quota_insert(user, audio_bytes: int = 0) -> "TranscriptionUsage | None":
+    """
+    Bug #2 fix: atomically check quota and insert a 'started' usage row.
+
+    Uses a Postgres per-user advisory lock (pg_advisory_xact_lock) so that
+    concurrent requests for the same user serialize at the DB level — the
+    READ COMMITTED default isolation alone would let two concurrent SELECT
+    COUNT(*) calls both see the same count before either INSERT commits.
+
+    Returns the new TranscriptionUsage row (with .id populated) if allowed,
+    or raises ValueError with a user-facing message when the cap is hit.
+    Skips the lock entirely for unlimited users (admin / whitelisted).
+    """
+    with get_db() as db:
+        if not _is_unlimited(user):
+            # Serialize all concurrent quota checks for this user.
+            # pg_advisory_xact_lock is released automatically when the
+            # transaction commits or rolls back.
+            uid_hash = hash(str(user.id)) & 0x7FFFFFFFFFFFFFFF  # positive int64
+            db.execute(sa_text("SELECT pg_advisory_xact_lock(:h)"), {"h": uid_hash})
+
+            # Re-read the count inside the lock — now safe against concurrent writers.
+            used = db.execute(
+                select(func.count()).select_from(TranscriptionUsage).where(
+                    TranscriptionUsage.user_id == user.id,
+                    TranscriptionUsage.status.in_(["started", "completed"]),
+                )
+            ).scalar() or 0
+            limit = user.transcription_limit
+            if used >= limit:
+                raise ValueError(
+                    f"Transcription limit reached ({used}/{limit}). "
+                    "Contact the admin if you need more."
+                )
+
+        usage = TranscriptionUsage(
+            user_id     = user.id,
+            audio_bytes = audio_bytes,
+            status      = "started",
+        )
+        db.add(usage)
+        db.flush()   # populate usage.id before the session closes
+        db.expunge(usage)
+
+    return usage
+
+
+def _lookup_episode(slug: str) -> "Episode | None":
+    """
+    Look up an Episode row owned by the current user.
+    - Returns the Episode row if found.
+    - aborts(404) if the DB is available but the episode is not found for this user.
+    - Returns None when the DB is not available (caller falls back to local filesystem).
+    """
+    if not db_available():
+        return None
+    user = get_current_user()
+    if user is None:
+        abort(401)
+    if not _SLUG_RE.match(slug):
+        abort(400)
+    with get_db() as db:
+        row = db.execute(
+            select(Episode).where(
+                Episode.owner_user_id == user.id,
+                Episode.slug == slug,
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        abort(404)
+    return row
 
 
 def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
@@ -112,6 +557,9 @@ def _pipeline_thread(
     audio_path: Path | None,
     meta: dict,
     level: str,
+    user_id=None,
+    usage_id=None,
+    unlimited=False,
 ) -> None:
     """Runs the full pipeline in a background thread."""
     from lib.transcriber import transcribe_audio
@@ -119,7 +567,19 @@ def _pipeline_thread(
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files
 
-    total_steps = 5
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+
+    def _mark_usage(status: str) -> None:
+        if usage_id and db_available():
+            try:
+                with get_db() as db:
+                    row = db.get(TranscriptionUsage, usage_id)
+                    if row:
+                        row.status = status
+                        if audio_path and audio_path.exists():
+                            row.audio_bytes = audio_path.stat().st_size
+            except Exception as e:
+                log.warning(f"Could not update TranscriptionUsage {usage_id}: {e}")
 
     try:
         # ── Step 1: Download ────────────────────────────────────────────────
@@ -129,6 +589,20 @@ def _pipeline_thread(
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
+
+            # Byte size check (catches files whose bitrate makes them cheap to
+            # download but expensive for the chunked-transcription path).
+            if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+                size_mb = audio_path.stat().st_size // (1024 * 1024)
+                raise RuntimeError(
+                    f"Audio is {size_mb} MB — only files under 23 MB are supported. "
+                    "Contact the admin if you need longer content."
+                )
+
+        # Duration cap — runs for both URL downloads and file uploads.
+        # Byte size alone doesn't bound Whisper cost (low-bitrate = long audio).
+        from lib.transcriber import check_audio_duration
+        check_audio_duration(audio_path, unlimited=unlimited)
 
         # ── Step 2: Transcribe ───────────────────────────────────────────────
         _set_step(job_id, "Transcribing with Whisper…", 2)
@@ -146,14 +620,71 @@ def _pipeline_thread(
         _set_step(job_id, "Writing episode files…", 5)
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
+        # ── Step 6: Upload to R2 + persist Episode row ───────────────────────
+        # Always persist the Episode row when the DB is available, regardless
+        # of whether R2 is configured.  r2_prefix is left empty when R2 is not
+        # configured; asset routes fall back to local disk in that case.
+        r2_prefix = ""
+        if user_id and db_available():
+            if _get_r2():
+                _set_step(job_id, "Saving to cloud storage…", 6)
+                r2_prefix = f"episodes/{user_id}/{slug}/"
+                _r2_upload_episode(ep_dir, r2_prefix)
+
+            # re-read meta (download may have enriched it)
+            meta_path = ep_dir / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+            with get_db() as db:
+                existing = db.execute(
+                    select(Episode).where(
+                        Episode.owner_user_id == user_id,
+                        Episode.slug == slug,
+                    )
+                ).scalar_one_or_none()
+                if not existing:
+                    ep_row = Episode(
+                        owner_user_id = user_id,
+                        slug          = slug,
+                        date          = slug[:10],
+                        title         = meta.get("title", slug),
+                        channel       = meta.get("channel", ""),
+                        url           = meta.get("url", ""),
+                        thumbnail     = meta.get("thumbnail", ""),
+                        duration      = meta.get("duration", 0),
+                        level         = meta.get("level", level),
+                        source        = meta.get("source", ""),
+                        r2_prefix     = r2_prefix,
+                    )
+                    db.add(ep_row)
+                else:
+                    if r2_prefix:
+                        existing.r2_prefix = r2_prefix
+
+        _mark_usage("completed")
+
+        # Bug #4 fix: after a successful R2 upload the local ep_dir is no longer
+        # needed (canonical copy is in R2).  Remove it to prevent unbounded disk
+        # growth on long-lived workers.  When R2 is not configured we keep the
+        # local files (they are the only copy).
+        if r2_prefix:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            log.info(f"Cleaned up local ep_dir after R2 upload: {ep_dir}")
+
         with _jobs_lock:
-            _jobs[job_id]["status"] = "done"
-            _jobs[job_id]["step"]   = "Complete"
+            _jobs[job_id]["status"]   = "done"
+            _jobs[job_id]["step"]     = "Complete"
             _jobs[job_id]["step_num"] = total_steps
 
     except Exception as exc:
         tb = traceback.format_exc()
         log.error(f"Job {job_id} failed:\n{tb}")
+        _mark_usage("failed")
+        # Bug #4 fix (failure path): always clean up ep_dir on error — a
+        # partially-written directory is worse than nothing, and it prevents
+        # disk fill-up from accumulated failed jobs.
+        shutil.rmtree(ep_dir, ignore_errors=True)
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"]  = str(exc)
@@ -189,13 +720,24 @@ def _find_audio(ep_dir: Path) -> Path | None:
     return None
 
 
-def _unique_ep_slug(base: str) -> str:
-    """Return a slug that doesn't already have a processed transcript."""
-    slug = base
+def _unique_ep_slug(base: str, user_id=None) -> str:
+    """Return a slug not already used for this user (DB) or on disk (fallback)."""
+    slug    = base
     counter = 2
-    while (EPISODES_DIR / slug / "transcript.json").exists():
-        slug = f"{base}-{counter}"
-        counter += 1
+    if user_id and db_available():
+        with get_db() as db:
+            while db.execute(
+                select(Episode).where(
+                    Episode.owner_user_id == user_id,
+                    Episode.slug == slug,
+                )
+            ).scalar_one_or_none() is not None:
+                slug = f"{base}-{counter}"
+                counter += 1
+    else:
+        while (EPISODES_DIR / slug / "transcript.json").exists():
+            slug = f"{base}-{counter}"
+            counter += 1
     return slug
 
 
@@ -208,51 +750,119 @@ def _make_response_cached(response):
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def index():
     episodes = []
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user:
+            with get_db() as db:
+                rows = db.execute(
+                    select(Episode)
+                    .where(Episode.owner_user_id == user.id)
+                    .order_by(Episode.date.desc(), Episode.created_at.desc())
+                ).scalars().all()
+            for row in rows:
+                episodes.append({
+                    "date": row.slug,
+                    "meta": {
+                        "title":     row.title,
+                        "channel":   row.channel,
+                        "url":       row.url,
+                        "thumbnail": row.thumbnail,
+                        "duration":  row.duration,
+                        "level":     row.level,
+                        "source":    row.source,
+                    },
+                    "has_audio":      bool(row.r2_prefix),
+                    "has_transcript": bool(row.r2_prefix),
+                })
+        return render_template("index.html", episodes=episodes)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):
             if not ep.is_dir() or not _SLUG_RE.match(ep.name):
                 continue
             meta_file = ep / "meta.json"
             meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
-            has_audio = _find_audio(ep) is not None
+            has_audio      = _find_audio(ep) is not None
             has_transcript = (ep / "transcript.json").exists()
-            episodes.append(
-                {
-                    "date": ep.name,
-                    "meta": meta,
-                    "has_audio": has_audio,
-                    "has_transcript": has_transcript,
-                }
-            )
+            episodes.append({
+                "date":           ep.name,
+                "meta":           meta,
+                "has_audio":      has_audio,
+                "has_transcript": has_transcript,
+            })
     return render_template("index.html", episodes=episodes)
 
 
 @app.route("/episode/<date_str>")
+@login_required
 def episode(date_str: str):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        _yt = _YT_ID_RE.search(ep_row.url or "")
+        meta = {
+            "title":     ep_row.title,
+            "channel":   ep_row.channel,
+            "url":       ep_row.url,
+            "thumbnail": ep_row.thumbnail,
+            "duration":  ep_row.duration,
+            "level":     ep_row.level,
+            "source":    ep_row.source,
+            "video_id":  _yt.group(1) if _yt else "",
+        }
+        return render_template("episode.html", date=date_str, meta=meta)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     meta_file = ep / "meta.json"
     meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
     return render_template("episode.html", date=date_str, meta=meta)
 
 
-
 @app.route("/episode/<date_str>/delete", methods=["POST"])
+@login_required
 def episode_delete(date_str: str):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            # Delete all objects under the prefix
+            paginator = _get_r2().get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
+                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                if objects:
+                    _get_r2().delete_objects(
+                        Bucket=_r2_bucket(), Delete={"Objects": objects}
+                    )
+        with get_db() as db:
+            row = db.get(Episode, ep_row.id)
+            if row:
+                db.delete(row)
+        log.info(f"Deleted episode {date_str} from DB/R2")
+        return redirect(url_for("index"))
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     shutil.rmtree(ep)
-    log.info(f"Deleted episode {date_str}")
+    log.info(f"Deleted episode {date_str} from filesystem")
     return redirect(url_for("index"))
 
 
 @app.route("/subscriptions", methods=["GET"])
+@login_required
 def subscriptions_page():
     sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
     return render_template("subscriptions.html", sources=sources_data.get("sources", []))
 
 
 @app.route("/subscriptions/add", methods=["POST"])
+@login_required
 def subscriptions_add():
     name = request.form.get("name", "").strip()
     url = request.form.get("url", "").strip()
@@ -271,6 +881,7 @@ def subscriptions_add():
 
 
 @app.route("/subscriptions/delete", methods=["POST"])
+@login_required
 def subscriptions_delete():
     url = request.form.get("url", "").strip()
     if not url:
@@ -284,31 +895,68 @@ def subscriptions_delete():
 
 
 @app.route("/vocab")
+@login_required
 def vocab_page():
     return render_template("vocab.html")
 
 
+def _vocab_item_to_dict(row: VocabItem) -> dict:
+    """Serialize a VocabItem ORM row to the same dict shape the frontend expects."""
+    return {
+        "id":             str(row.id),
+        "word":           row.word,
+        "reading":        row.reading,
+        "en":             row.en,
+        "zh":             row.zh,
+        "example":        row.example,
+        "level":          row.level,
+        "type":           row.type,
+        "source_episode": row.source_episode,
+        "saved_at":       row.saved_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.saved_at else "",
+    }
+
+
 @app.route("/api/vocab", methods=["GET"])
+@login_required
 def api_vocab_get():
+    q     = request.args.get("q", "").lower().strip()
+    level = request.args.get("level", "").lower().strip()
+    vtype = request.args.get("type", "").lower().strip()
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify([])
+        with get_db() as db:
+            stmt = select(VocabItem).where(VocabItem.user_id == user.id)
+            if level and level != "all":
+                stmt = stmt.where(VocabItem.level == level)
+            if vtype and vtype != "all":
+                stmt = stmt.where(VocabItem.type == vtype)
+            rows = db.execute(stmt).scalars().all()
+        items = [_vocab_item_to_dict(r) for r in rows]
+        if q:
+            items = [i for i in items if
+                     q in i["word"].lower() or q in i["reading"].lower() or
+                     q in i["en"].lower()   or q in i["zh"].lower()]
+        return jsonify(items)
+
+    # ── File fallback (local dev without Postgres) ────────────────────────────
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
     items = data.get("items", [])
-    
-    q = request.args.get("q", "").lower().strip()
-    level = request.args.get("level", "").lower().strip()
-    vtype = request.args.get("type", "").lower().strip()
-    
     if q:
         items = [i for i in items if q in i.get("word", "").lower() or q in i.get("reading", "").lower() or q in i.get("en", "").lower() or q in i.get("zh", "").lower()]
     if level and level != "all":
         items = [i for i in items if i.get("level", "").lower() == level]
     if vtype and vtype != "all":
         items = [i for i in items if i.get("type", "").lower() == vtype]
-        
     return jsonify(items)
 
 
 @app.route("/api/vocab", methods=["POST"])
+@login_required
 def api_vocab_add():
     new_item = request.json
     if not new_item or not new_item.get("front"):
@@ -316,6 +964,36 @@ def api_vocab_add():
 
     word = new_item["front"]
 
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify({"error": "Not authenticated"}), 401
+        with get_db() as db:
+            existing = db.execute(
+                select(VocabItem).where(
+                    VocabItem.user_id == user.id,
+                    VocabItem.word    == word,
+                )
+            ).scalar_one_or_none()
+            if existing:
+                return jsonify({"status": "exists", "id": str(existing.id)}), 200
+
+            row = VocabItem(
+                user_id        = user.id,
+                word           = word,
+                reading        = new_item.get("reading", ""),
+                en             = new_item.get("en", ""),
+                zh             = new_item.get("zh", ""),
+                example        = new_item.get("example", ""),
+                level          = new_item.get("level", ""),
+                type           = new_item.get("type", "vocab"),
+                source_episode = new_item.get("source_episode", ""),
+            )
+            db.add(row)
+        return jsonify({"status": "success", "id": str(row.id)}), 201
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
         items = data.get("items", [])
@@ -335,7 +1013,6 @@ def api_vocab_add():
             "source_episode": new_item.get("source_episode", ""),
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-
         items.append(item)
         data["items"] = items
         VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -344,7 +1021,26 @@ def api_vocab_add():
 
 
 @app.route("/api/vocab/<item_id>", methods=["DELETE"])
+@login_required
 def api_vocab_delete(item_id):
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return jsonify({"error": "Not authenticated"}), 401
+        with get_db() as db:
+            row = db.execute(
+                select(VocabItem).where(
+                    VocabItem.user_id == user.id,
+                    VocabItem.id      == item_id,
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return jsonify({"error": "Not found"}), 404
+            db.delete(row)
+        return jsonify({"status": "deleted"}), 200
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     if not VOCAB_FILE.exists():
         return jsonify({"error": "Not found"}), 404
 
@@ -363,18 +1059,34 @@ def api_vocab_delete(item_id):
 
 
 @app.route("/vocab/export.csv")
+@login_required
 def vocab_export():
-    if not VOCAB_FILE.exists():
-        return "No vocab found", 404
-        
-    data = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
-    items = data.get("items", [])
-    
     import csv
     import io
+
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if user is None:
+            return "Not authenticated", 401
+        with get_db() as db:
+            rows = db.execute(
+                select(VocabItem).where(VocabItem.user_id == user.id)
+                .order_by(VocabItem.saved_at)
+            ).scalars().all()
+        items = [_vocab_item_to_dict(r) for r in rows]
+    else:
+        # ── File fallback ─────────────────────────────────────────────────────
+        if not VOCAB_FILE.exists():
+            return "No vocab found", 404
+        data  = json.loads(VOCAB_FILE.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+
+    if not items:
+        return "No vocab found", 404
+
     output = io.StringIO()
     writer = csv.writer(output)
-
     writer.writerow(["Front", "Reading", "English", "Chinese", "Example", "Level", "Type"])
     for i in items:
         writer.writerow([
@@ -384,28 +1096,39 @@ def vocab_export():
             i.get("zh", ""),
             i.get("example", ""),
             i.get("level", ""),
-            i.get("type", "")
+            i.get("type", ""),
         ])
-        
+
     mem = io.BytesIO()
-    mem.write(output.getvalue().encode('utf-8'))
+    mem.write(output.getvalue().encode("utf-8"))
     mem.seek(0)
     output.close()
-    
+
     return send_file(
         mem,
         mimetype="text/csv",
         as_attachment=True,
-        download_name=f"vocab-export-{time.strftime('%Y%m%d')}.csv"
+        download_name=f"vocab-export-{time.strftime('%Y%m%d')}.csv",
     )
 
 
+def _quota_context(user) -> dict:
+    """Build the quota dict passed to upload.html."""
+    if not db_available() or not user:
+        return {"unlimited": True, "used": 0, "limit": -1, "allowed": True}
+    allowed, used, limit = _check_quota(user)
+    return {"unlimited": limit == -1, "used": used, "limit": limit, "allowed": allowed}
+
+
 @app.route("/upload", methods=["GET"])
+@login_required
 def upload_page():
-    return render_template("upload.html")
+    user = get_current_user()
+    return render_template("upload.html", quota=_quota_context(user))
 
 
 @app.route("/upload", methods=["POST"])
+@login_required
 def upload_process():
     from lib.analyzer import LEVELS, DEFAULT_LEVEL
 
@@ -413,10 +1136,19 @@ def upload_process():
     if level not in LEVELS:
         level = DEFAULT_LEVEL
 
+    current_user = get_current_user()
+    user_id      = current_user.id if current_user else None
+
+    # Determine if this user is exempt from size / quota limits.
+    # The atomic quota check+insert happens later (after the file is staged)
+    # so that the check and insert share a single transaction (Bug #1 fix).
+    unlimited = bool(current_user and _is_unlimited(current_user))
+    quota     = _quota_context(current_user)
+
     source_url  = request.form.get("source_url", "").strip()
     job_id      = str(uuid.uuid4())
     base_slug   = date.today().isoformat()
-    slug        = _unique_ep_slug(base_slug)
+    slug        = _unique_ep_slug(base_slug, user_id=user_id)
     ep_dir      = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -424,7 +1156,7 @@ def upload_process():
     meta: dict = {}
 
     if source_url:
-        # URL path — download happens inside the thread
+        # URL path — download + size check happens inside the thread
         title_override = request.form.get("title", "").strip()
         meta = {
             "title":       title_override or source_url,
@@ -439,27 +1171,54 @@ def upload_process():
             "level":       level,
         }
     else:
-        # File upload — save synchronously, process in thread
+        # File upload — save synchronously, check size, then process in thread
         if "audio" not in request.files:
             shutil.rmtree(ep_dir, ignore_errors=True)
-            return render_template("upload.html", error="No file or URL provided."), 400
+            return render_template("upload.html", quota=quota, error="No file or URL provided."), 400
 
         f = request.files["audio"]
         if not f.filename:
             shutil.rmtree(ep_dir, ignore_errors=True)
-            return render_template("upload.html", error="No file selected."), 400
+            return render_template("upload.html", quota=quota, error="No file selected."), 400
 
         suffix = Path(f.filename).suffix.lower()
         if suffix not in UPLOAD_EXTENSIONS:
             shutil.rmtree(ep_dir, ignore_errors=True)
             return render_template(
                 "upload.html",
+                quota=quota,
                 error=f"Unsupported format '{suffix}'. Accepted: {', '.join(sorted(UPLOAD_EXTENSIONS))}",
             ), 400
 
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
+
+        # Bug #2 fix: reject oversized uploads before writing to disk using the
+        # Content-Length header.  The definitive stat() check below still runs
+        # after the save so spoofed headers are caught too.
+        if not unlimited:
+            cl = request.content_length
+            if cl and cl > _TRANSCRIPTION_MAX_BYTES:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template(
+                    "upload.html",
+                    quota=quota,
+                    error=f"Audio file is too large — only files under 23 MB are supported. "
+                          "Contact the admin if you need longer content.",
+                ), 400
+
         f.save(audio_path)
+
+        # Definitive size cap (catches cases where Content-Length was missing/wrong)
+        if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+            size_mb = audio_path.stat().st_size // (1024 * 1024)
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template(
+                "upload.html",
+                quota=quota,
+                error=f"Audio file is {size_mb} MB — only files under 23 MB are supported. "
+                      "Contact the admin if you need longer content.",
+            ), 400
 
         meta = {
             "title":             title,
@@ -475,16 +1234,33 @@ def upload_process():
             "level":             level,
         }
 
+    # ── Atomic quota check + usage insert ────────────────────────────────────
+    usage_id = None
+    if db_available() and current_user:
+        try:
+            audio_bytes = audio_path.stat().st_size if audio_path else 0
+            usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
+            usage_id = str(usage.id)
+        except ValueError as qe:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template(
+                "upload.html",
+                quota=_quota_context(current_user),
+                error=str(qe),
+            ), 429
+
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+
     # Register job and start background thread
     with _jobs_lock:
         _jobs[job_id] = {
-            "status": "processing",
-            "slug":   slug,
-            "step":   "Starting…",
-            "step_num": 0,
-            "total_steps": 5,
-            "error":  "",
-            "started_at": time.time(),
+            "status":      "processing",
+            "slug":        slug,
+            "step":        "Starting…",
+            "step_num":    0,
+            "total_steps": total_steps,
+            "error":       "",
+            "started_at":  time.time(),
         }
 
     _prune_old_jobs()
@@ -492,6 +1268,7 @@ def upload_process():
     t = threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
         daemon=True,
     )
     t.start()
@@ -503,6 +1280,7 @@ def upload_process():
 # ── Job status ────────────────────────────────────────────────────────────────
 
 @app.route("/job/<job_id>")
+@login_required
 def job_page(job_id: str):
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -512,6 +1290,7 @@ def job_page(job_id: str):
 
 
 @app.route("/api/job/<job_id>/status")
+@login_required
 def api_job_status(job_id: str):
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -530,7 +1309,22 @@ def api_job_status(job_id: str):
 # ── Static episode assets ─────────────────────────────────────────────────────
 
 @app.route("/episode/<date_str>/audio")
+@login_required
 def episode_audio(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            result = _r2_find_audio(ep_row.r2_prefix)
+            if result:
+                key, _ = result
+                return redirect(_r2_presigned(key, expires=7200))
+        # Bug #4 fix: fall through to local disk when r2_prefix is empty
+        # (R2 not configured) rather than aborting 404.
+        if ep_row.r2_prefix:
+            abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     audio = _find_audio(_ep_dir(date_str))
     if not audio:
         abort(404)
@@ -539,7 +1333,17 @@ def episode_audio(date_str: str):
 
 
 @app.route("/episode/<date_str>/subtitles.vtt")
+@login_required
 def episode_vtt(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            return redirect(_r2_presigned(f"{ep_row.r2_prefix}subtitles.vtt"))
+        if ep_row.r2_prefix:
+            abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     vtt = _ep_dir(date_str) / "subtitles.vtt"
     if not vtt.exists():
         abort(404)
@@ -547,7 +1351,17 @@ def episode_vtt(date_str: str):
 
 
 @app.route("/episode/<date_str>/cards.csv")
+@login_required
 def episode_cards(date_str: str):
+    # ── DB / R2 path ──────────────────────────────────────────────────────────
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            return redirect(_r2_presigned(f"{ep_row.r2_prefix}cards.csv"))
+        if ep_row.r2_prefix:
+            abort(404)
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     csv_file = _ep_dir(date_str) / "cards.csv"
     if not csv_file.exists():
         abort(404)
@@ -561,25 +1375,44 @@ def episode_cards(date_str: str):
 
 # ── JSON API ──────────────────────────────────────────────────────────────────
 
+def _episode_json_response(date_str: str, filename: str):
+    """Shared helper: serve episode JSON from R2 (DB path) or local file (fallback)."""
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        if ep_row.r2_prefix and _get_r2():
+            try:
+                data = _r2_get_json(f"{ep_row.r2_prefix}{filename}")
+                return _make_response_cached(jsonify(data))
+            except Exception as exc:
+                log.error(f"R2 fetch failed for {ep_row.r2_prefix}{filename}: {exc}")
+                abort(404)
+        # Bug #4 fix: fall through to local disk when r2_prefix is empty.
+        if ep_row.r2_prefix:
+            abort(404)
+    # File fallback
+    return _make_response_cached(jsonify(_read_json(_ep_dir(date_str) / filename)))
+
+
 @app.route("/api/episode/<date_str>/meta")
+@login_required
 def api_meta(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "meta.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "meta.json")
 
 
 @app.route("/api/episode/<date_str>/transcript")
+@login_required
 def api_transcript(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "transcript.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "transcript.json")
 
 
 @app.route("/api/episode/<date_str>/analysis")
+@login_required
 def api_analysis(date_str: str):
-    resp = jsonify(_read_json(_ep_dir(date_str) / "analysis.json"))
-    return _make_response_cached(resp)
+    return _episode_json_response(date_str, "analysis.json")
 
 
 @app.route("/api/upload", methods=["POST"])
+@login_required
 def api_upload():
     from lib.analyzer import LEVELS, DEFAULT_LEVEL
 
@@ -587,10 +1420,15 @@ def api_upload():
     if level not in LEVELS:
         level = DEFAULT_LEVEL
 
+    current_user = get_current_user()
+    user_id      = current_user.id if current_user else None
+
+    unlimited = bool(current_user and _is_unlimited(current_user))
+
     source_url = request.form.get("source_url", "").strip()
     job_id     = str(uuid.uuid4())
     base_slug  = date.today().isoformat()
-    slug       = _unique_ep_slug(base_slug)
+    slug       = _unique_ep_slug(base_slug, user_id=user_id)
     ep_dir     = EPISODES_DIR / slug
     ep_dir.mkdir(parents=True, exist_ok=True)
 
@@ -625,7 +1463,26 @@ def api_upload():
             return jsonify({"error": f"Unsupported format '{suffix}'."}), 400
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
+
+        # Bug #2 fix: reject before disk write using Content-Length header.
+        if not unlimited:
+            cl = request.content_length
+            if cl and cl > _TRANSCRIPTION_MAX_BYTES:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return jsonify({
+                    "error": "Audio file is too large — only files under 23 MB are supported."
+                }), 400
+
         f.save(audio_path)
+
+        # Definitive size check (catches missing/spoofed Content-Length).
+        if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
+            size_mb = audio_path.stat().st_size // (1024 * 1024)
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({
+                "error": f"Audio file is {size_mb} MB — only files under 23 MB are supported."
+            }), 400
+
         meta = {
             "title":             title,
             "channel":           "Upload",
@@ -640,13 +1497,26 @@ def api_upload():
             "level":             level,
         }
 
+    # ── Atomic quota check + usage insert ────────────────────────────────────
+    usage_id = None
+    if db_available() and current_user:
+        try:
+            audio_bytes = audio_path.stat().st_size if audio_path else 0
+            usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
+            usage_id = str(usage.id)
+        except ValueError as qe:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"error": str(qe)}), 429
+
+    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+
     with _jobs_lock:
         _jobs[job_id] = {
             "status":      "processing",
             "slug":        slug,
             "step":        "Starting…",
             "step_num":    0,
-            "total_steps": 5,
+            "total_steps": total_steps,
             "error":       "",
             "started_at":  time.time(),
         }
@@ -655,6 +1525,7 @@ def api_upload():
     threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
+        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
         daemon=True,
     ).start()
 
@@ -662,18 +1533,82 @@ def api_upload():
 
 
 @app.route("/api/explain", methods=["POST"])
+@login_required
 def api_explain():
-    from lib.analyzer import explain_sentence
-    data = request.json or {}
-    text = data.get("text", "").strip()
+    from lib.analyzer import explain_sentence, _EXPLAIN_MAX_INPUT_CHARS
+    data    = request.get_json(silent=True) or {}
+    text    = data.get("text", "").strip()
+    # Bug #5 fix: fall back to a per-user global bucket when episode is absent
+    # so direct API callers can't bypass the limit by omitting the field.
+    episode = data.get("episode", "").strip() or "_global_"
     if not text:
         return jsonify({"error": "No text provided"}), 400
+    # Token-burn fix: reject oversized input at the API boundary so the LLM
+    # never sees more than a sentence or two regardless of what the client sends.
+    if len(text) > _EXPLAIN_MAX_INPUT_CHARS:
+        return jsonify({
+            "error": f"Text too long ({len(text)} chars). Maximum is {_EXPLAIN_MAX_INPUT_CHARS} characters."
+        }), 400
+
+    # Rate-limit: _EXPLAIN_LIMIT calls per user per episode (or per-session for
+    # direct API calls).  Resets daily.  Admins / whitelisted users are exempt.
+    user = get_current_user()
+    if user and db_available() and not _is_unlimited(user):
+        uid  = str(user.id)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with _explain_lock:
+            # Bug #5 fix: prune dict if it's grown beyond the user cap.
+            if len(_explain_counts) > _EXPLAIN_MAX_USERS:
+                _explain_counts.clear()
+
+            bucket = _explain_counts.setdefault(uid, {"day": today, "counts": {}})
+            # Daily reset: new calendar day wipes the per-episode counters.
+            if bucket["day"] != today:
+                bucket["day"]    = today
+                bucket["counts"] = {}
+
+            used = bucket["counts"].get(episode, 0)
+            if used >= _EXPLAIN_LIMIT:
+                return jsonify({
+                    "error": f"Explain limit reached ({_EXPLAIN_LIMIT} per episode per day)."
+                }), 429
+            bucket["counts"][episode] = used + 1
+
     explanation = explain_sentence(text)
     return jsonify({"explanation": explanation})
 
 
 @app.route("/api/episodes")
+@login_required
 def api_episodes():
+    # ── DB path ───────────────────────────────────────────────────────────────
+    if db_available():
+        user = get_current_user()
+        if not user:
+            return jsonify([])
+        with get_db() as db:
+            rows = db.execute(
+                select(Episode)
+                .where(Episode.owner_user_id == user.id)
+                .order_by(Episode.date.desc(), Episode.created_at.desc())
+            ).scalars().all()
+        return jsonify([
+            {
+                "date": row.slug,
+                "meta": {
+                    "title":     row.title,
+                    "channel":   row.channel,
+                    "url":       row.url,
+                    "thumbnail": row.thumbnail,
+                    "duration":  row.duration,
+                    "level":     row.level,
+                    "source":    row.source,
+                },
+            }
+            for row in rows
+        ])
+
+    # ── File fallback ─────────────────────────────────────────────────────────
     out = []
     if EPISODES_DIR.exists():
         for ep in sorted(EPISODES_DIR.iterdir(), reverse=True):

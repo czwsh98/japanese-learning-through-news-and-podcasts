@@ -8,6 +8,23 @@
     Paste a YouTube, Apple Podcasts, RSS feed, or other podcast URL — or upload an audio file directly.
   </p>
 
+  {# ── Quota banner ──────────────────────────────────────────────────────── #}
+  {% if quota %}
+  {% if quota.unlimited %}
+  <div class="mb-5 flex items-center gap-2 bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 text-sm">
+    <span class="text-green-400">∞</span>
+    <span class="text-gray-400">Unlimited access</span>
+  </div>
+  {% else %}
+  <div class="mb-5 flex items-center justify-between bg-gray-900 border border-gray-800 rounded-lg px-4 py-2.5 text-sm">
+    <span class="text-gray-400">Transcriptions used</span>
+    <span class="font-medium {% if not quota.allowed %}text-red-400{% elif quota.used >= quota.limit - 1 %}text-amber-400{% else %}text-white{% endif %}">
+      {{ quota.used }} / {{ quota.limit }}
+    </span>
+  </div>
+  {% endif %}
+  {% endif %}
+
   {% if error %}
   <div class="mb-5 bg-red-950 border border-red-800 rounded-lg text-sm text-red-300 overflow-hidden">
     <div class="px-4 py-3 font-medium">{{ error }}</div>
@@ -104,11 +121,12 @@
 
     <!-- Submit -->
     <button id="submit-btn" type="submit"
+            {% if quota and not quota.unlimited and not quota.allowed %}disabled{% endif %}
             class="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700
                    disabled:text-gray-500 disabled:cursor-not-allowed
                    text-white font-medium rounded-lg py-2.5 text-sm
                    transition-colors">
-      Process
+      {% if quota and not quota.unlimited and not quota.allowed %}Limit reached{% else %}Process{% endif %}
     </button>
   </form>
 

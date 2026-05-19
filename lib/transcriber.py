@@ -22,6 +22,12 @@ _MIN_CHARS = 3
 _LOOP_WINDOW = 4
 _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
 
+# Maximum audio duration for non-unlimited users.  Whisper is billed per
+# minute (~$0.006/min), so 30 min caps per-job spend at ~$0.18 of Whisper.
+# Unlimited users (admin / whitelist) skip this check.
+# Set MAX_AUDIO_MINUTES env var to override (e.g. "60" for longer content).
+_MAX_AUDIO_MINUTES: float = float(os.environ.get("MAX_AUDIO_MINUTES", "30"))
+
 
 def transcribe_audio(audio_path: Path) -> dict:
     """Return dict with keys: language, duration, text, segments."""
@@ -117,6 +123,66 @@ def _transcribe_api_single(client, audio_path: Path) -> dict:
         "text":     response.text,
         "segments": segments,
     }
+
+
+def get_audio_duration_seconds(audio_path: Path) -> float:
+    """Return audio duration in seconds via ffprobe, or -1.0 on failure."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        secs = float(result.stdout.strip())
+        if secs > 0:
+            return secs
+    except (ValueError, TypeError):
+        pass
+    # Fallback: try format-level duration (covers formats where stream duration is N/A)
+    result2 = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(audio_path),
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        secs = float(result2.stdout.strip())
+        if secs > 0:
+            return secs
+    except (ValueError, TypeError):
+        pass
+    log.warning("ffprobe duration detection failed for %s", audio_path)
+    return -1.0
+
+
+def check_audio_duration(audio_path: Path, unlimited: bool = False) -> None:
+    """Raise RuntimeError if the audio exceeds _MAX_AUDIO_MINUTES for limited users.
+
+    Call this after the audio file is available (download or upload).
+    Unlimited users (admin / whitelist) always pass through.
+    """
+    if unlimited:
+        return
+    duration_s = get_audio_duration_seconds(audio_path)
+    if duration_s < 0:
+        log.warning("Could not determine audio duration — skipping duration cap")
+        return
+    limit_s = _MAX_AUDIO_MINUTES * 60
+    if duration_s > limit_s:
+        minutes = int(duration_s // 60)
+        seconds = int(duration_s % 60)
+        limit_m = int(_MAX_AUDIO_MINUTES)
+        raise RuntimeError(
+            f"Audio is {minutes}:{seconds:02d} — only files under {limit_m} minutes "
+            "are supported. Contact the admin if you need longer content."
+        )
 
 
 def _audio_bitrate_bps(audio_path: Path) -> int:

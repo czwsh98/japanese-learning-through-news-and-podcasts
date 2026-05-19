@@ -481,6 +481,14 @@
   body.ep-desktop.yt-mode #ep-left-col {
     overflow: visible;
   }
+
+  /* Cap the YT player height so the controls row (Audio only / Video toggle)
+     is never pushed below the ep-page clip boundary.
+     --nav-h is set by JS; 160px covers ep-header + controls row + gaps. */
+  body.ep-desktop.yt-mode .yt-container {
+    max-height: calc(100vh - var(--nav-h, 52px) - 160px);
+    width: min(100%, calc((100vh - var(--nav-h, 52px) - 160px) * 16 / 9));
+  }
 }
 
 /* ── Jump-to-now pill ────────────────────────────────────────────────────── */
