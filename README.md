@@ -1,72 +1,83 @@
-# Japanese Learning Through News & Podcasts
+# Mimichan — Japanese Learning Through Listening
 
-A personal pipeline that turns Japanese YouTube videos, news broadcasts, podcast episodes, and audio files into interactive study material — automatically transcribed, translated, and analysed for vocabulary and grammar at your chosen JLPT level.
+A multi-user web app that turns Japanese YouTube videos, news broadcasts, podcast episodes, and audio files into interactive study material — automatically transcribed, translated, and analysed for vocabulary and grammar at your chosen JLPT level.
 
 ## What it does
 
 1. **Downloads** audio from YouTube, Apple Podcasts, RSS feeds, or any yt-dlp-supported source — or accepts a direct file upload
-2. **Transcribes** the audio to Japanese text using the OpenAI Whisper API (default) or local mlx-whisper on Apple Silicon
+2. **Transcribes** the audio to Japanese text using the OpenAI Whisper API (or local mlx-whisper on Apple Silicon)
 3. **Translates** each segment into English and Simplified Chinese via **Google Gemini Flash**
 4. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
-5. **Writes** per-episode flat files: `transcript.json`, `subtitles.vtt`, `analysis.json`, `cards.csv`, `meta.json`
+5. **Stores** episode files in **Cloudflare R2** and metadata in **Postgres** — fully multi-user, each user sees only their own content
 6. **Saves** words and phrases you care about to a persistent **Vocab Bank** across all episodes
 7. **Exports** your saved vocab bank or per-episode flashcards as CSV for Anki import
 
+---
+
 ## Web UI
 
-A local Flask app at `localhost:5000` lets you browse every processed episode:
-
-- **Embedded YouTube player** for YouTube episodes, with a toggle to switch to audio-only; audio-only mode uses the same full-height transcript layout as podcast episodes
-- **Audio player** for podcasts and audio-only mode, synced to the transcript — click any line to seek
-- **Auto-scrolling transcript** — follows playback automatically; scroll away and a **↓ Now playing** pill appears to snap back; resumes auto-follow after 8 s of inactivity
-- **Playback speed control** — 0.5× to 2×, desktop buttons or mobile stepper
-- **Inline highlights** — vocabulary and grammar items underlined in the transcript, colour-coded by level: N5 green → N4 teal → N3 blue → N2 amber → N1 rose → context-specific violet; solid underline for vocab, dashed for grammar
+### Episode player
+- **Embedded YouTube player** (YouTube sources) or **HTML5 audio player** (uploads/podcasts), both synced to the transcript
+- **Click any transcript line** to seek to that moment
+- **Auto-scrolling transcript** — follows playback; scroll away and a **↓ Now playing** pill snaps you back
+- **Playback speed** — 0.5× to 2×
+- **Inline JLPT highlights** — underlined in the transcript, colour-coded by level:
+  - N5 green · N4 teal · N3 blue · N2 amber · N1 rose · context-specific violet
+  - Solid underline = vocab · dashed = grammar
 - **Hover / tap tooltips** — word, reading, level badge, English and Chinese gloss
-- **EN / ZH translation toggles** — desktop header buttons; mobile floating caption button (CC)
-- **Compact transcript** for YouTube video mode — shows ±2 segments around the current line with gradient opacity (±1 at 72%, ±2 at 45%); panel is non-scrollable since the window updates automatically
-- **Full transcript modal** (YouTube mode only) — opens the complete transcript with its own **↓ Now playing** pill for navigating while watching
-- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; JLPT tabs filtered to the episode's chosen level; Ctx tab always shows context-specific terms; save any card to the Vocab Bank with one click
-- **Vocab Bank** (`/vocab`) — browse, search, filter, and delete words saved across all episodes; export the full bank as a CSV for Anki; already-saved words show a greyed-out button in the episode player
-- **Upload page** — paste a URL or drag-and-drop an audio file, choose your JLPT level
-- **Subscriptions page** — manage the list of sources used by the scheduled CLI pipeline
+- **Sentence explain** — click any segment for a full grammatical breakdown (gpt-4o-mini), rate-limited to 5 per episode per day
+- **EN / ZH translation toggles** — desktop header buttons; mobile floating CC button
+- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; save any card to your Vocab Bank with one click
 
-## Supported input sources
+### Vocab Bank (`/vocab`)
+Browse, search, filter by JLPT level and type, delete, and export your saved words as CSV for Anki.
 
-| Source type | Example |
-|---|---|
-| YouTube video or channel | `https://www.youtube.com/watch?v=...` |
-| Apple Podcasts episode | `https://podcasts.apple.com/us/podcast/.../id...?i=...` |
-| RSS / Atom podcast feed | `https://feeds.megaphone.fm/...` |
-| SoundCloud, NHK, and more | anything yt-dlp supports |
-| Direct audio URL | `.mp3`, `.m4a`, `.wav`, `.ogg`, `.flac`, etc. |
-| File upload | drag-and-drop via web UI |
+### Upload page (`/upload`)
+Paste a YouTube/podcast URL or drag-and-drop an audio file, choose your JLPT level, and track progress on a live step-by-step job page.
 
-**Apple Podcasts** links are resolved via the iTunes Lookup API, which extracts the direct audio URL and full episode metadata (title, show, duration, artwork) automatically.
+### Subscriptions (`/subscriptions`)
+Manage the list of sources used by the scheduled CLI pipeline.
+
+### Admin (`/admin`)
+Admin-only dashboard showing all registered users with:
+- Role badges (admin / unlimited / user)
+- Jobs used vs. lifetime limit
+- Total audio processed (MB) and estimated Whisper cost
+- Click any row to expand full transcription history per user
+- Delete non-admin users and all their data
+
+---
+
+## Authentication & Multi-user
+
+- Email + password accounts; registration gated by `TRANSCRIPTION_WHITELIST` env var
+- HttpOnly session cookie (90-day default); Bearer token supported for API / mobile clients
+- Each user's episodes, vocab, and usage are fully isolated
+- First registered account becomes admin automatically; set `BOOTSTRAP_ADMIN_EMAIL` to pin the admin email regardless of registration order
+
+### Roles
+
+| Role | How assigned | Transcription cap | Audio duration cap |
+|---|---|---|---|
+| **Admin** | `is_admin = true` in DB | None | None |
+| **Unlimited** | Email in `TRANSCRIPTION_WHITELIST` | None | None |
+| **Regular user** | Everyone else | 3 lifetime jobs (default) | 30 min per job |
+
+---
 
 ## JLPT levels
 
-Choose the level that matches your current Japanese when uploading or running the pipeline:
-
-| Level key | JLPT tiers highlighted |
+| Level key | Targets |
 |---|---|
 | `beginner` | N5 |
-| `beginner-intermediate` | N4–N3 |
+| `beginner-intermediate` | N4 |
 | `intermediate` | N3 |
 | `intermediate-advanced` | N2 |
-| `advanced` | N2–N1 |
+| `advanced` | N1 |
 
-Highlights, tooltips, and side-panel cards are filtered to show only items at the chosen level.
+A sixth **context-specific** (violet) tier captures domain terminology, advanced literary expressions, and topical jargon beyond standard JLPT — always visible regardless of chosen level.
 
-### Context-specific level
-
-In addition to the five JLPT tiers, the analyser tags a sixth level: **context-specific** (violet). These are words and expressions that fall outside the standard JLPT curriculum but are important for understanding the specific content — for example:
-
-- Domain terminology (political, legal, medical, technical, financial)
-- Advanced literary or highly formal expressions beyond N1
-- Topical jargon specific to the show or podcast genre
-- Culturally significant terms worth knowing for the topic
-
-Context-specific highlights are always visible in the transcript regardless of the chosen JLPT level, and appear in their own **Ctx** tab in the side panel.
+---
 
 ## Setup
 
@@ -74,10 +85,10 @@ Context-specific highlights are always visible in the transcript regardless of t
 
 - Python 3.11+
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — `brew install yt-dlp`
-- ffmpeg — `brew install ffmpeg` (required for chunking large audio files)
-- An [OpenAI API key](https://platform.openai.com/) — for Whisper transcription and gpt-4o-mini analysis
-- A [Gemini API key](https://aistudio.google.com/) — for translation
-- *(Optional)* [Anki](https://apps.ankiweb.net/) — import `cards.csv`
+- ffmpeg — `brew install ffmpeg`
+- OpenAI API key (Whisper + gpt-4o-mini)
+- Gemini API key (translation)
+- *(Production)* PostgreSQL database and Cloudflare R2 bucket
 
 ### Install
 
@@ -85,140 +96,182 @@ Context-specific highlights are always visible in the transcript regardless of t
 git clone https://github.com/czwsh98/japanese-learning-through-news-and-podcasts.git
 cd japanese-learning-through-news-and-podcasts
 pip install -r requirements.txt
-pip install mlx-whisper   # Apple Silicon only — skip if using the OpenAI Whisper API
 ```
 
 ### Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in your API keys
+# Edit .env and fill in your keys
 ```
 
-`.env` keys:
+#### Core keys
 
-```
+```env
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
+SECRET_KEY=<random 32+ char string>       # required in production
+DATABASE_URL=postgresql://...             # Postgres connection string
+```
 
-# Optional overrides
-GEMINI_MODEL=gemini-2.5-flash          # default translation model
-OPENAI_ANALYSIS_MODEL=gpt-4o-mini      # default analysis model
-USE_LOCAL_WHISPER=1                    # set to use local mlx-whisper (Apple Silicon)
+#### Auth & quotas
+
+```env
+TRANSCRIPTION_WHITELIST=alice@example.com,bob@example.com   # unlimited + can register
+BOOTSTRAP_ADMIN_EMAIL=you@example.com     # always admin, even if not first to register
+SESSION_DAYS=90                           # session cookie lifetime (default 90)
+MAX_AUDIO_MINUTES=30                      # cap for regular users (default 30)
+```
+
+#### Storage (optional — local filesystem fallback if unset)
+
+```env
+R2_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET=your-bucket-name
+```
+
+#### Model overrides (optional)
+
+```env
+GEMINI_MODEL=gemini-2.5-flash
+OPENAI_ANALYSIS_MODEL=gpt-4o-mini
+USE_LOCAL_WHISPER=1                       # use local mlx-whisper (Apple Silicon)
 MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
-EPISODES_DIR=episodes
-VOCAB_FILE=vocab.json          # path to the persistent vocab bank (created automatically)
 ```
 
-Edit `sources.json` to point to your preferred sources for the scheduled CLI pipeline:
-
-```json
-{
-  "sources": [
-    { "name": "NHK Web Easy", "url": "https://www.youtube.com/@nhkwebeasynews" }
-  ]
-}
-```
-
-### Run the web UI
+### Run locally
 
 ```bash
 python web/app.py
 # Open http://localhost:5000
 ```
 
-### Run the pipeline from the CLI
+> **Note:** `DATABASE_URL` is optional for local dev. Without it the app runs in no-database mode — no login required, files are served from the local `episodes/` directory, and all DB-backed features (auth, quotas, per-user vocab) are disabled.
+
+### Run the CLI pipeline
 
 ```bash
-# Process today's episode from sources.json
+# Process today's episodes from sources.json
 python pipeline.py
 
-# Process a specific date
+# Specific date
 python pipeline.py --date 2026-05-04
 
-# Override source URL for a single run
-python pipeline.py --url https://www.youtube.com/watch?v=...
+# Single URL
+python pipeline.py --url https://www.youtube.com/watch?v=... --level intermediate
 
-# Choose JLPT level (default: advanced, now N1)
-python pipeline.py --url <URL> --level intermediate
-
-# Dry run — no API calls, writes stub files to verify file layout
+# Dry run (no API calls, writes stub files)
 python pipeline.py --dry-run
 ```
 
-### Automate with launchd (macOS)
+### Deploy to Railway
 
-```bash
-# Run at 03:00 daily
-cp com.japanese.pipeline.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.japanese.pipeline.plist
-```
+1. Push to GitHub and connect the repo in Railway
+2. Add a Postgres plugin — `DATABASE_URL` is injected automatically
+3. Set all required env vars in Railway's Variables tab
+4. The app starts, creates all DB tables automatically, and is ready
+
+---
 
 ## Project structure
 
 ```
-├── pipeline.py          # CLI orchestrator
-├── sources.json         # Sources for the scheduled CLI pipeline
-├── vocab.json           # Persistent vocab bank (created automatically on first save)
+├── pipeline.py              # CLI orchestrator
+├── sources.json             # Sources for the scheduled CLI pipeline
 ├── lib/
-│   ├── downloader.py    # yt-dlp + Apple Podcasts + direct audio download
-│   ├── transcriber.py   # Whisper (OpenAI API or local mlx-whisper)
-│   ├── translator.py    # Gemini Flash — EN + ZH translation
-│   ├── analyzer.py      # gpt-4o-mini — JLPT vocabulary & grammar analysis
-│   └── writer.py        # Writes flat files per episode
+│   ├── downloader.py        # yt-dlp + Apple Podcasts + direct audio
+│   ├── transcriber.py       # Whisper API or local mlx-whisper; ffprobe duration cap
+│   ├── translator.py        # Gemini Flash — EN + ZH translation
+│   ├── analyzer.py          # gpt-4o-mini — JLPT vocab & grammar analysis
+│   └── writer.py            # Writes flat files per episode
 ├── web/
-│   ├── app.py           # Flask web UI + vocab bank API
+│   ├── app.py               # Flask routes, background jobs, quota logic, R2, admin
+│   ├── auth.py              # Registration, login, session tokens
+│   ├── db.py                # SQLAlchemy models: User, Episode, VocabItem, TranscriptionUsage
 │   ├── templates/
 │   │   ├── base.html
 │   │   ├── index.html       # Episode browser
 │   │   ├── episode.html     # Player + transcript + side panel
-│   │   ├── vocab.html       # Vocab Bank page
-│   │   ├── upload.html
-│   │   └── subscriptions.html
-│   └── static/          # CSS, JS, player
-└── episodes/            # Per-episode output (gitignored)
-    └── 2026-05-04/
-        ├── audio.mp3
-        ├── meta.json
-        ├── transcript.json
-        ├── subtitles.vtt
-        ├── analysis.json
-        └── cards.csv
+│   │   ├── vocab.html       # Vocab Bank
+│   │   ├── upload.html      # Upload / URL submit
+│   │   ├── subscriptions.html
+│   │   ├── job.html         # Live pipeline progress
+│   │   ├── login.html
+│   │   ├── register.html
+│   │   └── admin.html       # Admin user dashboard
+│   └── static/              # CSS, player JS
+├── scripts/
+│   ├── migrate_episodes_to_r2.py   # One-time migration of existing episodes to R2
+│   └── migrate_existing_data.py    # Seed DB from local episode files
+└── episodes/                # Local episode cache (gitignored); canonical copy is R2
 ```
+
+---
 
 ## Episode output files
 
 | File | Contents |
 |---|---|
 | `meta.json` | Title, channel, date, duration, source URL, JLPT level |
-| `transcript.json` | Segments with timestamps, Japanese text, EN + ZH translations |
-| `subtitles.vtt` | WebVTT subtitle file for the audio player |
+| `transcript.json` | Segments: timestamps, Japanese text, EN + ZH translations |
+| `subtitles.vtt` | WebVTT for the audio player |
 | `analysis.json` | Highlights, vocab flashcards, grammar patterns, expressions |
-| `cards.csv` | Anki-importable CSV (type / front / back / reading / en / zh / level / example) |
+| `cards.csv` | Anki-importable CSV |
 
-### Vocab Bank (`vocab.json`)
+---
 
-A single JSON file at the project root that accumulates words saved across all episodes. Items are stored with full metadata (word, reading, EN/ZH gloss, example sentence, JLPT level, type, source episode, timestamp) and deduplicated by surface form.
+## API surface
 
-**Web API:**
+### Auth
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/vocab` | GET | Vocab Bank page |
-| `/api/vocab` | GET | List all items; filter by `?q=`, `?level=`, `?type=` |
-| `/api/vocab` | POST | Save an item from the episode player |
-| `/api/vocab/<id>` | DELETE | Remove an item |
-| `/vocab/export.csv` | GET | Download full bank as Anki-importable CSV |
+| `/login` `/register` `/logout` | GET/POST | Web UI auth |
+| `/api/auth/login` | POST | SPA/mobile login → returns Bearer token |
+| `/api/auth/register` | POST | SPA/mobile register |
+| `/api/auth/me` | GET | Current user info |
+| `/api/quota` | GET | Transcription quota for current user |
 
-## API usage and cost
+### Episodes & vocab
 
-Each episode processed makes the following API calls:
-
-| Step | API | Approx. cost (30-min episode) |
+| Route | Method | Purpose |
 |---|---|---|
-| Transcription | OpenAI Whisper | ~$0.18 |
-| Translation (EN + ZH) | Gemini 2.5 Flash | ~$0.02 |
-| Analysis | OpenAI gpt-4o-mini | ~$0.05 |
+| `/upload` | POST | Submit URL or audio file |
+| `/api/upload` | POST | Same, JSON response for SPA |
+| `/api/job/<id>/status` | GET | Pipeline job progress |
+| `/api/episode/<slug>/meta` | GET | Episode metadata |
+| `/api/episode/<slug>/transcript` | GET | Full transcript JSON |
+| `/api/episode/<slug>/analysis` | GET | JLPT analysis JSON |
+| `/api/vocab` | GET/POST | List / save vocab items |
+| `/api/vocab/<id>` | DELETE | Remove a saved word |
+| `/vocab/export.csv` | GET | Download full Vocab Bank as CSV |
+| `/api/explain` | POST | Grammatical breakdown of a sentence |
+
+### Admin
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/admin` | GET | User dashboard |
+| `/admin/user/<id>/delete` | POST | Delete a user and all their data |
+| `/api/admin/user/<id>/history` | GET | Transcription history for one user |
+
+---
+
+## Cost reference
+
+Approximate cost per 30-minute episode:
+
+| Step | API | Cost |
+|---|---|---|
+| Transcription | OpenAI Whisper (~$0.006/min) | ~$0.18 |
+| Translation | Gemini 2.5 Flash | ~$0.02 |
+| Analysis | gpt-4o-mini | ~$0.05 |
 | **Total** | | **~$0.25** |
 
-Audio longer than 23 MB is automatically split into 15-minute chunks by ffmpeg, transcribed in sequence, and merged — the split is transparent in the output.
+Built-in safeguards cap per-user API spend:
+- 30-minute audio duration limit for regular users (ffprobe-based, not byte-size)
+- 40-chunk ceiling on gpt-4o-mini analysis calls per job
+- 5 sentence-explain calls per episode per day (500-char input cap)
+- Atomic Postgres advisory lock prevents quota races under concurrent requests
