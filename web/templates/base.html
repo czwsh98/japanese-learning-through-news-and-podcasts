@@ -21,6 +21,9 @@
     <a href="/subscriptions" class="text-gray-400 hover:text-white text-sm transition-colors">Subscriptions</a>
     <a href="/vocab" class="text-gray-400 hover:text-white text-sm transition-colors">Vocab</a>
     <a href="/upload" class="text-gray-400 hover:text-white text-sm transition-colors">Upload</a>
+    {% if current_user and current_user.is_admin %}
+    <a href="/admin" class="text-violet-400 hover:text-violet-200 text-sm transition-colors">Admin</a>
+    {% endif %}
     {% block nav_extra %}{% endblock %}
     {% if current_user %}
     <span class="text-gray-700 hidden sm:inline">|</span>

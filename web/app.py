@@ -1624,6 +1624,63 @@ def api_episodes():
     return jsonify(out)
 
 
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+def _admin_required(f):
+    """Decorator: requires the current user to be an admin (is_admin=True)."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not db_available():
+            abort(503)
+        user = get_current_user()
+        if user is None:
+            return redirect(url_for("login_page"))
+        if not user.is_admin:
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/admin")
+@_admin_required
+def admin_page():
+    """Admin dashboard — list all users with quota usage."""
+    from web.db import User
+    with get_db() as db:
+        users = db.execute(
+            select(User).order_by(User.created_at)
+        ).scalars().all()
+
+        # Count used jobs per user in a single query
+        usage_counts = dict(
+            db.execute(
+                select(
+                    TranscriptionUsage.user_id,
+                    func.count().label("cnt"),
+                ).where(
+                    TranscriptionUsage.status.in_(["started", "completed"])
+                ).group_by(TranscriptionUsage.user_id)
+            ).all()
+        )
+
+    rows = []
+    for u in users:
+        used  = usage_counts.get(u.id, 0)
+        unlimited = _is_unlimited(u)
+        rows.append({
+            "id":        str(u.id),
+            "email":     u.email,
+            "is_admin":  u.is_admin,
+            "unlimited": unlimited,
+            "limit":     u.transcription_limit,
+            "used":      used,
+            "joined":    u.created_at.strftime("%Y-%m-%d %H:%M UTC") if u.created_at else "—",
+        })
+
+    return render_template("admin.html", users=rows)
+
+
 if __name__ == "__main__":
     EPISODES_DIR.mkdir(parents=True, exist_ok=True)
     app.run(host="0.0.0.0", port=5000, debug="--debug" in sys.argv)
