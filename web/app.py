@@ -756,8 +756,14 @@ def _unique_ep_slug(base: str, user_id=None) -> str:
 
 
 def _make_response_cached(response):
-    """Add cache headers to a response for episode data that may be re-generated."""
-    response.headers["Cache-Control"] = "public, max-age=300, must-revalidate"
+    """Add cache headers to a response for per-user episode data.
+
+    'private' restricts caching to the individual user's browser — shared
+    caches (CDNs, proxies) must not store the response.  'no-cache' means the
+    browser must revalidate with the server before serving a cached copy, which
+    prevents stale data after an account switch on the same device.
+    """
+    response.headers["Cache-Control"] = "private, no-cache"
     return response
 
 
