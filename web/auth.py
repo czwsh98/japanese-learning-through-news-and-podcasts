@@ -19,6 +19,7 @@ get_current_user() returns None, and the auth routes are still registered
 but return 503.
 """
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -32,7 +33,9 @@ from web.db import User, UserSession, db_available, get_db
 log = logging.getLogger(__name__)
 
 TOKEN_COOKIE      = "session_token"
-TOKEN_EXPIRY_DAYS = 30
+# SESSION_DAYS env var lets operators extend the default; 90 days reduces
+# re-login friction especially on mobile without sacrificing much security.
+TOKEN_EXPIRY_DAYS = int(os.environ.get("SESSION_DAYS", "90"))
 MIN_PASSWORD_LEN  = 8
 
 

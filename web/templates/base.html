@@ -25,6 +25,28 @@
     {% if current_user %}
     <span class="text-gray-700 hidden sm:inline">|</span>
     <span class="text-gray-500 text-xs hidden sm:inline truncate max-w-[160px]">{{ current_user.email }}</span>
+    {% if db_available %}
+    {% if current_user_unlimited %}
+    <span class="hidden sm:inline text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-950 border border-emerald-800 text-emerald-400"
+          title="Unlimited access — no transcription cap">∞</span>
+    {% else %}
+    {# Show used/limit pill pulled from the quota endpoint lazily via JS #}
+    <span id="nav-quota-pill" class="hidden sm:inline text-[10px] px-1.5 py-0.5 rounded bg-gray-900 border border-gray-800 text-gray-500"
+          title="Transcriptions used / limit"></span>
+    <script>
+    (function(){
+      fetch('/api/quota').then(r=>r.json()).then(function(q){
+        var pill = document.getElementById('nav-quota-pill');
+        if(!pill) return;
+        if(q.unlimited){ pill.textContent='∞'; pill.className=pill.className.replace('text-gray-500','text-emerald-400'); return; }
+        pill.textContent = q.used + ' / ' + q.limit;
+        if(!q.allowed) pill.className = pill.className.replace('text-gray-500','text-red-400').replace('border-gray-800','border-red-900');
+        else if(q.used >= q.limit - 1) pill.className = pill.className.replace('text-gray-500','text-amber-400');
+      }).catch(function(){});
+    })();
+    </script>
+    {% endif %}
+    {% endif %}
     <form action="/logout" method="post" class="ml-auto">
       <button type="submit" class="text-gray-500 hover:text-white text-xs transition-colors">Sign out</button>
     </form>

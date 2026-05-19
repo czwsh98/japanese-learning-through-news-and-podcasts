@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -93,11 +93,38 @@ if db_available() and app.config["SECRET_KEY"] == _SK_DEFAULT:
         "Set a strong random value before running in production."
     )
 
+# Bug #5 fix: reconcile stale 'started' usage rows left by a previous worker
+# crash / restart.  Any row older than 30 minutes that is still 'started' will
+# never be completed — flip them to 'failed' so they don't consume quota.
+if db_available():
+    try:
+        from datetime import timedelta
+        from sqlalchemy import update as _sa_update
+        _stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        with get_db() as _db:
+            _db.execute(
+                _sa_update(TranscriptionUsage)
+                .where(
+                    TranscriptionUsage.status == "started",
+                    TranscriptionUsage.created_at < _stale_cutoff,
+                )
+                .values(status="failed")
+            )
+        log.info("Reconciled stale 'started' transcription usage rows on startup")
+    except Exception as _e:
+        log.warning("Could not reconcile stale usage rows: %s", _e)
+
 
 @app.context_processor
 def _inject_auth():
-    """Make current_user available in every Jinja template automatically."""
-    return {"current_user": get_current_user(), "db_available": db_available()}
+    """Make current_user and quota info available in every Jinja template."""
+    user = get_current_user()
+    unlimited = bool(user and _is_unlimited(user))
+    return {
+        "current_user":          user,
+        "current_user_unlimited": unlimited,
+        "db_available":          db_available(),
+    }
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -174,7 +201,10 @@ def api_auth_register():
         user, token = register_user(email, password, allowed_emails=_get_whitelist())
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify({"token": token, "user": {"id": str(user.id), "email": user.email, "is_admin": user.is_admin}})
+    return jsonify({"token": token, "user": {
+        "id": str(user.id), "email": user.email,
+        "is_admin": user.is_admin, "is_unlimited": _is_unlimited(user),
+    }})
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -188,7 +218,10 @@ def api_auth_login():
     if result is None:
         return jsonify({"error": "Invalid email or password"}), 401
     user, token = result
-    return jsonify({"token": token, "user": {"id": str(user.id), "email": user.email, "is_admin": user.is_admin}})
+    return jsonify({"token": token, "user": {
+        "id": str(user.id), "email": user.email,
+        "is_admin": user.is_admin, "is_unlimited": _is_unlimited(user),
+    }})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -202,11 +235,13 @@ def api_auth_logout():
 @login_required
 def api_auth_me():
     user = get_current_user()
+    unlimited = _is_unlimited(user)
     return jsonify({
-        "id":       str(user.id),
-        "email":    user.email,
-        "is_admin": user.is_admin,
-        "transcription_limit": user.transcription_limit,
+        "id":                  str(user.id),
+        "email":               user.email,
+        "is_admin":            user.is_admin,
+        "is_unlimited":        unlimited,
+        "transcription_limit": -1 if unlimited else user.transcription_limit,
     })
 
 
@@ -334,7 +369,11 @@ def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
 
 
 def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
-    """Upload all known episode files from ep_dir to R2 at r2_prefix."""
+    """Upload all known episode files from ep_dir to R2 at r2_prefix.
+
+    Bug #3 fix: raises RuntimeError if the audio file (the only truly required
+    file) fails to upload.  Other files log a warning and continue.
+    """
     mimetypes.add_type("text/vtt", ".vtt")
     mimetypes.add_type("text/csv", ".csv")
     s3     = _get_r2()
@@ -345,11 +384,16 @@ def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
             continue
         key = f"{r2_prefix}{filename}"
         mt  = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+        is_audio = filename.startswith("audio.")
         try:
             s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
             log.info(f"R2 uploaded: {key}")
         except Exception as exc:
-            log.error(f"R2 upload failed for {key}: {exc}")
+            if is_audio:
+                raise RuntimeError(
+                    f"Failed to upload audio to R2 ({key}): {exc}"
+                ) from exc
+            log.warning(f"R2 upload failed (non-critical) for {key}: {exc}")
 
 
 # ── Transcription quota helpers ───────────────────────────────────────────────
@@ -507,10 +551,22 @@ def _pipeline_thread(
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
         # ── Step 6: Upload to R2 + persist Episode row ───────────────────────
-        if user_id and db_available() and _get_r2():
-            _set_step(job_id, "Saving to cloud storage…", 6)
-            r2_prefix = f"episodes/{user_id}/{slug}/"
-            _r2_upload_episode(ep_dir, r2_prefix)
+        # Bug #4 fix: always persist the Episode row when the DB is available,
+        # regardless of whether R2 is configured.  r2_prefix is left empty when
+        # R2 is not configured; asset routes fall back to local disk in that case.
+        if user_id and db_available():
+            r2_prefix = ""
+            if _get_r2():
+                _set_step(job_id, "Saving to cloud storage…", 6)
+                r2_prefix = f"episodes/{user_id}/{slug}/"
+                # Bug #3 fix: raise if the audio file fails to upload — an episode
+                # with a missing audio file is worse than a failed job.
+                _r2_upload_episode(ep_dir, r2_prefix)
+
+            # re-read meta (download may have enriched it)
+            meta_path = ep_dir / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
             with get_db() as db:
                 existing = db.execute(
@@ -520,10 +576,6 @@ def _pipeline_thread(
                     )
                 ).scalar_one_or_none()
                 if not existing:
-                    # re-read meta (download may have enriched it)
-                    meta_path = ep_dir / "meta.json"
-                    if meta_path.exists():
-                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     ep_row = Episode(
                         owner_user_id = user_id,
                         slug          = slug,
@@ -539,7 +591,8 @@ def _pipeline_thread(
                     )
                     db.add(ep_row)
                 else:
-                    existing.r2_prefix = r2_prefix
+                    if r2_prefix:
+                        existing.r2_prefix = r2_prefix
 
         _mark_usage("completed")
 
@@ -1006,20 +1059,11 @@ def upload_process():
     current_user = get_current_user()
     user_id      = current_user.id if current_user else None
 
-    # ── Quota check ───────────────────────────────────────────────────────────
-    unlimited = False
+    # Determine if this user is exempt from size / quota limits.
+    # The atomic quota check+insert happens later (after the file is staged)
+    # so that the check and insert share a single transaction (Bug #1 fix).
+    unlimited = bool(current_user and _is_unlimited(current_user))
     quota     = _quota_context(current_user)
-    if db_available() and current_user:
-        allowed, used, limit = _check_quota(current_user)
-        unlimited = (limit == -1)
-        if not allowed:
-            limit_str = f"{used}/{limit}"
-            return render_template(
-                "upload.html",
-                quota=quota,
-                error=f"Transcription limit reached ({limit_str}). "
-                      "Contact the admin if you need more.",
-            ), 429
 
     source_url  = request.form.get("source_url", "").strip()
     job_id      = str(uuid.uuid4())
@@ -1068,9 +1112,24 @@ def upload_process():
 
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
+
+        # Bug #2 fix: reject oversized uploads before writing to disk using the
+        # Content-Length header.  The definitive stat() check below still runs
+        # after the save so spoofed headers are caught too.
+        if not unlimited:
+            cl = request.content_length
+            if cl and cl > _TRANSCRIPTION_MAX_BYTES:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return render_template(
+                    "upload.html",
+                    quota=quota,
+                    error=f"Audio file is too large — only files under 23 MB are supported. "
+                          "Contact the admin if you need longer content.",
+                ), 400
+
         f.save(audio_path)
 
-        # Size cap — only enforced for non-unlimited users
+        # Definitive size cap (catches cases where Content-Length was missing/wrong)
         if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
             size_mb = audio_path.stat().st_size // (1024 * 1024)
             shutil.rmtree(ep_dir, ignore_errors=True)
@@ -1095,17 +1154,45 @@ def upload_process():
             "level":             level,
         }
 
-    # ── Insert usage row ──────────────────────────────────────────────────────
+    # ── Atomic quota check + usage insert (Bug #1 fix) ────────────────────────
+    # Combine the quota read and usage-row insert in a single transaction to
+    # prevent TOCTOU races where two concurrent requests both pass _check_quota
+    # and both consume quota.
     usage_id = None
     if db_available() and current_user:
-        with get_db() as db:
-            usage = TranscriptionUsage(
-                user_id     = current_user.id,
-                audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                status      = "started",
-            )
-            db.add(usage)
-        usage_id = str(usage.id)
+        if not _is_unlimited(current_user):
+            with get_db() as db:
+                used = db.execute(
+                    select(func.count()).select_from(TranscriptionUsage).where(
+                        TranscriptionUsage.user_id == current_user.id,
+                        TranscriptionUsage.status.in_(["started", "completed"]),
+                    )
+                ).scalar() or 0
+                limit = current_user.transcription_limit
+                if used >= limit:
+                    shutil.rmtree(ep_dir, ignore_errors=True)
+                    return render_template(
+                        "upload.html",
+                        quota=_quota_context(current_user),
+                        error=f"Transcription limit reached ({used}/{limit}). "
+                              "Contact the admin if you need more.",
+                    ), 429
+                usage = TranscriptionUsage(
+                    user_id     = current_user.id,
+                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                    status      = "started",
+                )
+                db.add(usage)
+            usage_id = str(usage.id)
+        else:
+            with get_db() as db:
+                usage = TranscriptionUsage(
+                    user_id     = current_user.id,
+                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                    status      = "started",
+                )
+                db.add(usage)
+            usage_id = str(usage.id)
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -1177,7 +1264,10 @@ def episode_audio(date_str: str):
             if result:
                 key, _ = result
                 return redirect(_r2_presigned(key, expires=7200))
-        abort(404)
+        # Bug #4 fix: fall through to local disk when r2_prefix is empty
+        # (R2 not configured) rather than aborting 404.
+        if ep_row.r2_prefix:
+            abort(404)
 
     # ── File fallback ─────────────────────────────────────────────────────────
     audio = _find_audio(_ep_dir(date_str))
@@ -1195,7 +1285,8 @@ def episode_vtt(date_str: str):
     if ep_row is not None:
         if ep_row.r2_prefix and _get_r2():
             return redirect(_r2_presigned(f"{ep_row.r2_prefix}subtitles.vtt"))
-        abort(404)
+        if ep_row.r2_prefix:
+            abort(404)
 
     # ── File fallback ─────────────────────────────────────────────────────────
     vtt = _ep_dir(date_str) / "subtitles.vtt"
@@ -1212,7 +1303,8 @@ def episode_cards(date_str: str):
     if ep_row is not None:
         if ep_row.r2_prefix and _get_r2():
             return redirect(_r2_presigned(f"{ep_row.r2_prefix}cards.csv"))
-        abort(404)
+        if ep_row.r2_prefix:
+            abort(404)
 
     # ── File fallback ─────────────────────────────────────────────────────────
     csv_file = _ep_dir(date_str) / "cards.csv"
@@ -1239,7 +1331,9 @@ def _episode_json_response(date_str: str, filename: str):
             except Exception as exc:
                 log.error(f"R2 fetch failed for {ep_row.r2_prefix}{filename}: {exc}")
                 abort(404)
-        abort(404)
+        # Bug #4 fix: fall through to local disk when r2_prefix is empty.
+        if ep_row.r2_prefix:
+            abort(404)
     # File fallback
     return _make_response_cached(jsonify(_read_json(_ep_dir(date_str) / filename)))
 
@@ -1274,16 +1368,7 @@ def api_upload():
     current_user = get_current_user()
     user_id      = current_user.id if current_user else None
 
-    # ── Quota check ───────────────────────────────────────────────────────────
-    unlimited = False
-    if db_available() and current_user:
-        allowed, used, limit = _check_quota(current_user)
-        unlimited = (limit == -1)
-        if not allowed:
-            return jsonify({
-                "error": f"Transcription limit reached ({used}/{limit}). Contact the admin for more.",
-                "quota": {"used": used, "limit": limit},
-            }), 429
+    unlimited = bool(current_user and _is_unlimited(current_user))
 
     source_url = request.form.get("source_url", "").strip()
     job_id     = str(uuid.uuid4())
@@ -1323,8 +1408,19 @@ def api_upload():
             return jsonify({"error": f"Unsupported format '{suffix}'."}), 400
         title      = request.form.get("title", "").strip() or Path(f.filename).stem
         audio_path = ep_dir / f"audio{suffix}"
+
+        # Bug #2 fix: reject before disk write using Content-Length header.
+        if not unlimited:
+            cl = request.content_length
+            if cl and cl > _TRANSCRIPTION_MAX_BYTES:
+                shutil.rmtree(ep_dir, ignore_errors=True)
+                return jsonify({
+                    "error": "Audio file is too large — only files under 23 MB are supported."
+                }), 400
+
         f.save(audio_path)
 
+        # Definitive size check (catches missing/spoofed Content-Length).
         if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
             size_mb = audio_path.stat().st_size // (1024 * 1024)
             shutil.rmtree(ep_dir, ignore_errors=True)
@@ -1346,17 +1442,40 @@ def api_upload():
             "level":             level,
         }
 
-    # ── Insert usage row ──────────────────────────────────────────────────────
+    # ── Atomic quota check + usage insert (Bug #1 fix) ────────────────────────
     usage_id = None
     if db_available() and current_user:
-        with get_db() as db:
-            usage = TranscriptionUsage(
-                user_id     = current_user.id,
-                audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                status      = "started",
-            )
-            db.add(usage)
-        usage_id = str(usage.id)
+        if not unlimited:
+            with get_db() as db:
+                used = db.execute(
+                    select(func.count()).select_from(TranscriptionUsage).where(
+                        TranscriptionUsage.user_id == current_user.id,
+                        TranscriptionUsage.status.in_(["started", "completed"]),
+                    )
+                ).scalar() or 0
+                limit = current_user.transcription_limit
+                if used >= limit:
+                    shutil.rmtree(ep_dir, ignore_errors=True)
+                    return jsonify({
+                        "error": f"Transcription limit reached ({used}/{limit}). Contact the admin for more.",
+                        "quota": {"used": used, "limit": limit},
+                    }), 429
+                usage = TranscriptionUsage(
+                    user_id     = current_user.id,
+                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                    status      = "started",
+                )
+                db.add(usage)
+            usage_id = str(usage.id)
+        else:
+            with get_db() as db:
+                usage = TranscriptionUsage(
+                    user_id     = current_user.id,
+                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
+                    status      = "started",
+                )
+                db.add(usage)
+            usage_id = str(usage.id)
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
