@@ -150,24 +150,46 @@ def register_user(
     if len(password) < MIN_PASSWORD_LEN:
         raise ValueError(f"Password must be at least {MIN_PASSWORD_LEN} characters.")
 
-    with get_db() as db:
+    # Bug #3 fix: the first-user-becomes-admin check and the whitelist bypass
+    # are both vulnerable to TOCTOU if two registrations race.  Two concurrent
+    # calls could both read count=0, both become admin, and both bypass the
+    # whitelist.  We take a Postgres session-level advisory lock (key 1) for
+    # the entire registration transaction so concurrent registrations serialize.
+    # The lock is released when the transaction commits or rolls back.
+    from sqlalchemy import text as _sa_text
+    from web.db import get_db as _get_db  # avoid circular at module level
+
+    with _get_db() as db:
+        db.execute(_sa_text("SELECT pg_advisory_xact_lock(1)"))
+
         existing = db.execute(
             select(User).where(User.email == email)
         ).scalar_one_or_none()
         if existing:
             raise ValueError("An account with that email already exists.")
 
-        # First-ever user becomes admin.
-        is_first = db.execute(select(func.count()).select_from(User)).scalar() == 0
+        # First-ever user becomes admin (bootstrap owner).
+        # Admin assignment uses BOOTSTRAP_ADMIN_EMAIL env var when set so the
+        # owner can always be identified even in concurrent-registration scenarios.
+        bootstrap_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+        user_count = db.execute(select(func.count()).select_from(User)).scalar() or 0
+        is_first = user_count == 0
 
-        # Enforce registration whitelist (skip for the bootstrap admin account).
-        if not is_first and allowed_emails and email not in allowed_emails:
+        # Determine admin status:
+        # • BOOTSTRAP_ADMIN_EMAIL always → admin (even if not first)
+        # • otherwise first-ever registration → admin
+        is_admin = bool(bootstrap_email and email == bootstrap_email) or is_first
+
+        # Enforce registration whitelist.
+        # The whitelist is ALSO skipped for the bootstrap admin so the owner
+        # can always log in even when a whitelist is configured.
+        if not is_admin and allowed_emails and email not in allowed_emails:
             raise ValueError("Registration is not open. Contact the administrator.")
 
         user  = User(
             email=email,
             password_hash=hash_password(password),
-            is_admin=is_first,
+            is_admin=is_admin,
         )
         db.add(user)
         db.flush()          # resolve user.id (generated in Python, but flush is safe)
@@ -175,7 +197,7 @@ def register_user(
         # Detach user so its attributes remain accessible after the session closes.
         db.expunge(user)
 
-    log.info("Registered %s (admin=%s)", email, is_first)
+    log.info("Registered %s (admin=%s)", email, is_admin)
     return user, token
 
 

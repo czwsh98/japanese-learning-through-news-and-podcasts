@@ -63,7 +63,7 @@ from web.auth import (
     set_auth_cookie,
 )
 from web.db import Episode, TranscriptionUsage, VocabItem, db_available, get_db, init_db
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text as sa_text
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +85,20 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", _SK_DEFAULT)
 # Connect to Postgres and ensure all tables exist.
 # Silently skips if DATABASE_URL is not set (local dev without Postgres).
 init_db()
+
+# Bug #1 fix: when DATABASE_URL is set (i.e. we are in production or any
+# environment that expects a DB), refuse to start if the connection failed.
+# This prevents the app from silently booting into a fully unauthenticated,
+# shared-filesystem mode due to a mis-typed env var or a transient DB outage.
+# Set REQUIRE_DB=0 explicitly to suppress this guard (e.g. during local dev
+# when DATABASE_URL is intentionally absent — the guard never fires then
+# anyway because init_db() would have already skipped cleanly).
+_DATABASE_URL_SET = bool(os.environ.get("DATABASE_URL", ""))
+if _DATABASE_URL_SET and not db_available():
+    raise RuntimeError(
+        "DATABASE_URL is set but the database connection failed. "
+        "Fix the connection or unset DATABASE_URL for local dev."
+    )
 
 # Guard: refuse to serve auth-protected data with a known-public key.
 if db_available() and app.config["SECRET_KEY"] == _SK_DEFAULT:
@@ -287,11 +301,14 @@ _MAX_JOBS = 50  # prune old jobs when exceeding this count
 _vocab_lock = threading.Lock()
 _sources_lock = threading.Lock()
 
-# Per-user, per-episode explain call counter.  {user_id_str: {episode_slug: int}}
-# In-memory only — resets on restart, which is acceptable for a personal app.
+# Per-user explain call counter.
+# Structure: {user_id_str: {"day": "YYYY-MM-DD", "counts": {episode_slug: int}}}
+# Resets daily per-user.  When no episode slug is sent (direct API call) we
+# use the sentinel "_global_" so the limit still applies (Bug #5 fix).
 _EXPLAIN_LIMIT = 5
-_explain_counts: dict[str, dict[str, int]] = {}
+_explain_counts: dict[str, dict] = {}
 _explain_lock = threading.Lock()
+_EXPLAIN_MAX_USERS = 500   # cap dict size to avoid unbounded growth
 
 # ── R2 helpers ────────────────────────────────────────────────────────────────
 
@@ -436,6 +453,53 @@ def _check_quota(user) -> "tuple[bool, int, int]":
     return used < limit, used, limit
 
 
+def _atomic_quota_insert(user, audio_bytes: int = 0) -> "TranscriptionUsage | None":
+    """
+    Bug #2 fix: atomically check quota and insert a 'started' usage row.
+
+    Uses a Postgres per-user advisory lock (pg_advisory_xact_lock) so that
+    concurrent requests for the same user serialize at the DB level — the
+    READ COMMITTED default isolation alone would let two concurrent SELECT
+    COUNT(*) calls both see the same count before either INSERT commits.
+
+    Returns the new TranscriptionUsage row (with .id populated) if allowed,
+    or raises ValueError with a user-facing message when the cap is hit.
+    Skips the lock entirely for unlimited users (admin / whitelisted).
+    """
+    with get_db() as db:
+        if not _is_unlimited(user):
+            # Serialize all concurrent quota checks for this user.
+            # pg_advisory_xact_lock is released automatically when the
+            # transaction commits or rolls back.
+            uid_hash = hash(str(user.id)) & 0x7FFFFFFFFFFFFFFF  # positive int64
+            db.execute(sa_text("SELECT pg_advisory_xact_lock(:h)"), {"h": uid_hash})
+
+            # Re-read the count inside the lock — now safe against concurrent writers.
+            used = db.execute(
+                select(func.count()).select_from(TranscriptionUsage).where(
+                    TranscriptionUsage.user_id == user.id,
+                    TranscriptionUsage.status.in_(["started", "completed"]),
+                )
+            ).scalar() or 0
+            limit = user.transcription_limit
+            if used >= limit:
+                raise ValueError(
+                    f"Transcription limit reached ({used}/{limit}). "
+                    "Contact the admin if you need more."
+                )
+
+        usage = TranscriptionUsage(
+            user_id     = user.id,
+            audio_bytes = audio_bytes,
+            status      = "started",
+        )
+        db.add(usage)
+        db.flush()   # populate usage.id before the session closes
+        db.expunge(usage)
+
+    return usage
+
+
 def _lookup_episode(slug: str) -> "Episode | None":
     """
     Look up an Episode row owned by the current user.
@@ -526,13 +590,19 @@ def _pipeline_thread(
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
 
-            # Size check for URL submissions (file uploads are checked before thread)
+            # Byte size check (catches files whose bitrate makes them cheap to
+            # download but expensive for the chunked-transcription path).
             if not unlimited and audio_path.stat().st_size > _TRANSCRIPTION_MAX_BYTES:
                 size_mb = audio_path.stat().st_size // (1024 * 1024)
                 raise RuntimeError(
                     f"Audio is {size_mb} MB — only files under 23 MB are supported. "
                     "Contact the admin if you need longer content."
                 )
+
+        # Duration cap — runs for both URL downloads and file uploads.
+        # Byte size alone doesn't bound Whisper cost (low-bitrate = long audio).
+        from lib.transcriber import check_audio_duration
+        check_audio_duration(audio_path, unlimited=unlimited)
 
         # ── Step 2: Transcribe ───────────────────────────────────────────────
         _set_step(job_id, "Transcribing with Whisper…", 2)
@@ -551,16 +621,14 @@ def _pipeline_thread(
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
 
         # ── Step 6: Upload to R2 + persist Episode row ───────────────────────
-        # Bug #4 fix: always persist the Episode row when the DB is available,
-        # regardless of whether R2 is configured.  r2_prefix is left empty when
-        # R2 is not configured; asset routes fall back to local disk in that case.
+        # Always persist the Episode row when the DB is available, regardless
+        # of whether R2 is configured.  r2_prefix is left empty when R2 is not
+        # configured; asset routes fall back to local disk in that case.
+        r2_prefix = ""
         if user_id and db_available():
-            r2_prefix = ""
             if _get_r2():
                 _set_step(job_id, "Saving to cloud storage…", 6)
                 r2_prefix = f"episodes/{user_id}/{slug}/"
-                # Bug #3 fix: raise if the audio file fails to upload — an episode
-                # with a missing audio file is worse than a failed job.
                 _r2_upload_episode(ep_dir, r2_prefix)
 
             # re-read meta (download may have enriched it)
@@ -596,6 +664,14 @@ def _pipeline_thread(
 
         _mark_usage("completed")
 
+        # Bug #4 fix: after a successful R2 upload the local ep_dir is no longer
+        # needed (canonical copy is in R2).  Remove it to prevent unbounded disk
+        # growth on long-lived workers.  When R2 is not configured we keep the
+        # local files (they are the only copy).
+        if r2_prefix:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            log.info(f"Cleaned up local ep_dir after R2 upload: {ep_dir}")
+
         with _jobs_lock:
             _jobs[job_id]["status"]   = "done"
             _jobs[job_id]["step"]     = "Complete"
@@ -605,6 +681,10 @@ def _pipeline_thread(
         tb = traceback.format_exc()
         log.error(f"Job {job_id} failed:\n{tb}")
         _mark_usage("failed")
+        # Bug #4 fix (failure path): always clean up ep_dir on error — a
+        # partially-written directory is worse than nothing, and it prevents
+        # disk fill-up from accumulated failed jobs.
+        shutil.rmtree(ep_dir, ignore_errors=True)
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"]  = str(exc)
@@ -1154,45 +1234,20 @@ def upload_process():
             "level":             level,
         }
 
-    # ── Atomic quota check + usage insert (Bug #1 fix) ────────────────────────
-    # Combine the quota read and usage-row insert in a single transaction to
-    # prevent TOCTOU races where two concurrent requests both pass _check_quota
-    # and both consume quota.
+    # ── Atomic quota check + usage insert ────────────────────────────────────
     usage_id = None
     if db_available() and current_user:
-        if not _is_unlimited(current_user):
-            with get_db() as db:
-                used = db.execute(
-                    select(func.count()).select_from(TranscriptionUsage).where(
-                        TranscriptionUsage.user_id == current_user.id,
-                        TranscriptionUsage.status.in_(["started", "completed"]),
-                    )
-                ).scalar() or 0
-                limit = current_user.transcription_limit
-                if used >= limit:
-                    shutil.rmtree(ep_dir, ignore_errors=True)
-                    return render_template(
-                        "upload.html",
-                        quota=_quota_context(current_user),
-                        error=f"Transcription limit reached ({used}/{limit}). "
-                              "Contact the admin if you need more.",
-                    ), 429
-                usage = TranscriptionUsage(
-                    user_id     = current_user.id,
-                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                    status      = "started",
-                )
-                db.add(usage)
+        try:
+            audio_bytes = audio_path.stat().st_size if audio_path else 0
+            usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
             usage_id = str(usage.id)
-        else:
-            with get_db() as db:
-                usage = TranscriptionUsage(
-                    user_id     = current_user.id,
-                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                    status      = "started",
-                )
-                db.add(usage)
-            usage_id = str(usage.id)
+        except ValueError as qe:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return render_template(
+                "upload.html",
+                quota=_quota_context(current_user),
+                error=str(qe),
+            ), 429
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -1442,40 +1497,16 @@ def api_upload():
             "level":             level,
         }
 
-    # ── Atomic quota check + usage insert (Bug #1 fix) ────────────────────────
+    # ── Atomic quota check + usage insert ────────────────────────────────────
     usage_id = None
     if db_available() and current_user:
-        if not unlimited:
-            with get_db() as db:
-                used = db.execute(
-                    select(func.count()).select_from(TranscriptionUsage).where(
-                        TranscriptionUsage.user_id == current_user.id,
-                        TranscriptionUsage.status.in_(["started", "completed"]),
-                    )
-                ).scalar() or 0
-                limit = current_user.transcription_limit
-                if used >= limit:
-                    shutil.rmtree(ep_dir, ignore_errors=True)
-                    return jsonify({
-                        "error": f"Transcription limit reached ({used}/{limit}). Contact the admin for more.",
-                        "quota": {"used": used, "limit": limit},
-                    }), 429
-                usage = TranscriptionUsage(
-                    user_id     = current_user.id,
-                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                    status      = "started",
-                )
-                db.add(usage)
+        try:
+            audio_bytes = audio_path.stat().st_size if audio_path else 0
+            usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
             usage_id = str(usage.id)
-        else:
-            with get_db() as db:
-                usage = TranscriptionUsage(
-                    user_id     = current_user.id,
-                    audio_bytes = audio_path.stat().st_size if audio_path else 0,
-                    status      = "started",
-                )
-                db.add(usage)
-            usage_id = str(usage.id)
+        except ValueError as qe:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"error": str(qe)}), 429
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -1504,26 +1535,44 @@ def api_upload():
 @app.route("/api/explain", methods=["POST"])
 @login_required
 def api_explain():
-    from lib.analyzer import explain_sentence
-    data    = request.json or {}
+    from lib.analyzer import explain_sentence, _EXPLAIN_MAX_INPUT_CHARS
+    data    = request.get_json(silent=True) or {}
     text    = data.get("text", "").strip()
-    episode = data.get("episode", "").strip()
+    # Bug #5 fix: fall back to a per-user global bucket when episode is absent
+    # so direct API callers can't bypass the limit by omitting the field.
+    episode = data.get("episode", "").strip() or "_global_"
     if not text:
         return jsonify({"error": "No text provided"}), 400
+    # Token-burn fix: reject oversized input at the API boundary so the LLM
+    # never sees more than a sentence or two regardless of what the client sends.
+    if len(text) > _EXPLAIN_MAX_INPUT_CHARS:
+        return jsonify({
+            "error": f"Text too long ({len(text)} chars). Maximum is {_EXPLAIN_MAX_INPUT_CHARS} characters."
+        }), 400
 
-    # Rate-limit: _EXPLAIN_LIMIT calls per user per episode.
-    # Admins and whitelisted users are exempt.
+    # Rate-limit: _EXPLAIN_LIMIT calls per user per episode (or per-session for
+    # direct API calls).  Resets daily.  Admins / whitelisted users are exempt.
     user = get_current_user()
-    if user and episode and db_available() and not _is_unlimited(user):
-        uid = str(user.id)
+    if user and db_available() and not _is_unlimited(user):
+        uid  = str(user.id)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with _explain_lock:
-            user_counts = _explain_counts.setdefault(uid, {})
-            used = user_counts.get(episode, 0)
+            # Bug #5 fix: prune dict if it's grown beyond the user cap.
+            if len(_explain_counts) > _EXPLAIN_MAX_USERS:
+                _explain_counts.clear()
+
+            bucket = _explain_counts.setdefault(uid, {"day": today, "counts": {}})
+            # Daily reset: new calendar day wipes the per-episode counters.
+            if bucket["day"] != today:
+                bucket["day"]    = today
+                bucket["counts"] = {}
+
+            used = bucket["counts"].get(episode, 0)
             if used >= _EXPLAIN_LIMIT:
                 return jsonify({
-                    "error": f"Explain limit reached ({_EXPLAIN_LIMIT} per episode)."
+                    "error": f"Explain limit reached ({_EXPLAIN_LIMIT} per episode per day)."
                 }), 429
-            user_counts[episode] = used + 1
+            bucket["counts"][episode] = used + 1
 
     explanation = explain_sentence(text)
     return jsonify({"explanation": explanation})
