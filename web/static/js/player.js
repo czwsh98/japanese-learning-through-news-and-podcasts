@@ -392,15 +392,38 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // ── Fetch data ────────────────────────────────────────────────────────────
+  // Start YouTube player init immediately so it loads in parallel with data
+  // fetches — the player doesn't need the transcript to begin initialising.
+  const ytInitPromise = isYoutube
+    ? waitForYTAPI().then(() => createYTPlayer(videoId))
+    : Promise.resolve(null);
+
+  // Vocab is only needed to mark already-saved words in sidebar cards, so
+  // fetch it in parallel but don't block transcript rendering on it.
+  const vocabPromise = fetch("/api/vocab").then(r => r.json()).catch(() => []);
 
   let transcriptData = { segments: [] };
   let analysisData   = { highlights: [], vocab: [], grammar: [], expressions: [] };
   let savedWords     = new Set();  // words already in the global vocab bank
 
-  const [transcriptResult, analysisResult, vocabResult] = await Promise.allSettled([
-    fetch(`/api/episode/${dateStr}/transcript`).then(r => { if (!r.ok) throw r; return r.json(); }),
-    fetch(`/api/episode/${dateStr}/analysis`).then(r => { if (!r.ok) throw r; return r.json(); }),
-    fetch("/api/vocab").then(r => r.json()).catch(() => []),
+  // Use presigned R2 URLs embedded at render time (one round trip, direct
+  // from R2).  Fall back to the /api/ proxy route if the URL is absent or
+  // returns 403 (expired after the 1-hour presigned window).
+  async function fetchJson(presignedUrl, apiUrl) {
+    if (presignedUrl) {
+      const r = await fetch(presignedUrl);
+      if (r.ok) return r.json();
+      if (r.status !== 403 && r.status !== 400) throw r;
+      // Presigned URL expired — fall through to the API route below.
+    }
+    const r = await fetch(apiUrl);
+    if (!r.ok) throw r;
+    return r.json();
+  }
+
+  const [transcriptResult, analysisResult] = await Promise.allSettled([
+    fetchJson(meta?.dataset.transcriptUrl, `/api/episode/${dateStr}/transcript`),
+    fetchJson(meta?.dataset.analysisUrl,   `/api/episode/${dateStr}/analysis`),
   ]);
 
   if (transcriptResult.status === "fulfilled") {
@@ -414,9 +437,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     analysisData = analysisResult.value;
   }
 
-  // Build the set of already-saved words from the vocab bank
-  if (vocabResult.status === "fulfilled" && Array.isArray(vocabResult.value)) {
-    vocabResult.value.forEach(item => { if (item.word) savedWords.add(item.word); });
+  // Resolve vocab (likely already done, given transcript takes longer)
+  const vocabResult = await vocabPromise;
+  if (Array.isArray(vocabResult)) {
+    vocabResult.forEach(item => { if (item.word) savedWords.add(item.word); });
   }
 
   segments   = transcriptData.segments || [];
@@ -717,17 +741,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   if (isYoutube) {
-    (async () => {
-      try {
-        await waitForYTAPI();
-        ytPlayer = await createYTPlayer(videoId);
-        if (speedIdx !== 2) ytPlayer.setPlaybackRate(SPEEDS[speedIdx]);
-      } catch (err) {
-        console.error("YouTube Player failed:", err);
-        const p = document.getElementById("yt-player");
-        if (p) p.innerHTML = `<div class="p-6 text-center text-gray-500">Video failed to load.</div>`;
-      }
-    })();
+    // ytInitPromise was started before the data fetches; resolve it now.
+    ytInitPromise.then(player => {
+      ytPlayer = player;
+      if (speedIdx !== 2) ytPlayer?.setPlaybackRate(SPEEDS[speedIdx]);
+    }).catch(err => {
+      console.error("YouTube Player failed:", err);
+      const p = document.getElementById("yt-player");
+      if (p) p.innerHTML = `<div class="p-6 text-center text-gray-500">Video failed to load.</div>`;
+    });
 
     setInterval(() => {
       if (!useYoutube || !ytPlayer || typeof ytPlayer.getCurrentTime !== "function") return;

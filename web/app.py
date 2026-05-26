@@ -1000,13 +1000,29 @@ def episode(date_str: str):
             "source":    ep_row.source,
             "video_id":  _yt.group(1) if _yt else "",
         }
-        return render_template("episode.html", date=date_str, meta=meta)
+        # Embed presigned R2 URLs in the page so JS can fetch directly in one
+        # round trip instead of going Flask → 302 → R2.  Pure HMAC signing,
+        # no network call.  JS falls back to /api/ routes if these are absent
+        # or if the URL has expired (403).
+        r2_urls = {}
+        if ep_row.r2_prefix and _get_r2():
+            level = ep_row.level or ""
+            analysis_key = (
+                f"{ep_row.r2_prefix}analysis_{level}.json"
+                if level and _r2_key_exists(f"{ep_row.r2_prefix}analysis_{level}.json")
+                else f"{ep_row.r2_prefix}analysis.json"
+            )
+            r2_urls = {
+                "transcript": _r2_presigned(f"{ep_row.r2_prefix}transcript.json"),
+                "analysis":   _r2_presigned(analysis_key),
+            }
+        return render_template("episode.html", date=date_str, meta=meta, r2_urls=r2_urls)
 
     # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     meta_file = ep / "meta.json"
     meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
-    return render_template("episode.html", date=date_str, meta=meta)
+    return render_template("episode.html", date=date_str, meta=meta, r2_urls={})
 
 
 @app.route("/episode/<date_str>/delete", methods=["POST"])
