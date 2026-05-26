@@ -1,4 +1,5 @@
 """Flask web UI for the Japanese Learning Pipeline — localhost:5000."""
+import hashlib
 import json
 import logging
 import mimetypes
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -368,20 +370,35 @@ def _r2_get_json(key: str) -> dict:
     return json.loads(obj["Body"].read().decode("utf-8"))
 
 
+def _r2_key_exists(key: str) -> bool:
+    """Check if an object key exists in R2."""
+    try:
+        _get_r2().head_object(Bucket=_r2_bucket(), Key=key)
+        return True
+    except Exception as exc:
+        from botocore.exceptions import ClientError
+        if isinstance(exc, ClientError) and exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return False
+        log.warning("R2 head_object error for %s: %s", key, exc)
+        return False
+
+
 def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
-    """
-    Locate the audio file under r2_prefix.
+    """Locate the audio file under r2_prefix.
+
+    Tries known extensions via HEAD (most-common-first) instead of list_objects_v2.
+    HEAD on a specific key is faster than a prefix listing.
     Returns (key, mimetype) or None.
-    Uses list_objects_v2 so we don't have to guess the extension.
     """
-    resp = _get_r2().list_objects_v2(
-        Bucket=_r2_bucket(), Prefix=r2_prefix + "audio"
-    )
-    for obj in resp.get("Contents", []):
-        name = Path(obj["Key"]).name
-        if name.startswith("audio."):
-            mt = mimetypes.guess_type(name)[0] or "audio/mpeg"
-            return obj["Key"], mt
+    s3     = _get_r2()
+    bucket = _r2_bucket()
+    for ext in (".mp3", ".m4a", ".aac", ".ogg", ".wav", ".webm", ".flac", ".opus", ".mp4"):
+        key = f"{r2_prefix}audio{ext}"
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            return key, mimetypes.guess_type(key)[0] or "audio/mpeg"
+        except Exception:
+            continue
     return None
 
 
@@ -574,12 +591,88 @@ def _pipeline_thread(
     user_id=None,
     usage_id=None,
     unlimited=False,
+    clone_from_id=None,
 ) -> None:
     """Runs the full pipeline in a background thread."""
     from lib.transcriber import transcribe_audio
     from lib.translator import translate_segments
     from lib.analyzer import analyze_transcript
-    from lib.writer import write_episode_files
+    from lib.writer import write_episode_files, _write_cards
+    from lib.tokenizer import tokenize_segments
+
+    if clone_from_id and db_available() and _get_r2():
+        try:
+            with get_db() as db:
+                cloned_ep = db.get(Episode, uuid.UUID(clone_from_id))
+                if not cloned_ep:
+                    raise RuntimeError("Cloned episode not found in database")
+                cloned_prefix = cloned_ep.r2_prefix
+                cloned_level  = cloned_ep.level
+                meta_data = {
+                    "title":    cloned_ep.title,
+                    "channel":  cloned_ep.channel,
+                    "url":      cloned_ep.url,
+                    "thumbnail": cloned_ep.thumbnail,
+                    "duration": cloned_ep.duration,
+                    "source":   cloned_ep.source,
+                }
+                source_token = cloned_ep.source_token
+
+            if cloned_level != level:
+                # Levels differ — re-run analysis only, skip download and transcription.
+                with _jobs_lock:
+                    _jobs[job_id]["total_steps"] = 3
+                _set_step(job_id, "Fetching original transcript…", 1)
+                segments = _r2_get_json(f"{cloned_prefix}transcript.json").get("segments", [])
+                _set_step(job_id, f"Analysing vocabulary and grammar for {level} level…", 2)
+                analysis = analyze_transcript(segments, level=level)
+                _set_step(job_id, "Saving analysis to cloud storage…", 3)
+                (ep_dir / f"analysis_{level}.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+                (ep_dir / f"highlights_{level}.json").write_text(json.dumps({"highlights": analysis.get("highlights", [])}, ensure_ascii=False, indent=2), encoding="utf-8")
+                _write_cards(ep_dir / f"cards_{level}.csv", analysis)
+                s3 = _get_r2()
+                bucket = _r2_bucket()
+                for fn in [f"analysis_{level}.json", f"highlights_{level}.json", f"cards_{level}.csv"]:
+                    fpath = ep_dir / fn
+                    key = f"{cloned_prefix}{fn}"
+                    mt = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+                    s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
+                done_step = 3
+            else:
+                done_step = 1
+
+            with get_db() as db:
+                db.add(Episode(
+                    owner_user_id = user_id,
+                    slug          = slug,
+                    date          = slug[:10],
+                    title         = meta_data["title"],
+                    channel       = meta_data["channel"],
+                    url           = meta_data["url"],
+                    thumbnail     = meta_data["thumbnail"],
+                    duration      = meta_data["duration"],
+                    level         = level,
+                    source        = meta_data["source"],
+                    source_token  = source_token,
+                    r2_prefix     = cloned_prefix,
+                ))
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            with _jobs_lock:
+                _jobs[job_id]["status"]      = "done"
+                _jobs[job_id]["step"]        = "Complete"
+                _jobs[job_id]["step_num"]    = done_step
+                _jobs[job_id]["total_steps"] = done_step
+            return
+
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log.error(f"Job {job_id} fast-path failed:\n{tb}")
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            with _jobs_lock:
+                _jobs[job_id]["status"] = "error"
+                _jobs[job_id]["error"]  = str(exc)
+                _jobs[job_id]["step"]   = "Failed"
+            return
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
@@ -625,6 +718,7 @@ def _pipeline_thread(
         # ── Step 3: Translate ────────────────────────────────────────────────
         _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
         segments = translate_segments(whisper_result["segments"])
+        segments = tokenize_segments(segments)
 
         # ── Step 4: Analyse ──────────────────────────────────────────────────
         _set_step(job_id, "Analysing vocabulary and grammar…", 4)
@@ -633,6 +727,9 @@ def _pipeline_thread(
         # ── Step 5: Write files ──────────────────────────────────────────────
         _set_step(job_id, "Writing episode files…", 5)
         write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
+        (ep_dir / f"analysis_{level}.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+        (ep_dir / f"highlights_{level}.json").write_text(json.dumps({"highlights": analysis.get("highlights", [])}, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_cards(ep_dir / f"cards_{level}.csv", analysis)
 
         # ── Step 6: Upload to R2 + persist Episode row ───────────────────────
         # Always persist the Episode row when the DB is available, regardless
@@ -644,6 +741,14 @@ def _pipeline_thread(
                 _set_step(job_id, "Saving to cloud storage…", 6)
                 r2_prefix = f"episodes/{user_id}/{slug}/"
                 _r2_upload_episode(ep_dir, r2_prefix)
+                # Level-specific files are not in _EPISODE_UPLOAD_FILES — upload separately.
+                s3 = _get_r2()
+                bucket = _r2_bucket()
+                for fn in [f"analysis_{level}.json", f"highlights_{level}.json", f"cards_{level}.csv"]:
+                    fpath = ep_dir / fn
+                    key = f"{r2_prefix}{fn}"
+                    mt = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
+                    s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
 
             # re-read meta (download may have enriched it)
             meta_path = ep_dir / "meta.json"
@@ -669,12 +774,14 @@ def _pipeline_thread(
                         duration      = meta.get("duration", 0),
                         level         = meta.get("level", level),
                         source        = meta.get("source", ""),
+                        source_token  = _get_source_token(source_url or meta.get("url", "")),
                         r2_prefix     = r2_prefix,
                     )
                     db.add(ep_row)
                 else:
                     if r2_prefix:
                         existing.r2_prefix = r2_prefix
+                        existing.source_token = _get_source_token(source_url or meta.get("url", ""))
 
         _mark_usage("completed")
 
@@ -734,6 +841,31 @@ def _find_audio(ep_dir: Path) -> Path | None:
     return None
 
 
+def _get_source_token(url: str | None) -> str | None:
+    """Generate a unique token for the YouTube video or RSS feed URL."""
+    if not url:
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    yt_match = _YT_ID_RE.search(url)
+    if yt_match:
+        return f"youtube:{yt_match.group(1)}"
+    try:
+        parsed = urllib.parse.urlparse(url)
+        normalized_url = urllib.parse.urlunparse((
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            "", "", ""
+        ))
+    except Exception:
+        normalized_url = url.lower()
+    
+    sha_hash = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+    return f"url:{sha_hash}"
+
+
 def _unique_ep_slug(base: str, user_id=None) -> str:
     """Return a slug not already used for this user (DB) or on disk (fallback)."""
     slug    = base
@@ -755,15 +887,47 @@ def _unique_ep_slug(base: str, user_id=None) -> str:
     return slug
 
 
+def _find_source_clone(source_url: str, user_id) -> tuple[str | None, str | None, str | None]:
+    """Check episode deduplication by source_token (R2 mode only).
+
+    Returns one of:
+    - (existing_slug, None, None)       — this user already owns the URL
+    - (None, clone_id, clone_level)     — another user owns it; clone from them
+    - (None, None, None)                — no duplicate found
+    """
+    source_token = _get_source_token(source_url)
+    if not (source_token and db_available() and _get_r2()):
+        return None, None, None
+    with get_db() as db:
+        own = db.execute(
+            select(Episode).where(
+                Episode.owner_user_id == user_id,
+                Episode.source_token  == source_token,
+            )
+        ).scalars().first()
+        if own:
+            return own.slug, None, None
+        other = db.execute(
+            select(Episode).where(
+                Episode.source_token == source_token,
+                Episode.r2_prefix    != "",
+            )
+        ).scalars().first()
+        if other:
+            return None, str(other.id), other.level
+    return None, None, None
+
+
 def _make_response_cached(response):
     """Add cache headers to a response for per-user episode data.
 
-    'private' restricts caching to the individual user's browser — shared
-    caches (CDNs, proxies) must not store the response.  'no-cache' means the
-    browser must revalidate with the server before serving a cached copy, which
-    prevents stale data after an account switch on the same device.
+    'private' restricts caching to the individual user's browser.
+    'max-age=300' lets the browser serve from cache for 5 minutes without a
+    round-trip, which matters most for large transcript/analysis JSON on Railway.
+    'must-revalidate' means don't serve stale content if the cache entry expires
+    and the server is unreachable.
     """
-    response.headers["Cache-Control"] = "private, no-cache"
+    response.headers["Cache-Control"] = "private, max-age=300, must-revalidate"
     return response
 
 
@@ -852,14 +1016,23 @@ def episode_delete(date_str: str):
     ep_row = _lookup_episode(date_str)
     if ep_row is not None:
         if ep_row.r2_prefix and _get_r2():
-            # Delete all objects under the prefix
-            paginator = _get_r2().get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
-                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-                if objects:
-                    _get_r2().delete_objects(
-                        Bucket=_r2_bucket(), Delete={"Objects": objects}
+            # Only delete R2 objects if no other Episode row shares this prefix
+            # (cross-user clones point at the same r2_prefix — deleting would break them).
+            with get_db() as db:
+                shared_count = db.execute(
+                    select(func.count()).select_from(Episode).where(
+                        Episode.r2_prefix == ep_row.r2_prefix,
+                        Episode.id        != ep_row.id,
                     )
+                ).scalar_one()
+            if shared_count == 0:
+                paginator = _get_r2().get_paginator("list_objects_v2")
+                for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
+                    objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                    if objects:
+                        _get_r2().delete_objects(
+                            Bucket=_r2_bucket(), Delete={"Objects": objects}
+                        )
         with get_db() as db:
             row = db.get(Episode, ep_row.id)
             if row:
@@ -1174,8 +1347,15 @@ def upload_process():
 
     audio_path: Path | None = None
     meta: dict = {}
+    clone_from_id: str | None = None
+    clone_from_level: str | None = None
 
     if source_url:
+        own_slug, clone_from_id, clone_from_level = _find_source_clone(source_url, user_id)
+        if own_slug:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return redirect(url_for("episode", date_str=own_slug))
+
         # URL path — download + size check happens inside the thread
         title_override = request.form.get("title", "").strip()
         meta = {
@@ -1256,7 +1436,7 @@ def upload_process():
 
     # ── Atomic quota check + usage insert ────────────────────────────────────
     usage_id = None
-    if db_available() and current_user:
+    if not clone_from_id and db_available() and current_user:
         try:
             audio_bytes = audio_path.stat().st_size if audio_path else 0
             usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
@@ -1269,7 +1449,10 @@ def upload_process():
                 error=str(qe),
             ), 429
 
-    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+    if clone_from_id:
+        total_steps = 1 if (clone_from_level == level) else 3
+    else:
+        total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
     # Register job and start background thread
     with _jobs_lock:
@@ -1288,7 +1471,12 @@ def upload_process():
     t = threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
-        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
+        kwargs={
+            "user_id": user_id,
+            "usage_id": usage_id,
+            "unlimited": unlimited,
+            "clone_from_id": clone_from_id
+        },
         daemon=True,
     )
     t.start()
@@ -1376,13 +1564,22 @@ def episode_cards(date_str: str):
     # ── DB / R2 path ──────────────────────────────────────────────────────────
     ep_row = _lookup_episode(date_str)
     if ep_row is not None:
+        target_file = f"cards_{ep_row.level}.csv"
         if ep_row.r2_prefix and _get_r2():
+            if _r2_key_exists(f"{ep_row.r2_prefix}{target_file}"):
+                return redirect(_r2_presigned(f"{ep_row.r2_prefix}{target_file}"))
             return redirect(_r2_presigned(f"{ep_row.r2_prefix}cards.csv"))
         if ep_row.r2_prefix:
             abort(404)
 
     # ── File fallback ─────────────────────────────────────────────────────────
-    csv_file = _ep_dir(date_str) / "cards.csv"
+    target_file = "cards.csv"
+    if ep_row is not None:
+        level_file = f"cards_{ep_row.level}.csv"
+        if (_ep_dir(date_str) / level_file).exists():
+            target_file = level_file
+
+    csv_file = _ep_dir(date_str) / target_file
     if not csv_file.exists():
         abort(404)
     return send_file(
@@ -1398,19 +1595,28 @@ def episode_cards(date_str: str):
 def _episode_json_response(date_str: str, filename: str):
     """Shared helper: serve episode JSON from R2 (DB path) or local file (fallback)."""
     ep_row = _lookup_episode(date_str)
+    target_file = filename
     if ep_row is not None:
+        if filename in ("analysis.json", "highlights.json"):
+            base_name, ext = filename.split(".", 1)
+            level_filename = f"{base_name}_{ep_row.level}.{ext}"
+            if ep_row.r2_prefix and _get_r2():
+                if _r2_key_exists(f"{ep_row.r2_prefix}{level_filename}"):
+                    target_file = level_filename
+            else:
+                if (_ep_dir(date_str) / level_filename).exists():
+                    target_file = level_filename
+
         if ep_row.r2_prefix and _get_r2():
-            try:
-                data = _r2_get_json(f"{ep_row.r2_prefix}{filename}")
-                return _make_response_cached(jsonify(data))
-            except Exception as exc:
-                log.error(f"R2 fetch failed for {ep_row.r2_prefix}{filename}: {exc}")
-                abort(404)
+            # Redirect to a presigned R2 URL so the browser fetches directly
+            # from R2 (APAC) instead of proxying through Railway.
+            # Requires CORS on the R2 bucket for https://mimichan.ziwei-chen.com.
+            return redirect(_r2_presigned(f"{ep_row.r2_prefix}{target_file}"))
         # Bug #4 fix: fall through to local disk when r2_prefix is empty.
         if ep_row.r2_prefix:
             abort(404)
-    # File fallback
-    return _make_response_cached(jsonify(_read_json(_ep_dir(date_str) / filename)))
+
+    return _make_response_cached(jsonify(_read_json(_ep_dir(date_str) / target_file)))
 
 
 @app.route("/api/episode/<date_str>/meta")
@@ -1454,8 +1660,15 @@ def api_upload():
 
     audio_path: Path | None = None
     meta: dict = {}
+    clone_from_id: str | None = None
+    clone_from_level: str | None = None
 
     if source_url:
+        own_slug, clone_from_id, clone_from_level = _find_source_clone(source_url, user_id)
+        if own_slug:
+            shutil.rmtree(ep_dir, ignore_errors=True)
+            return jsonify({"job_id": None, "slug": own_slug})
+
         title_override = request.form.get("title", "").strip()
         meta = {
             "title":       title_override or source_url,
@@ -1519,7 +1732,7 @@ def api_upload():
 
     # ── Atomic quota check + usage insert ────────────────────────────────────
     usage_id = None
-    if db_available() and current_user:
+    if not clone_from_id and db_available() and current_user:
         try:
             audio_bytes = audio_path.stat().st_size if audio_path else 0
             usage = _atomic_quota_insert(current_user, audio_bytes=audio_bytes)
@@ -1528,7 +1741,10 @@ def api_upload():
             shutil.rmtree(ep_dir, ignore_errors=True)
             return jsonify({"error": str(qe)}), 429
 
-    total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
+    if clone_from_id:
+        total_steps = 1 if (clone_from_level == level) else 3
+    else:
+        total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
     with _jobs_lock:
         _jobs[job_id] = {
@@ -1545,7 +1761,12 @@ def api_upload():
     threading.Thread(
         target=_pipeline_thread,
         args=(job_id, slug, ep_dir, source_url or None, audio_path, meta, level),
-        kwargs={"user_id": user_id, "usage_id": usage_id, "unlimited": unlimited},
+        kwargs={
+            "user_id": user_id,
+            "usage_id": usage_id,
+            "unlimited": unlimited,
+            "clone_from_id": clone_from_id
+        },
         daemon=True,
     ).start()
 

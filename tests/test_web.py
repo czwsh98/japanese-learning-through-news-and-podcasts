@@ -7,8 +7,10 @@ from web.app import app
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
-    with app.test_client() as client:
-        yield client
+    with patch("web.app.db_available", return_value=False), \
+         patch("web.auth.db_available", return_value=False):
+        with app.test_client() as client:
+            yield client
 
 def test_subscriptions_page(client, tmp_path):
     # Mock SOURCES_FILE

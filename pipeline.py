@@ -36,6 +36,7 @@ from lib.downloader import download_latest
 from lib.transcriber import transcribe_audio
 from lib.translator import translate_segments
 from lib.writer import write_episode_files
+from lib.tokenizer import tokenize_segments
 
 _PROJECT_ROOT = Path(__file__).parent
 _episodes_env = os.environ.get("EPISODES_DIR", "")
@@ -172,6 +173,9 @@ def run(episode_date: date, url_override: str | None, dry_run: bool,
         log.info("Step 3/5 — Translate EN + ZH (Gemini Flash)")
         with _timed("Translate"):
             segments = _stub_segments() if dry_run else translate_segments(whisper_result["segments"])
+
+    log.info("Tokenizing Japanese text for Furigana…")
+    segments = tokenize_segments(segments)
 
     # ── Step 4: Analyze ─────────────────────────────────────────────────────
     if _has_analysis() and not dry_run:

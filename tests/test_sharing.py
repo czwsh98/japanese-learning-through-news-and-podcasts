@@ -1,0 +1,383 @@
+import os
+import json
+import uuid
+import pytest
+from unittest.mock import patch, MagicMock
+from pathlib import Path
+from sqlalchemy import select
+
+# Setup environment variables before imports to initialize the app in SQLite and dummy R2 mode
+DB_PATH = "test_sharing.db"
+os.environ["DATABASE_URL"] = f"sqlite:///{DB_PATH}"
+os.environ["R2_ENDPOINT_URL"] = "https://mock-r2.com"
+os.environ["R2_ACCESS_KEY_ID"] = "mock-key"
+os.environ["R2_SECRET_ACCESS_KEY"] = "mock-secret"
+os.environ["R2_BUCKET"] = "mock-bucket"
+os.environ["SECRET_KEY"] = "test-secret-key-12345"
+
+# Mock dotenv.load_dotenv to prevent it from reading the actual .env file and overwriting sqlite configuration
+import dotenv
+dotenv.load_dotenv = lambda *args, **kwargs: None
+
+from web.app import app, _get_source_token, _pipeline_thread, _jobs, _jobs_lock
+from web.db import get_db, User, Episode, TranscriptionUsage
+
+@pytest.fixture(autouse=True)
+def setup_db():
+    # Force database recreation for each test case using the file-based SQLite
+    db_file = Path(DB_PATH)
+    if db_file.exists():
+        try:
+            db_file.unlink()
+        except OSError:
+            pass
+            
+    # Force fresh engine / connection initialization
+    from web.db import init_db, Base, _engine
+    init_db()
+    Base.metadata.create_all(_engine)
+    
+    yield
+    
+    # Cleanup DB file after test runs
+    if db_file.exists():
+        try:
+            db_file.unlink()
+        except OSError:
+            pass
+
+@pytest.fixture
+def test_users():
+    # Create two dummy users in SQLite
+    user_a_id = uuid.uuid4()
+    user_b_id = uuid.uuid4()
+    with get_db() as db:
+        user_a = User(
+            id=user_a_id,
+            email="usera@example.com",
+            password_hash="pbkdf2:sha256:...",
+            is_admin=False,
+            transcription_limit=3
+        )
+        user_b = User(
+            id=user_b_id,
+            email="userb@example.com",
+            password_hash="pbkdf2:sha256:...",
+            is_admin=False,
+            transcription_limit=3
+        )
+        db.add(user_a)
+        db.add(user_b)
+    return user_a_id, user_b_id
+
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
+
+def test_get_source_token_youtube():
+    # Test different YouTube formats
+    assert _get_source_token("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "youtube:dQw4w9WgXcQ"
+    assert _get_source_token("https://youtu.be/dQw4w9WgXcQ") == "youtube:dQw4w9WgXcQ"
+    assert _get_source_token("https://youtube.com/watch?v=dQw4w9WgXcQ&feature=share") == "youtube:dQw4w9WgXcQ"
+    assert _get_source_token("https://m.youtube.com/watch?v=dQw4w9WgXcQ") == "youtube:dQw4w9WgXcQ"
+    assert _get_source_token(None) is None
+    assert _get_source_token("   ") is None
+
+def test_get_source_token_general_url():
+    # Test standard URL normalization (ignores query params/fragments, lowercases host/scheme)
+    url1 = "HTTPS://Example.Com/podcast/Ep1.mp3?token=abc#sec1"
+    url2 = "https://example.com/podcast/Ep1.mp3"
+    token1 = _get_source_token(url1)
+    token2 = _get_source_token(url2)
+    assert token1 is not None
+    assert token1.startswith("url:")
+    assert token1 == token2
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+@patch("web.app._get_r2")
+def test_upload_duplicate_same_user(mock_r2, mock_auth_get_user, mock_app_get_user):
+    # Decorators bottom-to-top:
+    # 1. web.app._get_r2 -> mock_r2
+    # 2. web.auth.get_current_user -> mock_auth_get_user
+    # 3. web.app.get_current_user -> mock_app_get_user
+    
+    user_a_id = uuid.uuid4()
+    with get_db() as db:
+        user_a = User(
+            id=user_a_id,
+            email="usera@example.com",
+            password_hash="pbkdf2:sha256:...",
+            is_admin=False
+        )
+        db.add(user_a)
+    
+    mock_auth_get_user.return_value = user_a
+    mock_app_get_user.return_value = user_a
+    mock_r2.return_value = MagicMock()
+    
+    # Pre-populate an episode for user_a
+    ep_id = uuid.uuid4()
+    source_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    token = "youtube:dQw4w9WgXcQ"
+    
+    with get_db() as db:
+        ep = Episode(
+            id=ep_id,
+            owner_user_id=user_a_id,
+            slug="2026-05-21",
+            date="2026-05-21",
+            title="First Upload",
+            source_token=token,
+            r2_prefix="episodes/2026-05-21/"
+        )
+        db.add(ep)
+    
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        rv = client.post("/api/upload", data={
+            "source_url": source_url,
+            "level": "intermediate"
+        })
+        
+        assert rv.status_code == 200
+        res = rv.get_json()
+        assert res["job_id"] is None
+        assert res["slug"] == "2026-05-21"
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+@patch("web.app._get_r2")
+@patch("web.app._atomic_quota_insert")
+@patch("web.app.threading.Thread")
+def test_upload_duplicate_different_user_same_level(
+    mock_thread, mock_quota_insert, mock_r2, mock_auth_get_user, mock_app_get_user, test_users, tmp_path
+):
+    # Decorators bottom-to-top:
+    # 1. web.app.threading.Thread -> mock_thread
+    # 2. web.app._atomic_quota_insert -> mock_quota_insert
+    # 3. web.app._get_r2 -> mock_r2
+    # 4. web.auth.get_current_user -> mock_auth_get_user
+    # 5. web.app.get_current_user -> mock_app_get_user
+    
+    user_a_id, user_b_id = test_users
+    
+    with get_db() as db:
+        user_b = db.get(User, user_b_id)
+    
+    mock_auth_get_user.return_value = user_b
+    mock_app_get_user.return_value = user_b
+    mock_r2.return_value = MagicMock()
+    
+    # Pre-populate user A's completed Episode
+    source_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    token = "youtube:dQw4w9WgXcQ"
+    cloned_prefix = "episodes/2026-05-21-cloned/"
+    
+    user_a_ep_id = uuid.uuid4()
+    with get_db() as db:
+        ep = Episode(
+            id=user_a_ep_id,
+            owner_user_id=user_a_id,
+            slug="2026-05-21",
+            date="2026-05-21",
+            title="User A Upload",
+            level="intermediate",
+            source_token=token,
+            r2_prefix=cloned_prefix,
+            source="youtube"
+        )
+        db.add(ep)
+        
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        rv = client.post("/api/upload", data={
+            "source_url": source_url,
+            "level": "intermediate"
+        })
+        
+        assert rv.status_code == 200
+        res = rv.get_json()
+        job_id = res["job_id"]
+        slug = res["slug"]
+        
+        # Verify _atomic_quota_insert was NOT called
+        mock_quota_insert.assert_not_called()
+        
+        # Verify background thread setup but intercepted
+        mock_thread.assert_called_once()
+        thread_kwargs = mock_thread.call_args[1]
+        assert thread_kwargs["kwargs"]["clone_from_id"] == str(user_a_ep_id)
+        assert thread_kwargs["kwargs"]["user_id"] == user_b_id
+        
+        # Run the thread target function synchronously using the captured arguments
+        ep_dir = tmp_path / slug
+        ep_dir.mkdir()
+        
+        thread_target = thread_kwargs["target"]
+        thread_args = thread_kwargs["args"]
+        # Override the ep_dir with tmp_path one
+        thread_args_list = list(thread_args)
+        thread_args_list[2] = ep_dir
+        
+        thread_target(*thread_args_list, **thread_kwargs["kwargs"])
+        
+        # Verify the new Episode row is successfully created for user B pointing to the same R2 prefix
+        from sqlalchemy import select
+        with get_db() as db:
+            user_b_eps = db.execute(
+                select(Episode).where(Episode.owner_user_id == user_b_id)
+            ).scalars().all()
+            
+            assert len(user_b_eps) == 1
+            b_ep = user_b_eps[0]
+            assert b_ep.slug == slug
+            assert b_ep.level == "intermediate"
+            assert b_ep.r2_prefix == cloned_prefix
+            assert b_ep.source_token == token
+            
+        # Local directory should be cleaned up
+        assert not ep_dir.exists()
+        
+        # Job status should be done
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            assert job["status"] == "done"
+            assert job["step_num"] == 1
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+@patch("web.app._get_r2")
+@patch("web.app._r2_get_json")
+@patch("lib.analyzer.analyze_transcript")
+@patch("web.app._atomic_quota_insert")
+@patch("web.app.threading.Thread")
+def test_upload_duplicate_different_user_different_level(
+    mock_thread, mock_quota_insert, mock_analyze, mock_r2_get_json, mock_r2, mock_auth_get_user, mock_app_get_user, test_users, tmp_path
+):
+    # Decorators bottom-to-top:
+    # 1. web.app.threading.Thread -> mock_thread
+    # 2. web.app._atomic_quota_insert -> mock_quota_insert
+    # 3. lib.analyzer.analyze_transcript -> mock_analyze
+    # 4. web.app._r2_get_json -> mock_r2_get_json
+    # 5. web.app._get_r2 -> mock_r2
+    # 6. web.auth.get_current_user -> mock_auth_get_user
+    # 7. web.app.get_current_user -> mock_app_get_user
+    
+    user_a_id, user_b_id = test_users
+    
+    with get_db() as db:
+        user_b = db.get(User, user_b_id)
+        
+    mock_auth_get_user.return_value = user_b
+    mock_app_get_user.return_value = user_b
+    
+    # Mock R2 client
+    mock_s3 = MagicMock()
+    mock_r2.return_value = mock_s3
+    
+    # Mock transcript JSON from R2
+    mock_r2_get_json.return_value = {
+        "segments": [{"text": "テスト", "start": 0.0, "end": 2.0}]
+    }
+    
+    # Mock analyzer output
+    mock_analyze.return_value = {
+        "highlights": ["テスト"],
+        "words": [{"word": "テスト", "reading": "てすと"}]
+    }
+    
+    # Pre-populate user A's completed Episode
+    source_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    token = "youtube:dQw4w9WgXcQ"
+    cloned_prefix = "episodes/2026-05-21-cloned/"
+    
+    user_a_ep_id = uuid.uuid4()
+    with get_db() as db:
+        ep = Episode(
+            id=user_a_ep_id,
+            owner_user_id=user_a_id,
+            slug="2026-05-21",
+            date="2026-05-21",
+            title="User A Upload",
+            level="intermediate",
+            source_token=token,
+            r2_prefix=cloned_prefix,
+            source="youtube"
+        )
+        db.add(ep)
+        
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        # POST to upload the duplicate URL for user B (at a different level: advanced)
+        rv = client.post("/api/upload", data={
+            "source_url": source_url,
+            "level": "advanced"
+        })
+        
+        assert rv.status_code == 200
+        res = rv.get_json()
+        job_id = res["job_id"]
+        slug = res["slug"]
+        
+        # Verify quota check is bypassed
+        mock_quota_insert.assert_not_called()
+        
+        # Verify background thread was intercepted
+        mock_thread.assert_called_once()
+        thread_kwargs = mock_thread.call_args[1]
+        
+        # Run pipeline thread target synchronously
+        ep_dir = tmp_path / slug
+        ep_dir.mkdir()
+        
+        thread_target = thread_kwargs["target"]
+        thread_args = thread_kwargs["args"]
+        thread_args_list = list(thread_args)
+        thread_args_list[2] = ep_dir
+        
+        thread_target(*thread_args_list, **thread_kwargs["kwargs"])
+        
+        with _jobs_lock:
+            job_state = _jobs.get(job_id)
+        assert job_state is not None
+        assert job_state.get("error") == "", f"Job failed with error: {job_state.get('error')}"
+        assert job_state.get("status") == "done"
+        
+        # Verify transcript is fetched and analyzer is called with correct level
+        mock_r2_get_json.assert_called_once_with(f"{cloned_prefix}transcript.json")
+        mock_analyze.assert_called_once_with([{"text": "テスト", "start": 0.0, "end": 2.0}], level="advanced")
+        
+        # Verify they were uploaded to S3 from correct local paths
+        expected_uploads = [
+            f"{cloned_prefix}analysis_advanced.json",
+            f"{cloned_prefix}highlights_advanced.json",
+            f"{cloned_prefix}cards_advanced.csv"
+        ]
+        assert mock_s3.upload_file.call_count == 3
+        uploaded_keys = [call.args[2] for call in mock_s3.upload_file.call_args_list]
+        uploaded_paths = [call.args[0] for call in mock_s3.upload_file.call_args_list]
+        for key in expected_uploads:
+            assert key in uploaded_keys
+        for fn in ["analysis_advanced.json", "highlights_advanced.json", "cards_advanced.csv"]:
+            assert str(ep_dir / fn) in uploaded_paths
+            
+        # Verify new Episode row is created pointing to the original R2 prefix but with the new level
+        with get_db() as db:
+            b_ep = db.execute(
+                select(Episode).where(Episode.owner_user_id == user_b_id)
+            ).scalar_one()
+            assert b_ep.slug == slug
+            assert b_ep.level == "advanced"
+            assert b_ep.r2_prefix == cloned_prefix
+            
+        # Local directory is cleaned up
+        assert not ep_dir.exists()
+        
+        # Job status is done
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            assert job["status"] == "done"
+            assert job["step_num"] == 3

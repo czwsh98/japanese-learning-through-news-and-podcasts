@@ -7,8 +7,9 @@ A multi-user web app that turns Japanese YouTube videos, news broadcasts, podcas
 1. **Downloads** audio from YouTube, Apple Podcasts, RSS feeds, or any yt-dlp-supported source — or accepts a direct file upload
 2. **Transcribes** the audio to Japanese text using the OpenAI Whisper API (or local mlx-whisper on Apple Silicon)
 3. **Translates** each segment into English and Simplified Chinese via **Google Gemini Flash**
-4. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
-5. **Stores** episode files in **Cloudflare R2** and metadata in **Postgres** — fully multi-user, each user sees only their own content
+4. **Tokenises** the Japanese transcript with **janome** morphological analysis to attach hiragana readings (furigana) to every kanji-bearing word — client-side, no extra API cost
+5. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
+6. **Stores** episode files in **Cloudflare R2** and metadata in **Postgres** — fully multi-user, each user sees only their own content; duplicate URLs are detected and shared across users automatically (zero re-transcription cost)
 6. **Saves** words and phrases you care about to a persistent **Vocab Bank** across all episodes
 7. **Exports** your saved vocab bank or per-episode flashcards as CSV for Anki import
 
@@ -26,6 +27,7 @@ A multi-user web app that turns Japanese YouTube videos, news broadcasts, podcas
   - Solid underline = vocab · dashed = grammar
 - **Hover / tap tooltips** — word, reading, level badge, English and Chinese gloss
 - **Sentence explain** — click any segment for a full grammatical breakdown (gpt-4o-mini), rate-limited to 5 per episode per day
+- **Furigana toggle** — show/hide hiragana readings above kanji inline; keyboard shortcut `f`; toggles all segments at once
 - **EN / ZH translation toggles** — desktop header buttons; mobile floating CC button
 - **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; save any card to your Vocab Bank with one click
 
@@ -34,6 +36,8 @@ Browse, search, filter by JLPT level and type, delete, and export your saved wor
 
 ### Upload page (`/upload`)
 Paste a YouTube/podcast URL or drag-and-drop an audio file, choose your JLPT level, and track progress on a live step-by-step job page.
+
+If the same URL has already been processed by any user, the episode is shared instantly (no API calls, no quota charge). If the URL exists at a different JLPT level, only the analysis step is re-run (steps 1–3 instead of 6).
 
 ### Subscriptions (`/subscriptions`)
 Manage the list of sources used by the scheduled CLI pipeline.
@@ -185,6 +189,7 @@ python pipeline.py --dry-run
 │   ├── transcriber.py       # Whisper API or local mlx-whisper; ffprobe duration cap
 │   ├── translator.py        # Gemini Flash — EN + ZH translation
 │   ├── analyzer.py          # gpt-4o-mini — JLPT vocab & grammar analysis
+│   ├── tokenizer.py         # janome morphological analysis — furigana readings
 │   └── writer.py            # Writes flat files per episode
 ├── web/
 │   ├── app.py               # Flask routes, background jobs, quota logic, R2, admin
@@ -215,10 +220,12 @@ python pipeline.py --dry-run
 | File | Contents |
 |---|---|
 | `meta.json` | Title, channel, date, duration, source URL, JLPT level |
-| `transcript.json` | Segments: timestamps, Japanese text, EN + ZH translations |
+| `transcript.json` | Segments: timestamps, Japanese text, EN + ZH translations, per-token furigana readings |
 | `subtitles.vtt` | WebVTT for the audio player |
-| `analysis.json` | Highlights, vocab flashcards, grammar patterns, expressions |
-| `cards.csv` | Anki-importable CSV |
+| `analysis.json` | Highlights, vocab flashcards, grammar patterns, expressions (default level) |
+| `analysis_<level>.json` | Level-specific analysis (written alongside `analysis.json` from pipeline v2+) |
+| `cards.csv` | Anki-importable CSV (default level) |
+| `cards_<level>.csv` | Level-specific Anki CSV |
 
 ---
 

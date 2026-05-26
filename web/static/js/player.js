@@ -28,6 +28,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let currentIdx = -1;
   let showEn     = false;
   let showZh     = false;
+  let showFurigana = true;
   let ytPlayer   = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -140,6 +141,58 @@ document.addEventListener("DOMContentLoaded", async () => {
       .replace(/"/g,  "&quot;");
   }
 
+  function annotateWithTokens(tokens, hls) {
+    if (!tokens || !tokens.length) return "";
+    const text = tokens.map(t => t.w).join("");
+    const intervals = [];
+    for (const h of hls) {
+      let pos = 0;
+      while (pos < text.length) {
+        const idx = text.indexOf(h.word, pos);
+        if (idx === -1) break;
+        intervals.push({ start: idx, end: idx + h.word.length, hl: h });
+        pos = idx + h.word.length;
+      }
+    }
+    intervals.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+    const kept = [];
+    let cursor = 0;
+    for (const iv of intervals) {
+      if (iv.start >= cursor) { kept.push(iv); cursor = iv.end; }
+    }
+    let html = "";
+    let charIdx = 0;
+    for (const token of tokens) {
+      const tokenStart = charIdx;
+      const tokenEnd = charIdx + token.w.length;
+      charIdx = tokenEnd;
+      const hlInterval = kept.find(iv => (tokenStart < iv.end && tokenEnd > iv.start));
+      let tokenHtml = "";
+      if (token.kanji) {
+        tokenHtml = `<ruby>${esc(token.w)}<rt>${esc(token.r)}</rt></ruby>`;
+      } else {
+        tokenHtml = esc(token.w);
+      }
+      if (hlInterval) {
+        const hl = hlInterval.hl;
+        const typeCls  = hl.type === "vocab" ? "hl-vocab" : "hl-grammar";
+        const levelCls = "hl-" + (hl.level || "n2").toLowerCase();
+        const data = JSON.stringify(hl).replace(/'/g, "&#39;");
+        html += `<span class="${typeCls} ${levelCls}" data-hl='${data}'>${tokenHtml}</span>`;
+      } else {
+        html += tokenHtml;
+      }
+    }
+    return html;
+  }
+
+  function annotateSegment(seg, hls) {
+    if (seg.tokens && seg.tokens.length) {
+      return annotateWithTokens(seg.tokens, hls);
+    }
+    return annotate(seg.ja, hls);
+  }
+
   function annotate(text, hls) {
     if (!hls.length) return esc(text);
     const intervals = [];
@@ -174,7 +227,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function renderTranscript() {
     transcriptEl.innerHTML = segments.map((seg, i) => {
-      const jaHtml = annotate(seg.ja, allHighlights);
+      const jaHtml = annotateSegment(seg, allHighlights);
       return `<div class="segment" id="seg-${i}" data-start="${seg.start}" data-end="${seg.end}">
         <span class="segment-time">${esc(seg.time || "")}</span>
         <div class="segment-body">
@@ -195,7 +248,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   function renderModalTranscript() {
     if (!modalTranscriptEl) return;
     modalTranscriptEl.innerHTML = segments.map((seg, i) => {
-      const jaHtml = annotate(seg.ja, allHighlights);
+      const jaHtml = annotateSegment(seg, allHighlights);
       return `<div class="modal-seg" id="modal-seg-${i}" data-start="${seg.start}" data-end="${seg.end}">
         <span class="modal-seg-time">${esc(seg.time || "")}</span>
         <div class="modal-seg-body">
@@ -444,6 +497,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderExpressions(analysisData.expressions || [], savedWords);
   renderContext([...ctxVocab, ...ctxGrammar],    savedWords);
   repositionTranscript();
+  syncFuriganaUI();
 
   // Stats bar
   const vocabCount  = (analysisData.vocab || []).length + ctxVocab.length;
@@ -741,8 +795,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  function syncFuriganaUI() {
+    document.getElementById("toggle-furigana")?.classList.toggle("active", showFurigana);
+    [transcriptEl, modalTranscriptEl].forEach(container => {
+      if (!container) return;
+      container.classList.toggle("hide-furigana", !showFurigana);
+    });
+  }
+
   document.getElementById("toggle-en")?.addEventListener("click", () => { showEn = !showEn; syncTranslationUI(); });
   document.getElementById("toggle-zh")?.addEventListener("click", () => { showZh = !showZh; syncTranslationUI(); });
+  document.getElementById("toggle-furigana")?.addEventListener("click", () => { showFurigana = !showFurigana; syncFuriganaUI(); });
 
   const fabMain  = document.getElementById("fab-main");
   const fabTray  = document.getElementById("fab-tray");
@@ -771,6 +834,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       case "ArrowDown":  if (currentIdx < segments.length - 1) seekTo(segments[currentIdx + 1].start); break;
       case "e": showEn = !showEn; syncTranslationUI(); break;
       case "c": showZh = !showZh; syncTranslationUI(); break;
+      case "f": showFurigana = !showFurigana; syncFuriganaUI(); break;
       case "[": if (speedIdx > 0) applySpeed(speedIdx - 1); break;
       case "]": if (speedIdx < SPEEDS.length - 1) applySpeed(speedIdx + 1); break;
     }

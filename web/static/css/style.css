@@ -599,3 +599,7 @@
     -webkit-overflow-scrolling: touch;
   }
 }
+
+.hide-furigana ruby rt {
+  display: none !important;
+}

@@ -1,5 +1,10 @@
+import os
 import pytest
 from unittest.mock import patch, MagicMock
+
+# Set mock environment variable for tests
+os.environ["OPENAI_API_KEY"] = "mock-openai-key"
+
 from lib.analyzer import explain_sentence
 
 @patch('lib.analyzer.OpenAI')

@@ -117,6 +117,8 @@ class Episode(Base):
     source         = Column(Text, nullable=False, server_default="")       # youtube|upload|url
     # R2 key prefix — populated in Phase 4, empty until then.
     r2_prefix      = Column(Text, nullable=False, server_default="")
+    # Unique token to identify duplicate YouTube / podcast URL transcribing
+    source_token   = Column(Text, nullable=True, index=True)
     created_at     = Column(
         DateTime(timezone=True), nullable=False,
         default=lambda: datetime.now(timezone.utc),
@@ -216,6 +218,13 @@ def init_db() -> bool:
     _SessionFactory = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
     Base.metadata.create_all(_engine)
+    try:
+        from sqlalchemy import text as sa_text
+        with _engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS source_token TEXT;"))
+        log.info("Database migration: source_token column ensured on episodes table")
+    except Exception as e:
+        log.warning(f"Could not check/add source_token column in database: {e}")
     log.info("Database connected — all tables ensured")
     return True
 
