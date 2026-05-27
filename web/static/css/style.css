@@ -1,3 +1,28 @@
+/* ── Global: prevent horizontal overflow on mobile ───────────────────────── */
+html, body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* ── Bottom tab bar height token ─────────────────────────────────────────── */
+:root {
+  --tab-bar-h: 56px;
+}
+
+/* ── Mobile bottom tab bar ───────────────────────────────────────────────── */
+#bottom-nav {
+  /* safe-area padding so icons clear the iPhone home indicator */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  min-height: calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px));
+}
+
+/* ── Non-episode pages: clear tab bar at bottom of main scroll area ──────── */
+@media (max-width: 767px) {
+  body:not(.ep-desktop) main {
+    padding-bottom: calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px) + 1.5rem);
+  }
+}
+
 /* ── Transcript highlights — type (solid/dashed) + level (color) ─────────── */
 
 .hl-vocab,
@@ -338,7 +363,7 @@
 
 .fab-hint {
   position: fixed;
-  bottom: 72px;
+  bottom: calc(var(--tab-bar-h) + 72px + env(safe-area-inset-bottom, 0px));
   right: 72px; /* left of FAB (16px margin + 48px button + 8px gap) */
   z-index: 51;
   background: #1e3a5f;
@@ -515,7 +540,8 @@
 
 .jump-now-pill.pill-fixed {
   position: fixed;
-  bottom: 64px; /* above the mobile drawer trigger bar */
+  /* drawer trigger bar (~40px) stacked on top of tab bar */
+  bottom: calc(var(--tab-bar-h) + 40px + 24px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
 }
@@ -534,7 +560,8 @@
   #transcript {
     height: auto !important;
     overflow-y: visible;
-    padding-bottom: 72px; /* clear the fixed trigger bar */
+    /* clear the drawer trigger bar stacked on top of the tab bar */
+    padding-bottom: calc(var(--tab-bar-h) + 72px);
   }
 
   /* Video mode: fixed-height, no scroll (nearby segments managed by JS) */

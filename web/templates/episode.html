@@ -5,8 +5,8 @@
 {% set is_youtube = meta.get('video_id') and ('youtube.com' in ep_url or 'youtu.be' in ep_url) %}
 
 {% block nav_extra %}
-<span class="text-gray-700">|</span>
-<span class="text-gray-400 text-sm truncate max-w-xs">{{ meta.get('title', date) }}</span>
+<span class="text-gray-700 hidden sm:inline">|</span>
+<span class="text-gray-400 text-sm truncate max-w-[180px] hidden sm:inline">{{ meta.get('title', date) }}</span>
 {% endblock %}
 
 {% block content %}
@@ -205,7 +205,7 @@
 
 <!-- Mobile floating translation FAB -->
 <span id="fab-hint" class="fab-hint hidden">Translations</span>
-<div id="fab-translate" class="fixed z-50 md:hidden" style="bottom: calc(60px + env(safe-area-inset-bottom, 0px)); right: 16px;">
+<div id="fab-translate" class="fixed z-50 md:hidden" style="bottom: calc(var(--tab-bar-h) + 60px + env(safe-area-inset-bottom, 0px)); right: 16px;">
   <div id="fab-tray" class="fab-tray-hidden flex flex-col items-end gap-2 mb-2">
     <button id="fab-zh-btn" class="fab-pill">ZH</button>
     <button id="fab-en-btn" class="fab-pill">EN</button>
@@ -221,8 +221,8 @@
   </button>
 </div>
 
-<!-- Mobile drawer trigger bar -->
-<div id="drawer-trigger-bar" class="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-gray-950 border-t border-gray-800 px-4 flex items-center" style="padding-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));">
+<!-- Mobile drawer trigger bar — sits directly above the bottom tab bar -->
+<div id="drawer-trigger-bar" class="fixed left-0 right-0 z-40 md:hidden bg-gray-950 border-t border-gray-800 px-4 flex items-center" style="bottom: calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px)); padding-top: 10px; padding-bottom: 10px;">
   <button id="btn-open-drawer" class="flex-1 flex items-center justify-center gap-2 text-sm text-gray-300 font-medium">
     <span id="drawer-label">Vocab · Grammar · Phrases</span>
     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
