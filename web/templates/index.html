@@ -11,12 +11,13 @@
   {% if episodes %}
   <div class="space-y-2">
     {% for ep in episodes %}
-    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 transition-all group">
+    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 transition-all group"
+         data-slug="{{ ep.date }}">
       <!-- Clickable main area -->
       <a href="/episode/{{ ep.date }}" class="block p-4">
         <div class="flex items-start gap-4">
-          <!-- Date badge -->
-          <div class="shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
+          <!-- Date badge — processing ring is injected here by JS -->
+          <div class="ep-date-badge relative shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
             <div class="text-xs text-gray-400 font-mono">{{ ep.date[:7] }}</div>
             <div class="text-lg font-bold font-mono leading-none">{{ ep.date[8:] }}</div>
           </div>
@@ -26,7 +27,7 @@
               {{ ep.meta.get('title') or 'Untitled Episode' }}
             </div>
             <div class="text-sm text-gray-400 mt-0.5">{{ ep.meta.get('channel', '') }}</div>
-            <div class="flex items-center gap-3 mt-2 text-xs">
+            <div class="ep-status-row flex items-center gap-3 mt-2 text-xs">
               {% if ep.has_audio %}
               <span class="text-emerald-400">● audio</span>
               {% else %}
@@ -88,4 +89,91 @@
   </div>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var POLL_MS   = 2500;
+  var timer     = null;
+  var prevSlugs = null; // Set of slugs that were active on the last poll
+
+  function updateCard(slug, job) {
+    var card = document.querySelector('[data-slug="' + slug + '"]');
+    if (!card) return;
+
+    // ── Spinning ring on date badge ───────────────────────────────────────
+    var badge = card.querySelector('.ep-date-badge');
+    if (badge && !badge.querySelector('.ep-proc-ring')) {
+      var ring = document.createElement('div');
+      ring.className = 'ep-proc-ring';
+      badge.appendChild(ring);
+    }
+
+    // ── Processing pill in status row ─────────────────────────────────────
+    var row = card.querySelector('.ep-status-row');
+    if (!row) return;
+    var pill = row.querySelector('.ep-proc-pill');
+    if (!pill) {
+      pill = document.createElement('span');
+      pill.className = 'ep-proc-pill';
+      pill.innerHTML =
+        '<span class="ep-proc-spinner"></span>' +
+        '<span class="ep-proc-label"></span>';
+      // prepend before the ○/● dots
+      row.insertBefore(pill, row.firstChild);
+    }
+    var pct = job.total_steps > 0
+      ? Math.round((job.step_num / job.total_steps) * 100)
+      : 0;
+    pill.querySelector('.ep-proc-label').textContent =
+      job.step + (job.total_steps > 1 ? ' · ' + job.step_num + '/' + job.total_steps : '');
+  }
+
+  function clearCard(slug) {
+    var card = document.querySelector('[data-slug="' + slug + '"]');
+    if (!card) return;
+    var ring = card.querySelector('.ep-proc-ring');
+    if (ring) ring.remove();
+    var pill = card.querySelector('.ep-proc-pill');
+    if (pill) pill.remove();
+  }
+
+  function poll() {
+    fetch('/api/jobs/active')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        var jobs    = data.jobs || [];
+        var current = new Set(jobs.map(function (j) { return j.slug; }));
+
+        // Update indicators on all active cards
+        jobs.forEach(function (job) { updateCard(job.slug, job); });
+
+        // Detect completions: a slug that was active last poll but gone now
+        if (prevSlugs !== null) {
+          var completed = false;
+          prevSlugs.forEach(function (s) {
+            if (!current.has(s)) { completed = true; }
+          });
+          if (completed) {
+            // Reload so the card shows real title, audio/transcript status, etc.
+            location.reload();
+            return;
+          }
+        }
+
+        prevSlugs = current;
+
+        if (current.size > 0) {
+          timer = setTimeout(poll, POLL_MS);
+        }
+        // If no active jobs, stop polling — nothing to watch.
+      })
+      .catch(function () {});
+  }
+
+  poll();
+}());
+</script>
 {% endblock %}

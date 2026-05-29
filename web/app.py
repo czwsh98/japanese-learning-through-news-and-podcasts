@@ -1539,6 +1539,7 @@ def upload_process():
         _jobs[job_id] = {
             "status":      "processing",
             "slug":        slug,
+            "user_id":     str(user_id) if user_id else None,
             "step":        "Starting…",
             "step_num":    0,
             "total_steps": total_steps,
@@ -1592,6 +1593,28 @@ def api_job_status(job_id: str):
         "slug":        job["slug"],
         "error":       job.get("error", ""),
     })
+
+
+@app.route("/api/jobs/active")
+@login_required
+def api_jobs_active():
+    """Return all in-progress jobs belonging to the current user."""
+    user = get_current_user()
+    uid = str(user.id) if user else None
+    with _jobs_lock:
+        jobs = [
+            {
+                "job_id":      jid,
+                "slug":        j["slug"],
+                "status":      j["status"],
+                "step":        j.get("step", ""),
+                "step_num":    j.get("step_num", 0),
+                "total_steps": j.get("total_steps", 5),
+            }
+            for jid, j in _jobs.items()
+            if j.get("status") == "processing" and j.get("user_id") == uid
+        ]
+    return jsonify({"jobs": jobs})
 
 
 # ── Static episode assets ─────────────────────────────────────────────────────

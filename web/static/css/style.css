@@ -630,3 +630,43 @@ html, body {
 .hide-furigana ruby rt {
   display: none !important;
 }
+
+/* ── Episode processing indicators (index page) ──────────────────────────── */
+
+@keyframes ep-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Spinning ring overlaid on the date badge */
+.ep-proc-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 11px;
+  border: 2px solid rgba(59, 130, 246, 0.15);
+  border-top-color: #3b82f6;
+  border-right-color: #60a5fa;
+  animation: ep-spin 1.1s linear infinite;
+  pointer-events: none;
+}
+
+/* Pill shown in the status row */
+.ep-proc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #60a5fa;
+  font-weight: 500;
+}
+
+/* Small spinning dot inside the pill */
+.ep-proc-spinner {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(96, 165, 250, 0.3);
+  border-top-color: #60a5fa;
+  animation: ep-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
