@@ -809,7 +809,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const fabMain = document.getElementById("fab-main");
     if (fabEn)   fabEn.classList.toggle("active", showEn);
     if (fabZh)   fabZh.classList.toggle("active", showZh);
-    if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh);
+    if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh || !showFurigana);
     [transcriptEl, modalTranscriptEl].forEach(container => {
       if (!container) return;
       container.querySelectorAll(".translation-en").forEach(el => el.classList.toggle("hidden", !showEn));
@@ -819,6 +819,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   function syncFuriganaUI() {
     document.getElementById("toggle-furigana")?.classList.toggle("active", showFurigana);
+    const fabFurigana = document.getElementById("fab-furigana-btn");
+    if (fabFurigana) fabFurigana.classList.toggle("active", showFurigana);
+    const fabMain = document.getElementById("fab-main");
+    if (fabMain) fabMain.classList.toggle("fab-on", showEn || showZh || !showFurigana);
     [transcriptEl, modalTranscriptEl].forEach(container => {
       if (!container) return;
       container.classList.toggle("hide-furigana", !showFurigana);
@@ -829,14 +833,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("toggle-zh")?.addEventListener("click", () => { showZh = !showZh; syncTranslationUI(); });
   document.getElementById("toggle-furigana")?.addEventListener("click", () => { showFurigana = !showFurigana; syncFuriganaUI(); });
 
-  const fabMain  = document.getElementById("fab-main");
-  const fabTray  = document.getElementById("fab-tray");
-  const fabEnBtn = document.getElementById("fab-en-btn");
-  const fabZhBtn = document.getElementById("fab-zh-btn");
+  const fabMain       = document.getElementById("fab-main");
+  const fabTray       = document.getElementById("fab-tray");
+  const fabEnBtn      = document.getElementById("fab-en-btn");
+  const fabZhBtn      = document.getElementById("fab-zh-btn");
+  const fabFuriganaBtn = document.getElementById("fab-furigana-btn");
   let fabOpen = false;
-  fabMain?.addEventListener("click",  e => { e.stopPropagation(); fabOpen ? closeTray() : openTray(); });
-  fabEnBtn?.addEventListener("click", e => { e.stopPropagation(); showEn = !showEn; syncTranslationUI(); });
-  fabZhBtn?.addEventListener("click", e => { e.stopPropagation(); showZh = !showZh; syncTranslationUI(); });
+  fabMain?.addEventListener("click",       e => { e.stopPropagation(); fabOpen ? closeTray() : openTray(); });
+  fabEnBtn?.addEventListener("click",      e => { e.stopPropagation(); showEn = !showEn; syncTranslationUI(); });
+  fabZhBtn?.addEventListener("click",      e => { e.stopPropagation(); showZh = !showZh; syncTranslationUI(); });
+  fabFuriganaBtn?.addEventListener("click", e => { e.stopPropagation(); showFurigana = !showFurigana; syncFuriganaUI(); });
   function openTray()  { fabOpen = true;  fabTray?.classList.replace("fab-tray-hidden", "fab-tray-visible"); }
   function closeTray() { fabOpen = false; fabTray?.classList.replace("fab-tray-visible", "fab-tray-hidden"); }
   document.addEventListener("click", closeTray);
@@ -903,7 +909,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       let hl = JSON.parse(span.dataset.hl);
       const rect = span.getBoundingClientRect();
       const db = document.getElementById("drawer-trigger-bar");
-      const bc = db ? (window.innerHeight - db.getBoundingClientRect().top + 8) : 56;
+      const dbRect = db ? db.getBoundingClientRect() : null;
+      const bc = (dbRect && dbRect.height > 0) ? (window.innerHeight - dbRect.top + 8) : 0;
       showTooltip(hl, Math.max(8, Math.min(rect.left, window.innerWidth - 268)), Math.min(rect.bottom + 8, window.innerHeight - 160 - bc));
       activeSpan = span;
     });
