@@ -371,7 +371,13 @@ def _r2_get_json(key: str) -> dict:
 
 
 def _r2_key_exists(key: str) -> bool:
-    """Check if an object key exists in R2."""
+    """Check if an object key exists in R2.
+
+    Returns False only for a definitive 404 / NoSuchKey response.
+    Re-raises for all other errors (transient 5xx, auth failures, timeouts)
+    so callers can decide how to handle them rather than silently treating
+    a transient error as "file does not exist".
+    """
     try:
         _get_r2().head_object(Bucket=_r2_bucket(), Key=key)
         return True
@@ -379,8 +385,7 @@ def _r2_key_exists(key: str) -> bool:
         from botocore.exceptions import ClientError
         if isinstance(exc, ClientError) and exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
             return False
-        log.warning("R2 head_object error for %s: %s", key, exc)
-        return False
+        raise
 
 
 def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
@@ -779,9 +784,17 @@ def _pipeline_thread(
                     )
                     db.add(ep_row)
                 else:
+                    # Skeleton row exists — update with enriched pipeline data
+                    existing.title        = meta.get("title", existing.title)
+                    existing.channel      = meta.get("channel", existing.channel)
+                    existing.url          = meta.get("url", existing.url)
+                    existing.thumbnail    = meta.get("thumbnail", existing.thumbnail)
+                    existing.duration     = meta.get("duration", existing.duration)
+                    existing.level        = meta.get("level", level)
+                    existing.source       = meta.get("source", existing.source)
+                    existing.source_token = _get_source_token(source_url or meta.get("url", ""))
                     if r2_prefix:
                         existing.r2_prefix = r2_prefix
-                        existing.source_token = _get_source_token(source_url or meta.get("url", ""))
 
         _mark_usage("completed")
 
@@ -806,6 +819,23 @@ def _pipeline_thread(
         # partially-written directory is worse than nothing, and it prevents
         # disk fill-up from accumulated failed jobs.
         shutil.rmtree(ep_dir, ignore_errors=True)
+        # Remove the skeleton Episode row inserted at submission time so the user
+        # can re-submit without hitting the dedup redirect.  Only delete rows that
+        # never got an r2_prefix (i.e. incomplete skeleton rows, not finished ones).
+        if user_id and db_available():
+            try:
+                with get_db() as db:
+                    skel = db.execute(
+                        select(Episode).where(
+                            Episode.owner_user_id == user_id,
+                            Episode.slug          == slug,
+                            Episode.r2_prefix     == "",
+                        )
+                    ).scalar_one_or_none()
+                    if skel:
+                        db.delete(skel)
+            except Exception as _del_exc:
+                log.warning("Could not clean up skeleton Episode row for %s: %s", slug, _del_exc)
         with _jobs_lock:
             _jobs[job_id]["status"] = "error"
             _jobs[job_id]["error"]  = str(exc)
@@ -1007,9 +1037,14 @@ def episode(date_str: str):
         r2_urls = {}
         if ep_row.r2_prefix and _get_r2():
             level = ep_row.level or ""
+            try:
+                has_level_analysis = bool(level and _r2_key_exists(f"{ep_row.r2_prefix}analysis_{level}.json"))
+            except Exception as exc:
+                log.warning("R2 error checking level analysis key for %s, using base: %s", date_str, exc)
+                has_level_analysis = False
             analysis_key = (
                 f"{ep_row.r2_prefix}analysis_{level}.json"
-                if level and _r2_key_exists(f"{ep_row.r2_prefix}analysis_{level}.json")
+                if has_level_analysis
                 else f"{ep_row.r2_prefix}analysis.json"
             )
             r2_urls = {
@@ -1470,6 +1505,35 @@ def upload_process():
     else:
         total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
+    # ── Skeleton Episode row ──────────────────────────────────────────────────
+    # Insert a minimal Episode row now (before the thread starts) so that any
+    # concurrent submission of the same URL by this user is caught immediately
+    # by _find_source_clone rather than after the pipeline finishes (minutes later).
+    # The thread updates this row with enriched metadata on completion, or
+    # deletes it on failure.  Only for URL submissions — file uploads have no
+    # source_token and don't benefit from dedup.
+    if source_url and user_id and db_available() and not clone_from_id:
+        _skel_token = _get_source_token(source_url)
+        if _skel_token:
+            try:
+                with get_db() as db:
+                    db.add(Episode(
+                        owner_user_id = user_id,
+                        slug          = slug,
+                        date          = slug[:10],
+                        title         = meta.get("title", source_url),
+                        channel       = meta.get("channel", ""),
+                        url           = source_url,
+                        thumbnail     = "",
+                        duration      = 0,
+                        level         = level,
+                        source        = meta.get("source", "url"),
+                        source_token  = _skel_token,
+                        r2_prefix     = "",
+                    ))
+            except Exception as _skel_exc:
+                log.warning("Could not insert skeleton Episode row for %s: %s", slug, _skel_exc)
+
     # Register job and start background thread
     with _jobs_lock:
         _jobs[job_id] = {
@@ -1582,7 +1646,12 @@ def episode_cards(date_str: str):
     if ep_row is not None:
         target_file = f"cards_{ep_row.level}.csv"
         if ep_row.r2_prefix and _get_r2():
-            if _r2_key_exists(f"{ep_row.r2_prefix}{target_file}"):
+            try:
+                use_level_cards = _r2_key_exists(f"{ep_row.r2_prefix}{target_file}")
+            except Exception as exc:
+                log.warning("R2 error checking level cards key for %s, using base: %s", date_str, exc)
+                use_level_cards = False
+            if use_level_cards:
                 return redirect(_r2_presigned(f"{ep_row.r2_prefix}{target_file}"))
             return redirect(_r2_presigned(f"{ep_row.r2_prefix}cards.csv"))
         if ep_row.r2_prefix:
@@ -1617,8 +1686,11 @@ def _episode_json_response(date_str: str, filename: str):
             base_name, ext = filename.split(".", 1)
             level_filename = f"{base_name}_{ep_row.level}.{ext}"
             if ep_row.r2_prefix and _get_r2():
-                if _r2_key_exists(f"{ep_row.r2_prefix}{level_filename}"):
-                    target_file = level_filename
+                try:
+                    if _r2_key_exists(f"{ep_row.r2_prefix}{level_filename}"):
+                        target_file = level_filename
+                except Exception as exc:
+                    log.warning("R2 error checking level JSON key for %s, using base: %s", date_str, exc)
             else:
                 if (_ep_dir(date_str) / level_filename).exists():
                     target_file = level_filename
