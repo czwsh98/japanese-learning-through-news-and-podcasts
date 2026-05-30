@@ -4,6 +4,34 @@ html, body {
   max-width: 100%;
 }
 
+/* ── Mac/Retina visual polish ────────────────────────────────────────────── */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Japanese text: use Noto Sans JP for consistent kana/kanji on all platforms */
+.segment-ja, ruby, .modal-seg-ja {
+  font-family: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', 'Meiryo', sans-serif;
+}
+
+/* Furigana: slightly smaller than current default inheritance */
+rt {
+  font-size: 0.55em;
+  letter-spacing: 0.02em;
+}
+
+/* Navbar glass backdrop (cross-browser) */
+nav {
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+}
+
 /* ── Bottom tab bar height token ─────────────────────────────────────────── */
 :root {
   --tab-bar-h: 56px;
@@ -68,16 +96,18 @@ html, body {
 /* ── Tooltip ─────────────────────────────────────────────────────────────── */
 
 #tooltip {
-  background: #111827;
-  border: 1px solid #374151;
-  border-radius: 10px;
+  background: rgba(15, 20, 30, 0.92);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(75, 85, 99, 0.5);
+  border-radius: 12px;
   padding: 10px 14px;
   font-size: 13px;
   max-width: 260px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
   line-height: 1.5;
 }
-.tt-word    { font-size: 17px; font-weight: 700; }
+.tt-word    { font-size: 18px; font-weight: 700; }
 .tt-reading { font-size: 13px; color: #9ca3af; font-weight: 400; margin-left: 4px; }
 .tt-badge   {
   display: inline-block;
@@ -114,11 +144,12 @@ html, body {
   transition: background-color 0.12s, border-color 0.12s;
   margin-bottom: 8px;
 }
-.segment:hover { background-color: #1a2332; }
+.segment:hover { background-color: #161f2e; }
 
 .segment-active {
-  background-color: #0f2240 !important;
+  background: linear-gradient(90deg, #102848 0%, #0c1d33 100%) !important;
   border-left-color: #3b82f6;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.10);
 }
 
 .segment-time {
@@ -137,7 +168,7 @@ html, body {
 }
 
 .segment-ja {
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.75;
 }
 
@@ -168,7 +199,7 @@ html, body {
 
 .toggle-btn {
   padding: 3px 12px;
-  border-radius: 6px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
   border: 1px solid #374151;
@@ -183,13 +214,14 @@ html, body {
   background: #1e3a5f;
   border-color: #3b82f6;
   color: #93c5fd;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3), 0 0 10px rgba(59, 130, 246, 0.12);
 }
 
 /* ── Playback speed buttons ──────────────────────────────────────────────── */
 
 .speed-btn {
   padding: 2px 7px;
-  border-radius: 5px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 500;
   border: 1px solid #374151;
@@ -204,6 +236,7 @@ html, body {
   background: #1e3a5f;
   border-color: #3b82f6;
   color: #93c5fd;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3), 0 0 10px rgba(59, 130, 246, 0.12);
 }
 
 /* Utility: Hide scrollbar but allow scrolling */
@@ -236,13 +269,16 @@ html, body {
 /* ── Flashcards ──────────────────────────────────────────────────────────── */
 
 .card {
-  border: 1px solid #1f2937;
+  border: 1px solid #2a3547;
   border-radius: 8px;
   margin-bottom: 6px;
   overflow: hidden;
-  transition: border-color 0.12s;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
-.card:hover { border-color: #374151; }
+.card:hover {
+  border-color: #3d4f66;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
 
 .card-front {
   background: #111827;
@@ -669,4 +705,23 @@ html, body {
   border-top-color: #60a5fa;
   animation: ep-spin 0.75s linear infinite;
   flex-shrink: 0;
+}
+
+/* ── Custom scrollbars (transcript + side panel) ─────────────────────────── */
+
+#transcript::-webkit-scrollbar,
+#panel-container::-webkit-scrollbar { width: 4px; }
+
+#transcript::-webkit-scrollbar-track,
+#panel-container::-webkit-scrollbar-track { background: transparent; }
+
+#transcript::-webkit-scrollbar-thumb,
+#panel-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 2px;
+}
+
+#transcript::-webkit-scrollbar-thumb:hover,
+#panel-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
 }

@@ -6,12 +6,15 @@
   <title>{% block title %}日本語 Pipeline{% endblock %}</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@300;400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   {% block head %}{% endblock %}
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
 
-  <nav class="border-b border-gray-800 px-4 sm:px-6 flex items-center gap-3 sm:gap-4 sticky top-0 bg-gray-950 z-40 min-w-0" style="padding-top: calc(env(safe-area-inset-top) + 12px); padding-bottom: 12px;">
+  <nav class="border-b border-gray-800/60 px-4 sm:px-6 flex items-center gap-3 sm:gap-4 sticky top-0 bg-gray-950/80 backdrop-blur-xl z-40 min-w-0" style="padding-top: calc(env(safe-area-inset-top) + 12px); padding-bottom: 12px;">
     <a href="/" class="flex flex-col leading-tight shrink-0">
       <span class="font-bold text-white tracking-tight">Mimichan</span>
       <span class="text-gray-500 text-xs font-normal hidden sm:block">Learning Japanese through Listening Practices</span>
