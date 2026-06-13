@@ -170,12 +170,86 @@ python pipeline.py --url https://www.youtube.com/watch?v=... --level intermediat
 python pipeline.py --dry-run
 ```
 
-### Deploy to Railway
+### Self-host on a VPS (Docker + Caddy)
 
-1. Push to GitHub and connect the repo in Railway
-2. Add a Postgres plugin — `DATABASE_URL` is injected automatically
-3. Set all required env vars in Railway's Variables tab
-4. The app starts, creates all DB tables automatically, and is ready
+Architecture: `Internet → Caddy (TLS) → gunicorn :8000 → Postgres (volume)`
+
+#### 1. Server prep (Ubuntu/Debian)
+
+```bash
+apt update && apt upgrade -y
+# Docker (official convenience script)
+curl -fsSL https://get.docker.com | sh
+# Swapfile if RAM ≤ 1 GB
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+# Firewall
+ufw allow OpenSSH && ufw allow 80/tcp && ufw allow 443/tcp && ufw enable
+```
+
+#### 2. DNS
+
+Point an `A` record for your domain at the VPS public IP and wait for propagation **before** first `compose up` — Caddy's Let's Encrypt HTTP-01 challenge requires it.
+
+#### 3. Deploy
+
+```bash
+git clone https://github.com/czwsh98/japanese-learning-through-news-and-podcasts.git
+cd japanese-learning-through-news-and-podcasts
+
+# Domain is already set to mimichan.ziwei-chen.com in Caddyfile
+
+# Set a strong Postgres password in docker-compose.yml (replace both CHANGE_ME)
+# Create .env with all secrets (see checklist below)
+
+docker compose up -d --build
+```
+
+Caddy fetches the TLS cert on first request. `web` logs `Database connected — all tables ensured` when ready.
+
+#### 4. Migrate data from Railway
+
+Run while Railway is still live:
+
+```bash
+pg_dump "$RAILWAY_DATABASE_URL" --no-owner --no-privileges --data-only \
+  --disable-triggers -Fc -f railway.dump
+
+# On the VPS, load into the running db container:
+docker compose exec -T db pg_restore --no-owner --data-only \
+  --disable-triggers -U app -d japanese < railway.dump
+```
+
+Verify row counts for `users`, `sessions`, `episodes`, `vocab`, `transcription_usage`.
+
+#### .env checklist
+
+| Var | Notes |
+|---|---|
+| `SECRET_KEY` | **Reuse the exact Railway value** — changing it logs out all existing sessions |
+| `OPENAI_API_KEY` | Whisper + gpt-4o-mini |
+| `GEMINI_API_KEY` | Translation |
+| `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | Unchanged — same bucket, files don't move |
+| `TRANSCRIPTION_WHITELIST`, `REGISTRATION_WHITELIST`, `BOOTSTRAP_ADMIN_EMAIL` | Auth/quota gating |
+| `GEMINI_MODEL`, `OPENAI_ANALYSIS_MODEL`, `SESSION_DAYS`, `MAX_AUDIO_MINUTES` | Optional overrides |
+
+`DATABASE_URL` and `PORT` come from `docker-compose.yml` — do **not** set them in `.env`.
+
+#### Backups
+
+```bash
+# Install rclone and configure an "r2" remote, then:
+crontab -e
+# add: 0 4 * * * /path/to/scripts/backup_db.sh
+```
+
+`scripts/backup_db.sh` dumps Postgres, gzips it, and pushes to R2. Run it once manually to verify before relying on the cron.
+
+#### Gotchas
+
+- **YouTube IP blocks**: Tokyo VPS IPs may get bot-challenged. Set `YOUTUBE_COOKIES_B64` (exported cookie jar) and/or `VPS_DOWNLOAD_URL` if downloads start failing.
+- **yt-dlp staleness**: refresh with `docker compose build --no-cache web && docker compose up -d` when YouTube breaks extraction.
+- **Memory**: keep the swapfile; bump the plan if long-audio jobs OOM.
 
 ---
 

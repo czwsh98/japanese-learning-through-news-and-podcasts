@@ -27,3 +27,6 @@ venv/
 
 # Runtime data — not source files
 vocab.json
+
+# Migration artefacts
+railway.dump

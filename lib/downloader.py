@@ -128,7 +128,7 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     log.info(f"yt-dlp cookies: {'loaded' if cookies else 'not set'}")
 
     cookie_args = ["--cookies", cookies] if cookies else []
-    yt_args = ["--extractor-args", "youtube:player_client=ios,web", *cookie_args]
+    yt_args = [*cookie_args]
 
     # Fetch metadata
     info_cmd = [
