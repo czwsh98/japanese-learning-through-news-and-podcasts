@@ -128,7 +128,11 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     log.info(f"yt-dlp cookies: {'loaded' if cookies else 'not set'}")
 
     cookie_args = ["--cookies", cookies] if cookies else []
-    yt_args = [*cookie_args]
+    # YouTube periodically 403s the media download from data-center IPs even
+    # when the player API succeeds. --extractor-retries forces a fresh signed
+    # URL on each retry (a plain --retries would re-hit the stale 403 URL).
+    retry_args = ["--retries", "5", "--fragment-retries", "5", "--extractor-retries", "3"]
+    yt_args = [*retry_args, *cookie_args]
 
     # Fetch metadata
     info_cmd = [
