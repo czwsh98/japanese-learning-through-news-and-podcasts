@@ -1,6 +1,49 @@
 {% extends "base.html" %}
 {% block title %}Episodes — 日本語 Pipeline{% endblock %}
 
+{% block head %}
+<style>
+/* ── Series grouping ──────────────────────────────────────────────────────── */
+.series-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  list-style: none;
+  cursor: pointer;
+  padding: 0.375rem 0;
+  margin-bottom: 0.625rem;
+  border-bottom: 1px solid rgb(31 41 55);
+  user-select: none;
+}
+.series-group > summary::-webkit-details-marker { display: none; }
+.series-group > summary::marker { display: none; }
+.series-group .ch-name {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(156 163 175);
+  transition: color 0.15s;
+}
+.series-group .ch-count {
+  font-size: 0.68rem;
+  color: rgb(75 85 99);
+  background: rgb(31 41 55);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+}
+.series-group .ch-chevron {
+  margin-left: auto;
+  color: rgb(75 85 99);
+  transition: transform 0.2s, color 0.15s;
+  flex-shrink: 0;
+}
+.series-group[open] .ch-chevron { transform: rotate(180deg); }
+.series-group > summary:hover .ch-name  { color: rgb(209 213 219); }
+.series-group > summary:hover .ch-chevron { color: rgb(156 163 175); }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="max-w-3xl">
   <div class="flex items-center justify-between mb-6">
@@ -8,76 +51,87 @@
     <span class="text-sm text-gray-500">{{ episodes|length }} episode{{ 's' if episodes|length != 1 }}</span>
   </div>
 
-  {% if episodes %}
-  <div class="space-y-2">
-    {% for ep in episodes %}
-    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 hover:-translate-y-0.5 hover:shadow-lg transition-all group"
-         data-slug="{{ ep.date }}">
-      <!-- Clickable main area -->
-      <a href="/episode/{{ ep.date }}" class="block p-4">
-        <div class="flex items-start gap-4">
-          <!-- Thumbnail (YouTube) or date badge — processing ring is injected here by JS -->
-          {% if ep.meta.get('video_id') %}
-          <div class="ep-date-badge relative shrink-0 rounded-lg overflow-hidden bg-gray-800">
-            <img src="https://i.ytimg.com/vi/{{ ep.meta.video_id }}/mqdefault.jpg"
-                 alt="" loading="lazy" width="128" height="72"
-                 class="w-32 h-[72px] object-cover">
-            <div class="absolute bottom-1 right-1 bg-black/70 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-300 leading-none">{{ ep.date[8:] }}</div>
-          </div>
-          {% else %}
-          <div class="ep-date-badge relative shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
-            <div class="text-xs text-gray-400 font-mono">{{ ep.date[:7] }}</div>
-            <div class="text-lg font-bold font-mono leading-none">{{ ep.date[8:] }}</div>
-          </div>
-          {% endif %}
-          <!-- Info -->
-          <div class="flex-1 min-w-0">
-            <div class="font-medium text-white truncate">
-              {{ ep.meta.get('title') or 'Untitled Episode' }}
-            </div>
-            <div class="text-sm text-gray-400 mt-0.5">{{ ep.meta.get('channel', '') }}</div>
-            <div class="ep-status-row flex items-center gap-3 mt-2 text-xs">
-              {% if ep.has_audio %}
-              <span class="text-emerald-400">● audio</span>
-              {% else %}
-              <span class="text-gray-600">○ no audio</span>
-              {% endif %}
-              {% if ep.has_transcript %}
-              <span class="text-blue-400">● transcript</span>
-              {% else %}
-              <span class="text-gray-600">○ no transcript</span>
-              {% endif %}
-              {% set url = ep.meta.get('url', '') %}
-              {% if 'youtube.com' in url or 'youtu.be' in url %}
-              <span class="text-red-400">● video</span>
-              {% endif %}
-            </div>
-          </div>
-          <!-- Duration -->
-          {% if ep.meta.get('duration') %}
-          <div class="shrink-0 text-sm text-gray-500 font-mono pr-8">
-            {{ '%d:%02d'|format(ep.meta.duration // 60, ep.meta.duration % 60) }}
-          </div>
-          {% endif %}
+  {# ── Episode card macro — keeps card HTML in one place ─────────────────── #}
+  {% macro ep_card(ep) %}
+  <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 hover:-translate-y-0.5 hover:shadow-lg transition-all group"
+       data-slug="{{ ep.date }}">
+    <a href="/episode/{{ ep.date }}" class="block p-4">
+      <div class="flex items-start gap-4">
+        {% if ep.meta.get('video_id') %}
+        <div class="ep-date-badge relative shrink-0 rounded-lg overflow-hidden bg-gray-800">
+          <img src="https://i.ytimg.com/vi/{{ ep.meta.video_id }}/mqdefault.jpg"
+               alt="" loading="lazy" width="128" height="72"
+               class="w-32 h-[72px] object-cover">
+          <div class="absolute bottom-1 right-1 bg-black/70 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-300 leading-none">{{ ep.date[8:] }}</div>
         </div>
-      </a>
-      <!-- Delete button (top-right corner, outside the link) -->
-      <form method="post" action="/episode/{{ ep.date }}/delete" class="absolute top-3 right-3"
-            onsubmit="return confirm('Delete episode \'{{ ep.meta.get('title', ep.date) | replace("'", "\\'") }}\'?\n\nThis removes all files including the audio.')">
-        <button type="submit"
-                class="opacity-0 group-hover:opacity-100 transition-opacity
-                       p-1.5 rounded-md text-gray-600 hover:text-red-400 hover:bg-red-950"
-                title="Delete episode">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
-            <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
-          </svg>
-        </button>
-      </form>
-    </div>
-    {% endfor %}
+        {% else %}
+        <div class="ep-date-badge relative shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
+          <div class="text-xs text-gray-400 font-mono">{{ ep.date[:7] }}</div>
+          <div class="text-lg font-bold font-mono leading-none">{{ ep.date[8:] }}</div>
+        </div>
+        {% endif %}
+        <div class="flex-1 min-w-0">
+          <div class="font-medium text-white truncate">{{ ep.meta.get('title') or 'Untitled Episode' }}</div>
+          <div class="text-sm text-gray-400 mt-0.5">{{ ep.meta.get('channel', '') }}</div>
+          <div class="ep-status-row flex items-center gap-3 mt-2 text-xs">
+            {% if ep.has_audio %}<span class="text-emerald-400">● audio</span>
+            {% else %}<span class="text-gray-600">○ no audio</span>{% endif %}
+            {% if ep.has_transcript %}<span class="text-blue-400">● transcript</span>
+            {% else %}<span class="text-gray-600">○ no transcript</span>{% endif %}
+            {% set url = ep.meta.get('url', '') %}
+            {% if 'youtube.com' in url or 'youtu.be' in url %}<span class="text-red-400">● video</span>{% endif %}
+          </div>
+        </div>
+        {% if ep.meta.get('duration') %}
+        <div class="shrink-0 text-sm text-gray-500 font-mono pr-8">
+          {{ '%d:%02d'|format(ep.meta.duration // 60, ep.meta.duration % 60) }}
+        </div>
+        {% endif %}
+      </div>
+    </a>
+    <form method="post" action="/episode/{{ ep.date }}/delete" class="absolute top-3 right-3"
+          onsubmit="return confirm('Delete episode \'{{ ep.meta.get('title', ep.date) | replace("'", "\\'") }}\'?\n\nThis removes all files including the audio.')">
+      <button type="submit"
+              class="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md text-gray-600 hover:text-red-400 hover:bg-red-950"
+              title="Delete episode">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+          <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+        </svg>
+      </button>
+    </form>
   </div>
+  {% endmacro %}
+
+  {# ── Episode list ──────────────────────────────────────────────────────── #}
+  {% if episodes %}
+
+    {% if groups|length == 1 %}
+    {# Single channel — flat list, no section header #}
+    <div class="space-y-2">
+      {% for ep in episodes %}{{ ep_card(ep) }}{% endfor %}
+    </div>
+
+    {% else %}
+    {# Multiple channels — collapsible grouped sections #}
+    {% for channel, eps in groups %}
+    <details open class="mb-6 series-group">
+      <summary>
+        <span class="ch-name">{{ channel }}</span>
+        <span class="ch-count">{{ eps|length }}</span>
+        <svg class="ch-chevron" xmlns="http://www.w3.org/2000/svg" width="13" height="13"
+             viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </summary>
+      <div class="space-y-2">
+        {% for ep in eps %}{{ ep_card(ep) }}{% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+    {% endif %}
 
   {% else %}
   <div class="text-center py-24 border border-dashed border-gray-800 rounded-2xl">
@@ -105,13 +159,12 @@
 (function () {
   var POLL_MS   = 2500;
   var timer     = null;
-  var prevSlugs = null; // Set of slugs that were active on the last poll
+  var prevSlugs = null;
 
   function updateCard(slug, job) {
     var card = document.querySelector('[data-slug="' + slug + '"]');
     if (!card) return;
 
-    // ── Spinning ring on date badge ───────────────────────────────────────
     var badge = card.querySelector('.ep-date-badge');
     if (badge && !badge.querySelector('.ep-proc-ring')) {
       var ring = document.createElement('div');
@@ -119,7 +172,6 @@
       badge.appendChild(ring);
     }
 
-    // ── Processing pill in status row ─────────────────────────────────────
     var row = card.querySelector('.ep-status-row');
     if (!row) return;
     var pill = row.querySelector('.ep-proc-pill');
@@ -129,12 +181,8 @@
       pill.innerHTML =
         '<span class="ep-proc-spinner"></span>' +
         '<span class="ep-proc-label"></span>';
-      // prepend before the ○/● dots
       row.insertBefore(pill, row.firstChild);
     }
-    var pct = job.total_steps > 0
-      ? Math.round((job.step_num / job.total_steps) * 100)
-      : 0;
     pill.querySelector('.ep-proc-label').textContent =
       job.step + (job.total_steps > 1 ? ' · ' + job.step_num + '/' + job.total_steps : '');
   }
@@ -156,28 +204,23 @@
         var jobs    = data.jobs || [];
         var current = new Set(jobs.map(function (j) { return j.slug; }));
 
-        // Update indicators on all active cards
         jobs.forEach(function (job) { updateCard(job.slug, job); });
 
-        // Detect completions: a slug that was active last poll but gone now
         if (prevSlugs !== null) {
           var completed = false;
           prevSlugs.forEach(function (s) {
             if (!current.has(s)) { completed = true; }
           });
           if (completed) {
-            // Reload so the card shows real title, audio/transcript status, etc.
             location.reload();
             return;
           }
         }
 
         prevSlugs = current;
-
         if (current.size > 0) {
           timer = setTimeout(poll, POLL_MS);
         }
-        // If no active jobs, stop polling — nothing to watch.
       })
       .catch(function () {});
   }

@@ -963,6 +963,16 @@ def _make_response_cached(response):
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
+
+def _group_by_channel(episodes: list) -> list:
+    """Group episode list by channel, sorted by most recent episode first."""
+    channel_map: dict[str, list] = {}
+    for ep in episodes:
+        key = (ep["meta"].get("channel") or "").strip() or "Podcast"
+        channel_map.setdefault(key, []).append(ep)
+    return sorted(channel_map.items(), key=lambda kv: kv[1][0]["date"], reverse=True)
+
+
 @app.route("/")
 @login_required
 def index():
@@ -993,7 +1003,7 @@ def index():
                     "has_audio":      bool(row.r2_prefix),
                     "has_transcript": bool(row.r2_prefix),
                 })
-        return render_template("index.html", episodes=episodes)
+        return render_template("index.html", episodes=episodes, groups=_group_by_channel(episodes))
 
     # ── File fallback ─────────────────────────────────────────────────────────
     if EPISODES_DIR.exists():
@@ -1010,7 +1020,7 @@ def index():
                 "has_audio":      has_audio,
                 "has_transcript": has_transcript,
             })
-    return render_template("index.html", episodes=episodes)
+    return render_template("index.html", episodes=episodes, groups=_group_by_channel(episodes))
 
 
 @app.route("/episode/<date_str>")

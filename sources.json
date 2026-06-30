@@ -1,3 +1,19 @@
 {
-  "sources": []
+  "sources": [
+    {
+      "name": "ニュースの現場から",
+      "url": "https://podcasts.apple.com/us/podcast/%E3%83%8B%E3%83%A5%E3%83%BC%E3%82%B9%E3%81%AE%E7%8F%BE%E5%A0%B4%E3%81%8B%E3%82%89/id1526773927",
+      "description": "Daily journalism deep-dives — foreign policy, elections, international politics. ~45 min. (ep #2275 already processed)"
+    },
+    {
+      "name": "安住紳一郎の日曜天国",
+      "url": "https://podcasts.apple.com/us/podcast/%E5%AE%89%E4%BD%8F%E7%B4%B3%E4%B8%80%E9%83%8E%E3%81%AE%E6%97%A5%E6%9B%9C%E5%A4%A9%E5%9B%BD/id1647482386",
+      "description": "Sunday conversational Japanese — expert guests across science, culture, society. (JAMSTEC ep already processed)"
+    },
+    {
+      "name": "PIVOT 公式チャンネル",
+      "url": "https://www.youtube.com/@pivotofficial",
+      "description": "Geopolitics and business policy discussions, 3-5 videos/week. (3 eps already processed)"
+    }
+  ]
 }
