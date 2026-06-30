@@ -247,7 +247,7 @@ nav {
 
 .tab-btn {
   flex: 1;
-  padding: 7px 4px;
+  padding: 8px 6px;
   font-size: 12px;
   font-weight: 500;
   color: #6b7280;
@@ -264,6 +264,7 @@ nav {
 .tab-btn.tab-active {
   color: #93c5fd;
   border-bottom-color: #3b82f6;
+  text-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
 }
 
 /* ── Flashcards ──────────────────────────────────────────────────────────── */
@@ -423,6 +424,7 @@ nav {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
 }
 
 .yt-container iframe,
@@ -546,9 +548,22 @@ nav {
   /* Cap the YT player height so the controls row (Audio only / Video toggle)
      is never pushed below the ep-page clip boundary.
      --nav-h is set by JS; 160px covers ep-header + controls row + gaps. */
-  body.ep-desktop.yt-mode .yt-container {
-    max-height: calc(100vh - var(--nav-h, 52px) - 160px);
-    width: min(100%, calc((100vh - var(--nav-h, 52px) - 160px) * 16 / 9));
+  body.ep-desktop.yt-mode:not(.sidebar-collapsed) .yt-container {
+    max-height: calc(100vh - var(--nav-h, 52px) - 120px);
+    width: min(100%, calc((100vh - var(--nav-h, 52px) - 120px) * 16 / 9));
+  }
+
+  /* Sidebar hidden: video spans full width, transcript card below */
+  body.ep-desktop.sidebar-collapsed #side-panel { display: none !important; }
+
+  body.ep-desktop.yt-mode.sidebar-collapsed .yt-container {
+    max-height: calc(100vh - var(--nav-h, 52px) - 220px);
+    width: min(100%, calc((100vh - var(--nav-h, 52px) - 220px) * 16 / 9));
+  }
+
+  /* When sidebar collapsed, left col must be able to scroll its transcript card */
+  body.ep-desktop.sidebar-collapsed #ep-left-col {
+    overflow: auto;
   }
 }
 

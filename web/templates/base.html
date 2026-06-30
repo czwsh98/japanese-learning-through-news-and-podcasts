@@ -59,7 +59,7 @@
     {% endif %}
   </nav>
 
-  <main class="max-w-screen-xl mx-auto px-4 py-6">
+  <main class="{% block main_class %}max-w-screen-xl{% endblock %} mx-auto px-4 py-6">
     {% block content %}{% endblock %}
   </main>
 
