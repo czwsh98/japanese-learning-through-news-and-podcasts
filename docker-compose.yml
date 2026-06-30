@@ -1,0 +1,41 @@
+services:
+  web:
+    build: .
+    env_file: .env
+    environment:
+      PORT: "8000"
+      DATABASE_URL: "postgresql://app:24feadcebbf11c4c886de872d70a8626@db:5432/japanese"
+    depends_on:
+      db:
+        condition: service_healthy
+    expose: ["8000"]
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: 24feadcebbf11c4c886de872d70a8626
+      POSTGRES_DB: japanese
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d japanese"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

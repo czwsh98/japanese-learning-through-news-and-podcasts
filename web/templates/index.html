@@ -2,7 +2,7 @@
 {% block title %}Episodes — 日本語 Pipeline{% endblock %}
 
 {% block content %}
-<div class="max-w-2xl">
+<div class="max-w-3xl">
   <div class="flex items-center justify-between mb-6">
     <h1 class="text-2xl font-bold">Episodes</h1>
     <span class="text-sm text-gray-500">{{ episodes|length }} episode{{ 's' if episodes|length != 1 }}</span>
@@ -11,16 +11,25 @@
   {% if episodes %}
   <div class="space-y-2">
     {% for ep in episodes %}
-    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 transition-all group"
+    <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 hover:-translate-y-0.5 hover:shadow-lg transition-all group"
          data-slug="{{ ep.date }}">
       <!-- Clickable main area -->
       <a href="/episode/{{ ep.date }}" class="block p-4">
         <div class="flex items-start gap-4">
-          <!-- Date badge — processing ring is injected here by JS -->
+          <!-- Thumbnail (YouTube) or date badge — processing ring is injected here by JS -->
+          {% if ep.meta.get('video_id') %}
+          <div class="ep-date-badge relative shrink-0 rounded-lg overflow-hidden bg-gray-800">
+            <img src="https://i.ytimg.com/vi/{{ ep.meta.video_id }}/mqdefault.jpg"
+                 alt="" loading="lazy" width="128" height="72"
+                 class="w-32 h-[72px] object-cover">
+            <div class="absolute bottom-1 right-1 bg-black/70 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-300 leading-none">{{ ep.date[8:] }}</div>
+          </div>
+          {% else %}
           <div class="ep-date-badge relative shrink-0 text-center bg-gray-800 rounded-lg px-3 py-2 group-hover:bg-gray-700 transition-colors">
             <div class="text-xs text-gray-400 font-mono">{{ ep.date[:7] }}</div>
             <div class="text-lg font-bold font-mono leading-none">{{ ep.date[8:] }}</div>
           </div>
+          {% endif %}
           <!-- Info -->
           <div class="flex-1 min-w-0">
             <div class="font-medium text-white truncate">

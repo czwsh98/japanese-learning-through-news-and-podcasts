@@ -29,6 +29,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let showEn     = false;
   let showZh     = false;
   let showFurigana = true;
+  let sidebarCollapsed = localStorage.getItem('mimichan.sidebarCollapsed') === 'true';
   let ytPlayer   = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
@@ -478,7 +479,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // - Desktop Audio: Main Area (transcript-card-body)
     // - Mobile: Main Area (transcript-card-body)
     
-    const targetInSidebar = isDesktopLayout && useYoutube;
+    const targetInSidebar = isDesktopLayout && useYoutube && !sidebarCollapsed;
     const targetParent = targetInSidebar ? panelTranscript : transcriptCardBody;
 
     if (transcriptEl.parentElement !== targetParent) {
@@ -554,6 +555,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (nav) document.documentElement.style.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
     document.body.classList.add("ep-desktop");
     if (isYoutube) document.body.classList.add("yt-mode");
+    if (sidebarCollapsed) {
+      document.body.classList.add("sidebar-collapsed");
+      const lbl = document.getElementById('sidebar-btn-label');
+      const ico = document.getElementById('sidebar-btn-icon');
+      if (lbl) lbl.textContent = 'Show panel';
+      if (ico) ico.querySelector('path')?.setAttribute('d', 'M15 18l-6-6 6-6');
+    }
   }
 
   function checkLayout() {
@@ -799,6 +807,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     repositionTranscript();
     updatePillPosition();
     if (!useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+  });
+
+  // ── Sidebar collapse toggle (desktop only) ────────────────────────────────────
+  const btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
+  btnToggleSidebar?.addEventListener('click', () => {
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem('mimichan.sidebarCollapsed', sidebarCollapsed);
+    document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+    const lbl = document.getElementById('sidebar-btn-label');
+    const ico = document.getElementById('sidebar-btn-icon');
+    if (lbl) lbl.textContent = sidebarCollapsed ? 'Show panel' : 'Hide panel';
+    if (ico) ico.querySelector('path')?.setAttribute('d', sidebarCollapsed ? 'M15 18l-6-6 6-6' : 'M9 18l6-6-6-6');
+    repositionTranscript();
+    updatePillPosition();
   });
 
   function syncTranslationUI() {

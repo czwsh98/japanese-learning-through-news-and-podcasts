@@ -103,6 +103,13 @@ _SCHEMA: dict = {
 }
 
 _EMPTY = {"highlights": [], "vocab": [], "grammar": [], "expressions": []}
+
+def _seg_time(seg: dict) -> str:
+    if "time" in seg:
+        return seg["time"]
+    t = int(seg["start"])
+    return f"{t // 3600:02d}:{(t % 3600) // 60:02d}:{t % 60:02d}"
+
 _CHUNK_CHARS  = 1500   # target Japanese chars per analysis chunk
 # Hard ceiling on analysis API calls per job.  A 60-min transcript at typical
 # speaking pace (~300 chars/min) ≈ 12 chunks; 40 gives generous headroom while
@@ -257,7 +264,7 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
         # Single chunk — no threading overhead
         results = []
         for i, chunk in enumerate(chunks):
-            transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
+            transcript = "\n".join(f"[{_seg_time(s)}] {s['ja']}" for s in chunk)
             results.append(_analyze_chunk(client, system, jlpt_tiers, transcript, i, len(chunks)))
     else:
         # Multiple chunks — run concurrently
@@ -266,7 +273,7 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {}
             for i, chunk in enumerate(chunks):
-                transcript = "\n".join(f"[{s['time']}] {s['ja']}" for s in chunk)
+                transcript = "\n".join(f"[{_seg_time(s)}] {s['ja']}" for s in chunk)
                 futures[pool.submit(_analyze_chunk, client, system, jlpt_tiers, transcript, i, len(chunks))] = i
             for future in as_completed(futures):
                 idx = futures[future]
