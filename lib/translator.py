@@ -12,7 +12,7 @@ from openai import OpenAI
 log = logging.getLogger(__name__)
 
 _MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-_BATCH = 50   # segments per DeepSeek call
+_BATCH = 25   # segments per DeepSeek call
 _MAX_WORKERS = 4
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
@@ -70,6 +70,21 @@ def translate_segments(raw_segments: list[dict]) -> list[dict]:
     return merged
 
 
+def _extract_items(data):
+    """Pull the list of translation dicts from whatever shape the model returns:
+    a bare list, {"translations": [...]}, or {"<anykey>": [...]}."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        items = data.get("translations")
+        if isinstance(items, list):
+            return items
+        for v in data.values():
+            if isinstance(v, list):
+                return v
+    return []
+
+
 def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
     """Translate one batch with exponential backoff; populate tr_map."""
     payload = [{"index": s["index"], "ja": s["ja"]} for s in batch]
@@ -83,7 +98,7 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
         try:
             response = client.chat.completions.create(
                 model=_MODEL,
-                max_tokens=4096,
+                max_tokens=8192,
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": _SYSTEM},
@@ -91,13 +106,18 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
                 ],
             )
             data = json.loads(response.choices[0].message.content)
-            for item in data.get("translations", []):
+            items = _extract_items(data)
+            got = 0
+            for item in items:
                 if isinstance(item, dict) and "index" in item:
                     with _TR_LOCK:
                         tr_map[item["index"]] = {
                             "en": item.get("en", ""),
                             "zh": item.get("zh", ""),
                         }
+                    got += 1
+            if got == 0:
+                raise ValueError("no translations parsed from model response")
             return
 
         except Exception as exc:

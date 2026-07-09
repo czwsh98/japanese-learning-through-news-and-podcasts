@@ -30,3 +30,7 @@ vocab.json
 
 # Migration artefacts
 railway.dump
+
+# Telegram bot secrets — never commit
+bot_config.json
+.web_token

@@ -181,7 +181,8 @@ nav {
   gap: 5px;
 }
 .translation-en { color: #60a5fa; }
-.translation-zh { color: #34d399; font-weight: 300; opacity: 0.75; }
+.translation-zh { color: #4ade80; font-weight: 500; font-size: 13px; }
+.translation-zh .trans-tag { color: #4ade80; background: rgba(74,222,128,0.14); }
 
 .trans-tag {
   font-size: 0.65rem;

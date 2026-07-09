@@ -17,12 +17,15 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
 
 # level key → (display label, ordered JLPT tiers to find)
+# NOTE: the `tiers` here MUST match LEVEL_TIERS in web/static/js/player.js — the UI
+# filters vocab/grammar to those tiers, so any tier the analyzer omits is invisible,
+# and any word graded outside the band is hidden. Keep the two in sync.
 LEVELS: dict[str, tuple[str, list[str]]] = {
     "beginner":              ("N5",    ["N5"]),
-    "beginner-intermediate": ("N4",    ["N4"]),
+    "beginner-intermediate": ("N4–N3", ["N4", "N3"]),
     "intermediate":          ("N3",    ["N3"]),
     "intermediate-advanced": ("N2",    ["N2"]),
-    "advanced":              ("N1",    ["N1"]),
+    "advanced":              ("N2–N1", ["N2", "N1"]),
 }
 DEFAULT_LEVEL = "advanced"
 
@@ -119,25 +122,37 @@ _MAX_CHUNKS   = 40
 
 def _build_system(jlpt_tiers: list[str]) -> str:
     tiers_str = " and ".join(jlpt_tiers)
-    n1_guidance = (
-        "\n\nN1 labelling guidance: cast wide — include formal/written vocabulary, literary or "
-        "classical expressions, abstract or academic nouns, compound verbs or auxiliary forms rare "
-        "in everyday speech, and grammar patterns found mainly in formal writing or sophisticated "
-        "prose. When uncertain whether an item reaches N1, include it rather than omit it."
-    ) if "N1" in jlpt_tiers else ""
     return (
-        f"You are a Japanese language expert specialising in JLPT {tiers_str} preparation. "
-        f"Analyse the transcript below and identify all {tiers_str} vocabulary items, grammar patterns, "
-        "set phrases, and idioms. Err on the side of including borderline items — it is better to "
-        "over-label than to miss a teachable word. For 'highlights', use the exact surface form from "
-        f"the text so the UI can underline it inline. Focus on {tiers_str} items; skip only obvious "
-        "everyday basics well below this level."
-        f"{n1_guidance}\n\n"
-        "Additionally, use level 'context-specific' for words and expressions that are beyond N1 "
-        "but are important for understanding this specific content — for example: domain-specific "
+        f"You are a Japanese language expert and JLPT examiner. Analyse the transcript below and "
+        f"extract noteworthy vocabulary, grammar patterns, set phrases, and idioms in the {tiers_str} "
+        "difficulty band.\n\n"
+
+        "MOST IMPORTANT — grade each item's TRUE JLPT level:\n"
+        "Assign every item the JLPT level at which it is actually taught, following the standard "
+        "JLPT vocabulary and grammar lists. The scale runs N5 (easiest, most common) → N1 (hardest, "
+        "rarest). Grade each word on its own merit — do NOT stamp everything with the target level. "
+        "Most words in ordinary conversation are N5–N3; only genuinely difficult, formal, literary, "
+        "abstract, or low-frequency items reach N2 or N1. When unsure between two adjacent levels, "
+        "choose the LOWER (more common) one.\n\n"
+
+        "Calibration — these common words have been seen mislabelled too high; they are all N3 or "
+        "easier and must never be labelled N1 or N2: 強い, 国, 問題, 正しい, 高い, 使う, 気をつけて, "
+        "意味, 驚く, 得意, 経験, 成功, 期待, 冗談, 結局, 能力, 尊敬, 不思議, 相手, 注目, 選択肢. "
+        "Common English-derived katakana loanwords (メッセージ, レベル, メディア, リスペクト, コンディション, "
+        "エビデンス) are not JLPT target vocabulary — treat them as 'context-specific' or skip them.\n\n"
+
+        f"What to extract: items whose true level falls in the {tiers_str} band. Skip words that are "
+        "clearly below the band (elementary everyday vocabulary) — it is better to return fewer, "
+        "correctly-graded items than to pad the list. If you do include a borderline item, label it "
+        "with its TRUE level, never the target level: the app filters cards by level, so an accurate "
+        "label matters more than inclusion. For 'highlights', copy the exact surface form from the "
+        "text so the UI can underline it inline.\n\n"
+
+        "Additionally, use level 'context-specific' for words and expressions beyond N1 that are "
+        "important for understanding this specific content — for example: domain-specific "
         "terminology (political, legal, medical, technical), advanced literary or formal expressions, "
-        "topical jargon, or culturally significant terms a learner at this level should know to "
-        "follow the topic. These appear separately from JLPT levels in the UI."
+        "topical jargon, or culturally significant terms a learner should know to follow the topic. "
+        "These appear separately from JLPT levels in the UI."
     )
 
 

@@ -29,7 +29,7 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+load_dotenv(Path(__file__).parent.parent / ".env", override=False)
 
 # Make lib/ importable when running web/app.py directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -698,9 +698,18 @@ def _pipeline_thread(
         if source_url and audio_path is None:
             from lib.downloader import download_latest
             _set_step(job_id, "Downloading audio…", 1)
+            _ovr_title   = (meta or {}).get("title", "")
+            _ovr_channel = (meta or {}).get("channel", "")
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
+            # Prefer caller-supplied metadata (e.g. RSS title/channel from the
+            # bot) over file-derived values — podcast enclosures frequently lack
+            # ID3 tags, so yt-dlp falls back to the raw file id.
+            if _ovr_title and _ovr_title != source_url:
+                meta["title"] = _ovr_title
+            if _ovr_channel:
+                meta["channel"] = _ovr_channel
 
             # Byte size check (catches files whose bitrate makes them cheap to
             # download but expensive for the chunked-transcription path).
@@ -963,6 +972,41 @@ def _make_response_cached(response):
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
 
+
+def _group_by_channel(episodes: list) -> list:
+    """Group episode list by channel, sorted by most recent episode first."""
+    channel_map: dict[str, list] = {}
+    for ep in episodes:
+        key = (ep["meta"].get("channel") or "").strip() or "Podcast"
+        channel_map.setdefault(key, []).append(ep)
+    return sorted(channel_map.items(), key=lambda kv: kv[1][0]["date"], reverse=True)
+
+
+def _group_by_date(episodes: list) -> list:
+    """Group episodes by month (YYYY-MM), newest month first."""
+    month_map: dict[str, list] = {}
+    for ep in episodes:
+        ym = (ep.get("date") or "")[:7]  # slug starts with YYYY-MM-DD
+        month_map.setdefault(ym, []).append(ep)
+
+    def _label(ym: str) -> str:
+        try:
+            return datetime.strptime(ym, "%Y-%m").strftime("%B %Y")
+        except ValueError:
+            return ym or "Undated"
+
+    ordered = sorted(month_map.items(), key=lambda kv: kv[0], reverse=True)
+    return [(_label(ym), eps) for ym, eps in ordered]
+
+
+def _grouped(episodes: list):
+    """Pick grouping from the ?group= query param. Returns (groups, mode)."""
+    mode = request.args.get("group", "channel")
+    if mode == "date":
+        return _group_by_date(episodes), "date"
+    return _group_by_channel(episodes), "channel"
+
+
 @app.route("/")
 @login_required
 def index():
@@ -993,7 +1037,8 @@ def index():
                     "has_audio":      bool(row.r2_prefix),
                     "has_transcript": bool(row.r2_prefix),
                 })
-        return render_template("index.html", episodes=episodes)
+        groups, group_mode = _grouped(episodes)
+        return render_template("index.html", episodes=episodes, groups=groups, group_mode=group_mode)
 
     # ── File fallback ─────────────────────────────────────────────────────────
     if EPISODES_DIR.exists():
@@ -1010,7 +1055,8 @@ def index():
                 "has_audio":      has_audio,
                 "has_transcript": has_transcript,
             })
-    return render_template("index.html", episodes=episodes)
+    groups, group_mode = _grouped(episodes)
+    return render_template("index.html", episodes=episodes, groups=groups, group_mode=group_mode)
 
 
 @app.route("/episode/<date_str>")
@@ -1411,7 +1457,7 @@ def upload_process():
         title_override = request.form.get("title", "").strip()
         meta = {
             "title":       title_override or source_url,
-            "channel":     "",
+            "channel":     request.form.get("channel", "").strip(),
             "upload_date": date.today().strftime("%Y%m%d"),
             "duration":    0,
             "url":         source_url,
@@ -1783,7 +1829,7 @@ def api_upload():
         title_override = request.form.get("title", "").strip()
         meta = {
             "title":       title_override or source_url,
-            "channel":     "",
+            "channel":     request.form.get("channel", "").strip(),
             "upload_date": date.today().strftime("%Y%m%d"),
             "duration":    0,
             "url":         source_url,
@@ -1861,6 +1907,7 @@ def api_upload():
         _jobs[job_id] = {
             "status":      "processing",
             "slug":        slug,
+            "user_id":     str(user_id) if user_id else None,
             "step":        "Starting…",
             "step_num":    0,
             "total_steps": total_steps,

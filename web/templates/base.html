@@ -21,7 +21,7 @@
     </a>
     <span class="text-gray-700 hidden sm:inline">|</span>
     <a href="/" class="text-gray-400 hover:text-white text-sm transition-colors hidden sm:inline">Episodes</a>
-    <a href="/subscriptions" class="text-gray-400 hover:text-white text-sm transition-colors hidden md:inline">Subscriptions</a>
+    <a href="/subscriptions" class="text-gray-400 hover:text-white text-sm transition-colors hidden sm:inline">Subscriptions</a>
     <a href="/vocab" class="text-gray-400 hover:text-white text-sm transition-colors hidden sm:inline">Vocab</a>
     <a href="/upload" class="text-gray-400 hover:text-white text-sm transition-colors hidden sm:inline">Upload</a>
     {% if current_user and current_user.is_admin %}
@@ -75,6 +75,13 @@
       </svg>
       <span class="text-[9px] font-medium tracking-wide uppercase">Episodes</span>
     </a>
+    <a href="/subscriptions" id="tab-subs"
+       class="flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5 text-gray-500 hover:text-gray-300 transition-colors">
+      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="5" cy="19" r="1"/><path d="M4 4a16 16 0 0 1 16 16"/><path d="M4 11a9 9 0 0 1 9 9"/>
+      </svg>
+      <span class="text-[9px] font-medium tracking-wide uppercase">Subs</span>
+    </a>
     <a href="/upload" id="tab-upload"
        class="flex-1 flex flex-col items-center justify-center gap-0.5 py-2.5 text-gray-500 hover:text-gray-300 transition-colors">
       <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -95,6 +102,7 @@
     var p = window.location.pathname;
     var tabs = [
       { id: 'tab-home',   test: function(p) { return p === '/' || p.startsWith('/episode'); } },
+      { id: 'tab-subs',   test: function(p) { return p.startsWith('/subscriptions'); } },
       { id: 'tab-upload', test: function(p) { return p.startsWith('/upload') || p.startsWith('/job'); } },
       { id: 'tab-vocab',  test: function(p) { return p.startsWith('/vocab'); } },
     ];

@@ -24,9 +24,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
-for _var in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
+for _var in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
     if not os.environ.get(_var):
         print(f"ERROR: {_var} not set. Copy .env.example → .env and fill in your keys.")
         sys.exit(1)
