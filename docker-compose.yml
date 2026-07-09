@@ -4,7 +4,7 @@ services:
     env_file: .env
     environment:
       PORT: "8000"
-      DATABASE_URL: "postgresql://app:24feadcebbf11c4c886de872d70a8626@db:5432/japanese"
+      DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD}@db:5432/japanese"
     depends_on:
       db:
         condition: service_healthy
@@ -15,7 +15,7 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: app
-      POSTGRES_PASSWORD: 24feadcebbf11c4c886de872d70a8626
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: japanese
     volumes:
       - pgdata:/var/lib/postgresql/data
