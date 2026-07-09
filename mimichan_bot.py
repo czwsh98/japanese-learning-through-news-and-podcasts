@@ -324,6 +324,25 @@ def _one_line(text, max_len=200):
     return line if len(line) <= max_len else line[:max_len].rstrip() + "…"
 
 
+_YT_TABS = ("videos", "streams", "shorts", "featured", "playlists", "community", "about")
+
+
+def _youtube_uploads_url(url):
+    """Point a YouTube channel/handle URL at its /videos tab so a flat-playlist
+    lists recent uploads instead of the channel's tab list (Videos/Live/Shorts).
+    URLs that already target a tab — or aren't YouTube channel roots — are left
+    unchanged."""
+    if "youtube.com" not in url:
+        return url
+    base  = url.rstrip("/")
+    parts = [p for p in urllib.parse.urlparse(base).path.split("/") if p]
+    if not parts or parts[-1] in _YT_TABS:
+        return url  # not a channel path, or already targets a tab
+    is_channel_root = (len(parts) == 1 and parts[0].startswith("@")) or \
+                      (len(parts) == 2 and parts[0] in ("channel", "c", "user"))
+    return base + "/videos" if is_channel_root else url
+
+
 def fetch_recent(source, limit=5):
     """Return up to `limit` recent items [{title, description}] for a source.
 
@@ -355,7 +374,8 @@ def fetch_recent(source, limit=5):
             r = subprocess.run(
                 ["docker", "exec", WEB_CONTAINER, "yt-dlp",
                  "--flat-playlist", "--playlist-end", str(limit),
-                 "--dump-single-json", "--no-warnings", "--quiet", url],
+                 "--dump-single-json", "--no-warnings", "--quiet",
+                 _youtube_uploads_url(url)],
                 capture_output=True, text=True, timeout=60,
             )
             if not r.stdout.strip():
