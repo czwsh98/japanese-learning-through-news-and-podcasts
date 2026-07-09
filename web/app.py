@@ -1196,6 +1196,8 @@ def api_subscriptions_recent():
             episodes.append({
                 "title":       str(ep.get("title", ""))[:300],
                 "description": str(ep.get("description", ""))[:400],
+                "url":         str(ep.get("url", ""))[:1000],
+                "channel":     str(ep.get("channel", ""))[:200],
             })
         clean[str(url)] = {
             "fetched_at": str(entry.get("fetched_at", ""))[:32],

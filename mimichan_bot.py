@@ -344,7 +344,9 @@ def _youtube_uploads_url(url):
 
 
 def fetch_recent(source, limit=5):
-    """Return up to `limit` recent items [{title, description}] for a source.
+    """Return up to `limit` recent items [{title, description, url, channel}] for
+    a source. `url` is the per-episode processing URL (podcast enclosure or
+    YouTube watch URL) so the /subscriptions page can trigger the pipeline.
 
     Mirrors fetch_latest's transport choice: parse rss_url directly (fast, no
     YouTube throttling), else fall back to yt-dlp --flat-playlist for channels.
@@ -359,11 +361,16 @@ def fetch_recent(source, limit=5):
             req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 root = ET.fromstring(r.read())
+            channel = (root.findtext("./channel/title") or name).strip()
             out = []
             for item in root.findall("./channel/item")[:limit]:
+                enc    = item.find("enclosure")
+                ep_url = (enc.get("url") if enc is not None else None) or item.findtext("link") or ""
                 out.append({
                     "title":       (item.findtext("title") or "(untitled)").strip(),
                     "description": _one_line(item.findtext("description")),
+                    "url":         (ep_url or "").strip(),
+                    "channel":     channel,
                 })
             return out
         except Exception as e:
@@ -381,10 +388,19 @@ def fetch_recent(source, limit=5):
             if not r.stdout.strip():
                 return []
             data    = json.loads(r.stdout.strip())
+            channel = (data.get("channel") or data.get("title") or name)
             entries = (data.get("entries") or [])[:limit]
-            return [{"title": (e.get("title") or "(untitled)"),
-                     "description": _one_line(e.get("description"))}
-                    for e in entries]
+            out = []
+            for e in entries:
+                ep_url = e.get("url") or (
+                    f"https://www.youtube.com/watch?v={e['id']}" if e.get("id") else "")
+                out.append({
+                    "title":       (e.get("title") or "(untitled)"),
+                    "description": _one_line(e.get("description")),
+                    "url":         ep_url,
+                    "channel":     channel,
+                })
+            return out
         except Exception as e:
             log(f"recent yt-dlp failed for {name}: {e}")
             return []

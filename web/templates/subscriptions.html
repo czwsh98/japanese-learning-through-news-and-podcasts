@@ -78,13 +78,28 @@
         </div>
         {% set recent = recent_cache.get(source.url) if recent_cache else None %}
         {% if recent and recent.episodes %}
-        <div class="mt-3 pt-3 border-t border-gray-800 space-y-2">
+        <div class="mt-3 pt-3 border-t border-gray-800 space-y-2.5">
           <p class="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Recent episodes</p>
           {% for item in recent.episodes %}
-          <div class="text-xs">
-            <span class="text-gray-300">{{ item.title }}</span>
-            {% if item.description %}
-            <span class="text-gray-600"> — {{ item.description }}</span>
+          <div class="text-xs flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <span class="text-gray-300">{{ item.title }}</span>
+              {% if item.description %}
+              <span class="text-gray-600"> — {{ item.description }}</span>
+              {% endif %}
+            </div>
+            {% if item.url %}
+            <form action="/upload" method="post" class="shrink-0"
+                  onsubmit="return confirm('Process this episode through the full pipeline (download → transcribe → translate → analyse)?');">
+              <input type="hidden" name="source_url" value="{{ item.url }}">
+              <input type="hidden" name="title" value="{{ item.title }}">
+              <input type="hidden" name="channel" value="{{ item.channel }}">
+              <input type="hidden" name="level" value="advanced">
+              <button type="submit"
+                      class="text-[11px] font-semibold text-blue-400 hover:text-blue-300 border border-blue-900/60 hover:border-blue-600 rounded px-2 py-0.5 transition-colors whitespace-nowrap">
+                Process
+              </button>
+            </form>
             {% endif %}
           </div>
           {% endfor %}
