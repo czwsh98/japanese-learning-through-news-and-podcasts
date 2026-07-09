@@ -43,6 +43,11 @@ SOURCES_FILE = (Path(_sources_env) if Path(_sources_env).is_absolute()
                 else _PROJECT_ROOT / (_sources_env or "sources.json"))
 VOCAB_FILE = (Path(os.environ.get("VOCAB_FILE", "")) if os.environ.get("VOCAB_FILE")
               else _PROJECT_ROOT / "vocab.json")
+# Recent-episodes-per-source cache for the subscriptions page. Written by the
+# Telegram bot's scheduled check via POST /api/subscriptions/recent; read on
+# the /subscriptions page. Regenerated on each bot run, so ephemeral loss on a
+# container rebuild is fine.
+RECENT_EPISODES_CACHE_FILE = _PROJECT_ROOT / "recent_episodes_cache.json"
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
@@ -302,6 +307,7 @@ _MAX_JOBS = 50  # prune old jobs when exceeding this count
 
 _vocab_lock = threading.Lock()
 _sources_lock = threading.Lock()
+_recent_lock = threading.Lock()
 
 # Per-user explain call counter.
 # Structure: {user_id_str: {"day": "YYYY-MM-DD", "counts": {episode_slug: int}}}
@@ -1144,11 +1150,62 @@ def episode_delete(date_str: str):
     return redirect(url_for("index"))
 
 
+def _load_recent_cache() -> dict:
+    """Recent-episodes-per-source map written by the bot; {} if absent/broken."""
+    try:
+        if RECENT_EPISODES_CACHE_FILE.exists():
+            return json.loads(RECENT_EPISODES_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
 @app.route("/subscriptions", methods=["GET"])
 @login_required
 def subscriptions_page():
     sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
-    return render_template("subscriptions.html", sources=sources_data.get("sources", []))
+    return render_template("subscriptions.html", sources=sources_data.get("sources", []),
+                           recent_cache=_load_recent_cache())
+
+
+@app.route("/api/subscriptions/recent", methods=["POST"])
+@login_required
+def api_subscriptions_recent():
+    """Receive the recent-episodes cache from the bot's scheduled check and
+    persist it for the /subscriptions page.
+
+    Payload: form field `payload` = JSON string mapping each source url to
+    {"fetched_at": str, "episodes": [{"title": str, "description": str}, …]}.
+    """
+    try:
+        payload = json.loads(request.form.get("payload", "{}"))
+    except Exception:
+        return jsonify({"error": "invalid payload JSON"}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+
+    # Validate + cap sizes (only the owner bot calls this, but stay defensive).
+    clean: dict = {}
+    for url, entry in list(payload.items())[:100]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("episodes"), list):
+            continue
+        episodes = []
+        for ep in entry["episodes"][:10]:
+            if not isinstance(ep, dict):
+                continue
+            episodes.append({
+                "title":       str(ep.get("title", ""))[:300],
+                "description": str(ep.get("description", ""))[:400],
+            })
+        clean[str(url)] = {
+            "fetched_at": str(entry.get("fetched_at", ""))[:32],
+            "episodes":   episodes,
+        }
+
+    with _recent_lock:
+        RECENT_EPISODES_CACHE_FILE.write_text(
+            json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "sources": len(clean)})
 
 
 @app.route("/subscriptions/add", methods=["POST"])
@@ -1160,7 +1217,8 @@ def subscriptions_add():
 
     if not name or not url:
         return render_template("subscriptions.html", error="Name and URL are required.",
-                               sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []))
+                               sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []),
+                               recent_cache=_load_recent_cache())
 
     with _sources_lock:
         sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}

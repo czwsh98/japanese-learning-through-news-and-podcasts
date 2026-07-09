@@ -17,8 +17,10 @@ Inline buttons:
   📖 Process  — run the pipeline for that episode URL (live status)
 """
 
+import html
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -306,6 +308,97 @@ def do_check(token, chat_id):
            parse_mode="Markdown", reply_markup=json.dumps(keyboard))
 
     return f"Found {len(found)} new episode(s)."
+
+
+# ── Recent-episodes cache (for the /subscriptions web page) ────────────────────
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _one_line(text, max_len=200):
+    """Collapse an RSS/description blob to a single trimmed line, tags stripped."""
+    if not text:
+        return ""
+    line = html.unescape(_TAG_RE.sub(" ", text))
+    line = " ".join(line.split())
+    return line if len(line) <= max_len else line[:max_len].rstrip() + "…"
+
+
+def fetch_recent(source, limit=5):
+    """Return up to `limit` recent items [{title, description}] for a source.
+
+    Mirrors fetch_latest's transport choice: parse rss_url directly (fast, no
+    YouTube throttling), else fall back to yt-dlp --flat-playlist for channels.
+    Descriptions only come from RSS feeds; YouTube flat listings have none.
+    """
+    rss_url = source.get("rss_url")
+    url     = source["url"]
+    name    = source.get("name", url)
+
+    if rss_url:
+        try:
+            req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                root = ET.fromstring(r.read())
+            out = []
+            for item in root.findall("./channel/item")[:limit]:
+                out.append({
+                    "title":       (item.findtext("title") or "(untitled)").strip(),
+                    "description": _one_line(item.findtext("description")),
+                })
+            return out
+        except Exception as e:
+            log(f"recent RSS fetch failed for {name}: {e}")
+            return []
+    else:
+        try:
+            r = subprocess.run(
+                ["docker", "exec", WEB_CONTAINER, "yt-dlp",
+                 "--flat-playlist", "--playlist-end", str(limit),
+                 "--dump-single-json", "--no-warnings", "--quiet", url],
+                capture_output=True, text=True, timeout=60,
+            )
+            if not r.stdout.strip():
+                return []
+            data    = json.loads(r.stdout.strip())
+            entries = (data.get("entries") or [])[:limit]
+            return [{"title": (e.get("title") or "(untitled)"),
+                     "description": _one_line(e.get("description"))}
+                    for e in entries]
+        except Exception as e:
+            log(f"recent yt-dlp failed for {name}: {e}")
+            return []
+
+
+def refresh_recent_cache(owner_email):
+    """Fetch recent episodes for every source and push them to the web app so
+    the /subscriptions page can display them. Called by the daily cron check."""
+    try:
+        with open(SOURCES_FILE) as f:
+            sources = json.load(f).get("sources", [])
+    except Exception as e:
+        log(f"recent cache: cannot read sources: {e}")
+        return
+
+    cache = {}
+    for source in sources:
+        items = fetch_recent(source, limit=5)
+        if items:
+            cache[source["url"]] = {
+                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "episodes":   items,
+            }
+
+    if not cache:
+        log("recent cache: nothing fetched, skipping push")
+        return
+
+    resp, err = web_api(owner_email, "POST", "/api/subscriptions/recent",
+                        form={"payload": json.dumps(cache, ensure_ascii=False)})
+    if err:
+        log(f"recent cache push failed: {err}")
+    else:
+        log(f"recent cache pushed: {resp.get('sources', len(cache))} sources")
 
 
 def do_episodes(limit=10):
