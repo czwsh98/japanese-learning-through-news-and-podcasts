@@ -37,6 +37,84 @@ document.addEventListener("DOMContentLoaded", async () => {
   let modalProgrammaticScroll = false;
   let modalProgrammaticScrollTimer = null;
 
+  // ── Resume playback position ────────────────────────────────────────────
+  // Position is keyed by episode + shared across audio/video toggle since
+  // both represent the same underlying timeline.
+  const RESUME_KEY        = `mimichan.resume.${dateStr}`;
+  const RESUME_MIN_T       = 5;   // don't bother resuming inside the first 5s
+  const RESUME_END_MARGIN  = 15;  // within 15s of the end counts as "finished"
+  const RESUME_SAVE_EVERY  = 5000; // ms between periodic saves
+  let resumeApplied  = false;
+  // Start the throttle window at load time (not 0) so the first periodic tick
+  // doesn't fire immediately — that race can capture a stale/zero position
+  // (e.g. YouTube's getCurrentTime() before a seekTo() has settled) and
+  // clobber a resume point that was just restored.
+  let lastResumeSave  = Date.now();
+
+  function loadResumeT() {
+    try {
+      const raw = localStorage.getItem(RESUME_KEY);
+      if (!raw) return null;
+      const t = JSON.parse(raw).t;
+      return typeof t === "number" && t > 0 ? t : null;
+    } catch { return null; }
+  }
+
+  function saveResumeT(t, force) {
+    if (!force) {
+      const now = Date.now();
+      if (now - lastResumeSave < RESUME_SAVE_EVERY) return;
+      lastResumeSave = now;
+    }
+    try {
+      if (!(t > RESUME_MIN_T)) { localStorage.removeItem(RESUME_KEY); return; }
+      localStorage.setItem(RESUME_KEY, JSON.stringify({ t, savedAt: Date.now() }));
+    } catch { /* localStorage unavailable (private mode, quota) — resume just won't persist */ }
+  }
+
+  function clearResumeT() {
+    try { localStorage.removeItem(RESUME_KEY); } catch {}
+  }
+
+  function formatResumeTime(t) {
+    t = Math.max(0, Math.floor(t));
+    const m = Math.floor(t / 60), s = t % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function showResumeToast(t) {
+    const el = document.createElement("div");
+    el.className = "fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-gray-900/95 " +
+      "border border-gray-700 text-gray-300 text-xs px-4 py-2 rounded-full shadow-lg " +
+      "pointer-events-none transition-opacity duration-500";
+    el.textContent = `Resumed at ${formatResumeTime(t)}`;
+    document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 500); }, 3000);
+  }
+
+  // Try to restore position once the given duration is known; skips episodes
+  // resumed near the very end (treat as finished, don't loop back to the tail).
+  function maybeApplyResume(duration, seekFn) {
+    if (resumeApplied) return;
+    const t = loadResumeT();
+    if (t == null) { resumeApplied = true; return; }
+    if (duration > 0 && t >= duration - RESUME_END_MARGIN) {
+      clearResumeT();
+      resumeApplied = true;
+      return;
+    }
+    resumeApplied = true;
+    seekFn(t);
+    showResumeToast(t);
+  }
+
+  window.addEventListener("pagehide", () => {
+    const t = useYoutube
+      ? (ytPlayer?.getCurrentTime?.() || 0)
+      : (audio?.currentTime || 0);
+    if (t > 0) saveResumeT(t, true);
+  });
+
   // ── Layout initialization ─────────────────────────────────────────────────
   // Tabbed sidebar with transcript tab only applies to desktop/iPad YouTube.
   // Audio and mobile always use the original layout (transcript in left col).
@@ -734,11 +812,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ── Sync & Poll ───────────────────────────────────────────────────────────
 
   if (audio) {
+    audio.addEventListener("loadedmetadata", () => {
+      if (useYoutube) return;  // video is the active initial mode — YT branch resumes instead
+      maybeApplyResume(audio.duration, t => { audio.currentTime = t; });
+    });
     audio.addEventListener("timeupdate", () => {
       if (useYoutube) return;
       const t   = audio.currentTime;
       const idx = segments.findIndex(s => t >= s.start && t < s.end);
       if (idx !== currentIdx) setActive(idx);
+      saveResumeT(t);
     });
     audio.addEventListener("seeked", () => {
       if (useYoutube) return;
@@ -746,6 +829,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const idx = segments.findIndex(s => t >= s.start && t < s.end);
       if (idx >= 0) { setActive(idx); scrollActiveIntoView(idx, true); }
     });
+    audio.addEventListener("pause", () => { if (!useYoutube) saveResumeT(audio.currentTime, true); });
+    audio.addEventListener("ended", () => { if (!useYoutube) clearResumeT(); });
   }
 
   if (isYoutube) {
@@ -753,6 +838,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     ytInitPromise.then(player => {
       ytPlayer = player;
       if (speedIdx !== 2) ytPlayer?.setPlaybackRate(SPEEDS[speedIdx]);
+      if (useYoutube) maybeApplyResume(player.getDuration?.() || 0, t => player.seekTo(t, true));
     }).catch(err => {
       console.error("YouTube Player failed:", err);
       const p = document.getElementById("yt-player");
@@ -764,6 +850,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const t   = ytPlayer.getCurrentTime();
       const idx = segments.findIndex(s => t >= s.start && t < s.end);
       if (idx !== currentIdx) setActive(idx);
+      saveResumeT(t);
     }, 250);
   }
 

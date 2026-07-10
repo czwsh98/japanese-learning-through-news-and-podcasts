@@ -46,7 +46,7 @@
 
 {% block content %}
 <div class="max-w-3xl">
-  <div class="flex items-center justify-between mb-6 gap-3 flex-wrap">
+  <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
     <h1 class="text-2xl font-bold">Episodes</h1>
     <div class="flex items-center gap-3">
       {% set gm = group_mode | default('channel') %}
@@ -56,14 +56,28 @@
         <a href="/?group=date"
            class="px-4 py-2.5 sm:py-1.5 select-none whitespace-nowrap border-l border-gray-800 transition-colors {{ 'bg-gray-800 text-white' if gm == 'date' else 'text-gray-400 hover:text-gray-200 active:bg-gray-800/60' }}">Date</a>
       </div>
-      <span class="text-sm text-gray-500 whitespace-nowrap">{{ episodes|length }} episode{{ 's' if episodes|length != 1 }}</span>
+      <span id="ep-count" class="text-sm text-gray-500 whitespace-nowrap">{{ episodes|length }} episode{{ 's' if episodes|length != 1 }}</span>
     </div>
   </div>
+
+  {% if episodes %}
+  <div class="relative mb-6">
+    <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" xmlns="http://www.w3.org/2000/svg"
+         width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input type="text" id="ep-search" placeholder="Search title or channel…" autocomplete="off"
+           class="w-full bg-gray-900 border border-gray-800 rounded-lg pl-9 pr-4 py-2.5 text-sm
+                  text-gray-100 placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-colors">
+  </div>
+  {% endif %}
 
   {# ── Episode card macro — keeps card HTML in one place ─────────────────── #}
   {% macro ep_card(ep) %}
   <div class="relative border border-gray-800 rounded-xl hover:border-gray-600 hover:bg-gray-900 hover:-translate-y-0.5 hover:shadow-lg transition-all group"
-       data-slug="{{ ep.date }}">
+       data-slug="{{ ep.date }}" data-ep-item
+       data-search="{{ (ep.meta.get('title', '') ~ ' ' ~ ep.meta.get('channel', '')) | lower }}">
     <a href="/episode/{{ ep.date }}" class="block p-4">
       <div class="flex items-start gap-4">
         {% if ep.meta.get('video_id') %}
@@ -125,7 +139,7 @@
     {% else %}
     {# Multiple channels — collapsible grouped sections #}
     {% for channel, eps in groups %}
-    <details open class="mb-6 series-group">
+    <details open class="mb-6 series-group" data-ep-group>
       <summary>
         <span class="ch-name">{{ channel }}</span>
         <span class="ch-count">{{ eps|length }}</span>
@@ -141,6 +155,10 @@
     </details>
     {% endfor %}
     {% endif %}
+
+  <div id="ep-no-results" class="hidden text-center py-16 border border-dashed border-gray-800 rounded-2xl">
+    <p class="text-sm text-gray-500">No episodes match your search.</p>
+  </div>
 
   {% else %}
   <div class="text-center py-24 border border-dashed border-gray-800 rounded-2xl">
@@ -166,6 +184,54 @@
 {% block scripts %}
 <script>
 (function () {
+  // ── Search filter ────────────────────────────────────────────────────────
+  var searchInput = document.getElementById('ep-search');
+  if (searchInput) {
+    var allItems  = Array.prototype.slice.call(document.querySelectorAll('[data-ep-item]'));
+    var allGroups = Array.prototype.slice.call(document.querySelectorAll('[data-ep-group]'));
+    var countEl   = document.getElementById('ep-count');
+    var noResults = document.getElementById('ep-no-results');
+    var totalCount = allItems.length;
+
+    function applyFilter() {
+      var q = searchInput.value.trim().toLowerCase();
+      var visible = 0;
+
+      allItems.forEach(function (item) {
+        var match = !q || (item.dataset.search || '').indexOf(q) !== -1;
+        item.classList.toggle('hidden', !match);
+        if (match) visible++;
+      });
+
+      allGroups.forEach(function (group) {
+        var anyVisible = group.querySelector('[data-ep-item]:not(.hidden)');
+        group.classList.toggle('hidden', !anyVisible);
+        // Auto-expand groups with matches while searching so results aren't hidden
+        // behind a collapsed <details>; collapse state is left alone when cleared.
+        if (q && anyVisible) group.open = true;
+      });
+
+      if (countEl) {
+        countEl.textContent = q
+          ? visible + ' of ' + totalCount + ' episode' + (totalCount !== 1 ? 's' : '')
+          : totalCount + ' episode' + (totalCount !== 1 ? 's' : '');
+      }
+      if (noResults) noResults.classList.toggle('hidden', !q || visible > 0);
+    }
+
+    searchInput.addEventListener('input', applyFilter);
+
+    // '/' focuses search, unless the user is already typing in a field.
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== '/') return;
+      var tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+      e.preventDefault();
+      searchInput.focus();
+    });
+  }
+
+  // ── Live processing status poll ──────────────────────────────────────────
   var POLL_MS   = 2500;
   var timer     = null;
   var prevSlugs = null;
