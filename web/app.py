@@ -1210,6 +1210,35 @@ def api_subscriptions_recent():
     return jsonify({"ok": True, "sources": len(clean)})
 
 
+_APPLE_PODCAST_ID_RE = re.compile(r"podcasts\.apple\.com/.*/id(\d+)")
+
+
+def _resolve_apple_podcast_rss(url: str) -> str | None:
+    """For an Apple Podcasts page URL, look up its real RSS feed via Apple's
+    iTunes Lookup API. Returns None (never raises) if the URL isn't an Apple
+    Podcasts link or the lookup fails — caller just saves without rss_url,
+    same as before this existed. yt-dlp has no extractor for podcasts.apple.com
+    itself, so without this, subscriptions added via this form silently never
+    surface new episodes (bot/preview both rely on rss_url as the fast path)."""
+    m = _APPLE_PODCAST_ID_RE.search(url)
+    if not m:
+        return None
+    try:
+        import requests
+        resp = requests.get(
+            "https://itunes.apple.com/lookup",
+            params={"id": m.group(1)},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        feed_url = results[0].get("feedUrl") if results else None
+        return feed_url or None
+    except Exception as exc:
+        log.warning(f"Apple Podcasts RSS lookup failed for {url}: {exc}")
+        return None
+
+
 @app.route("/subscriptions/add", methods=["POST"])
 @login_required
 def subscriptions_add():
@@ -1222,10 +1251,15 @@ def subscriptions_add():
                                sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []),
                                recent_cache=_load_recent_cache())
 
+    new_source = {"name": name, "url": url, "description": desc}
+    rss_url = _resolve_apple_podcast_rss(url)
+    if rss_url:
+        new_source["rss_url"] = rss_url
+
     with _sources_lock:
         sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
         if "sources" not in sources_data: sources_data["sources"] = []
-        sources_data["sources"].append({"name": name, "url": url, "description": desc})
+        sources_data["sources"].append(new_source)
         SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
     return redirect(url_for("subscriptions_page"))
 
