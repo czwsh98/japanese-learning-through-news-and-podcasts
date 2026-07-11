@@ -10,6 +10,14 @@ services:
         condition: service_healthy
     expose: ["8000"]
     restart: unless-stopped
+    volumes:
+      # Shared with the host-side Telegram bot (mimichan_bot.py), which reads
+      # sources.json and writes recent_episodes_cache.json via the web API.
+      # Without these mounts each side has its own ephemeral copy inside the
+      # container — edits from one are invisible to the other and vanish on
+      # the next `docker compose up --build`.
+      - ./sources.json:/app/sources.json
+      - ./recent_episodes_cache.json:/app/recent_episodes_cache.json
 
   db:
     image: postgres:16
