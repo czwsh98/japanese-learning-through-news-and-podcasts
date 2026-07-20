@@ -898,15 +898,23 @@ def _get_source_token(url: str | None) -> str | None:
         return f"youtube:{yt_match.group(1)}"
     try:
         parsed = urllib.parse.urlparse(url)
+        # Apple Podcasts page URLs identify the specific episode via the
+        # "i" query param (the path is just the show id) — dropping it
+        # collapsed every episode of a show onto the same token.
+        query = ""
+        if parsed.netloc.lower() == "podcasts.apple.com":
+            episode_id = urllib.parse.parse_qs(parsed.query).get("i", [None])[0]
+            if episode_id:
+                query = urllib.parse.urlencode({"i": episode_id})
         normalized_url = urllib.parse.urlunparse((
             parsed.scheme.lower(),
             parsed.netloc.lower(),
             parsed.path,
-            "", "", ""
+            "", query, ""
         ))
     except Exception:
         normalized_url = url.lower()
-    
+
     sha_hash = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
     return f"url:{sha_hash}"
 
