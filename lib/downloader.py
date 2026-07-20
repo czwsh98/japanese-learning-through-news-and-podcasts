@@ -63,6 +63,58 @@ def _is_direct_audio(url: str) -> bool:
     return ext in _DIRECT_AUDIO_EXTS
 
 
+# ── Apple Podcasts episode resolution ─────────────────────────────────────────
+# yt-dlp's ApplePodcasts extractor scrapes the podcasts.apple.com webpage,
+# which intermittently 500s (an Apple-side issue, observed across locales and
+# networks — not something we can fix). The iTunes Lookup API is a separate,
+# more reliable backend that resolves the same episode straight to its real
+# audio file URL, so we prefer it whenever the source URL is an Apple
+# Podcasts page.
+
+_APPLE_SHOW_ID_RE = re.compile(r"podcasts\.apple\.com/.*/id(\d+)")
+
+
+def _resolve_apple_podcast_episode(url: str) -> tuple[str, dict] | None:
+    """For an Apple Podcasts episode page URL (…/id<show>?i=<episode>),
+    look up the episode via the iTunes Lookup API and return
+    (direct_audio_url, meta). Returns None if the URL isn't an Apple
+    Podcasts episode link or the episode can't be found."""
+    show_match = _APPLE_SHOW_ID_RE.search(url)
+    if not show_match:
+        return None
+    episode_id = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("i", [None])[0]
+    if not episode_id:
+        return None
+    try:
+        resp = _req.get(
+            "https://itunes.apple.com/lookup",
+            params={"id": show_match.group(1), "entity": "podcastEpisode", "limit": 200},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        for r in resp.json().get("results", []):
+            if str(r.get("trackId")) != episode_id:
+                continue
+            audio_url = r.get("episodeUrl") or r.get("previewUrl")
+            if not audio_url:
+                return None
+            meta = {
+                "title":       r.get("trackName", ""),
+                "channel":     r.get("collectionName", ""),
+                "upload_date": (r.get("releaseDate") or "")[:10].replace("-", "")
+                               or date.today().strftime("%Y%m%d"),
+                "duration":    int(r.get("trackTimeMillis", 0) / 1000),
+                "url":         url,
+                "thumbnail":   r.get("artworkUrl600", ""),
+                "description": (r.get("description") or "")[:500],
+                "video_id":    episode_id,
+            }
+            return audio_url, meta
+    except Exception as exc:
+        log.warning(f"Apple Podcasts episode lookup failed for {url}: {exc}")
+    return None
+
+
 # ── Direct audio download ─────────────────────────────────────────────────────
 
 def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Path, dict]:
@@ -235,6 +287,14 @@ def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, 
                 "duration": 0, "url": url, "thumbnail": "", "description": "",
                 "video_id": ""}
         return _download_direct(url, episode_dir, meta)
+
+    # ── Apple Podcasts: resolve via iTunes Lookup API instead of scraping
+    #    the (unreliable) podcasts.apple.com webpage ──────────────────────────
+    apple_result = _resolve_apple_podcast_episode(url)
+    if apple_result:
+        audio_url, meta = apple_result
+        log.info(f"Resolved Apple Podcasts episode via iTunes Lookup: {meta['title']!r}")
+        return _download_direct(audio_url, episode_dir, meta)
 
     # ── YouTube: use VPS proxy if configured ─────────────────────────────────
     if _VPS_URL and _VPS_TOKEN and _YT_RE.search(url):
