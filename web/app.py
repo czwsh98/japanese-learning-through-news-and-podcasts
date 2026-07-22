@@ -513,7 +513,13 @@ def _atomic_quota_insert(user, audio_bytes: int = 0) -> "TranscriptionUsage | No
             # Serialize all concurrent quota checks for this user.
             # pg_advisory_xact_lock is released automatically when the
             # transaction commits or rolls back.
-            uid_hash = hash(str(user.id)) & 0x7FFFFFFFFFFFFFFF  # positive int64
+            # Derive the lock key from the UUID's own integer value — NOT
+            # Python's hash(), which is salted per-process (PYTHONHASHSEED) and
+            # so produces a DIFFERENT key in each gunicorn worker, silently
+            # defeating cross-process serialization the moment --workers > 1.
+            # pg advisory-lock keys are signed int64, so fold the 128-bit UUID
+            # into the positive int64 range with a mask.
+            uid_hash = user.id.int & 0x7FFFFFFFFFFFFFFF
             db.execute(sa_text("SELECT pg_advisory_xact_lock(:h)"), {"h": uid_hash})
 
             # Re-read the count inside the lock — now safe against concurrent writers.
@@ -687,13 +693,15 @@ def _pipeline_thread(
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
 
-    def _mark_usage(status: str) -> None:
+    def _mark_usage(status: str, episode_id=None) -> None:
         if usage_id and db_available():
             try:
                 with get_db() as db:
                     row = db.get(TranscriptionUsage, usage_id)
                     if row:
                         row.status = status
+                        if episode_id is not None:
+                            row.episode_id = episode_id
                         if audio_path and audio_path.exists():
                             row.audio_bytes = audio_path.stat().st_size
             except Exception as e:
@@ -756,6 +764,7 @@ def _pipeline_thread(
         # of whether R2 is configured.  r2_prefix is left empty when R2 is not
         # configured; asset routes fall back to local disk in that case.
         r2_prefix = ""
+        episode_row_id = None
         if user_id and db_available():
             if _get_r2():
                 _set_step(job_id, "Saving to cloud storage…", 6)
@@ -798,6 +807,8 @@ def _pipeline_thread(
                         r2_prefix     = r2_prefix,
                     )
                     db.add(ep_row)
+                    db.flush()   # populate ep_row.id for the usage-row link below
+                    episode_row_id = ep_row.id
                 else:
                     # Skeleton row exists — update with enriched pipeline data
                     existing.title        = meta.get("title", existing.title)
@@ -810,8 +821,11 @@ def _pipeline_thread(
                     existing.source_token = _get_source_token(source_url or meta.get("url", ""))
                     if r2_prefix:
                         existing.r2_prefix = r2_prefix
+                    episode_row_id = existing.id
 
-        _mark_usage("completed")
+        # Link the usage row to the Episode so the admin history join resolves
+        # (episode_id was previously never set, leaving the FK permanently null).
+        _mark_usage("completed", episode_id=episode_row_id)
 
         # Bug #4 fix: after a successful R2 upload the local ep_dir is no longer
         # needed (canonical copy is in R2).  Remove it to prevent unbounded disk
