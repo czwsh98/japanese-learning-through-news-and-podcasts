@@ -60,6 +60,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const RESUME_MIN_T       = 5;   // don't bother resuming inside the first 5s
   const RESUME_END_MARGIN  = 15;  // within 15s of the end counts as "finished"
   const RESUME_SAVE_EVERY  = 5000; // ms between periodic saves
+  const PLAYBACK_REPORT_EVERY = 30000;
   let resumeApplied  = false;
   // Start the throttle window at load time (not 0) so the first periodic tick
   // doesn't fire immediately — that race can capture a stale/zero position
@@ -67,6 +68,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   // clobber a resume point that was just restored.
   let lastResumeSave  = Date.now();
   let lastServerSave  = 0; // ms epoch of the last successful server sync
+  let lastPlaybackReport = 0;
+
+  // Separate from the resume/completion sync above: reports a coarse
+  // percent+finished signal to /api/playback for recommendation ranking
+  // (web/recommendations.py), independent of the per-episode resume position.
+  function reportPlayback(currentTime, duration, finished, force) {
+    if (!(duration > 0)) return;
+    const now = Date.now();
+    if (!force && now - lastPlaybackReport < PLAYBACK_REPORT_EVERY) return;
+    lastPlaybackReport = now;
+    fetch("/api/playback", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({episode: dateStr, current_time: currentTime, duration, finished: !!finished}),
+      keepalive: true
+    }).catch(() => {});
+  }
 
   function loadLocalResume() {
     try {
@@ -1098,6 +1116,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       checkLoop(t);
       maybeAutoComplete(t, audio.duration);
       saveResumeT(t);
+      reportPlayback(t, audio.duration, false, false);
     });
     audio.addEventListener("seeked", () => {
       if (useYoutube) return;
@@ -1105,8 +1124,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       const idx = findSegmentIndex(t, currentIdx);
       if (idx >= 0) { setActive(idx); scrollActiveIntoView(idx, true); }
     });
-    audio.addEventListener("pause", () => { if (!useYoutube) saveResumeT(audio.currentTime, true); });
-    audio.addEventListener("ended", () => { if (!useYoutube) markCompleted(audio.currentTime); });
+    audio.addEventListener("pause", () => {
+      if (!useYoutube) { saveResumeT(audio.currentTime, true); reportPlayback(audio.currentTime, audio.duration, false, true); }
+    });
+    audio.addEventListener("ended", () => {
+      if (!useYoutube) { markCompleted(audio.currentTime); reportPlayback(audio.duration, audio.duration, true, true); }
+    });
   }
 
   if (isYoutube) {
@@ -1129,6 +1152,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       checkLoop(t);
       maybeAutoComplete(t, ytPlayer.getDuration?.() || 0);
       saveResumeT(t);
+      reportPlayback(t, ytPlayer.getDuration?.() || 0, false, false);
     }, 250);
   }
 

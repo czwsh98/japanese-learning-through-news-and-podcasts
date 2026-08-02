@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "sources": [
+    {"id":"pod-news-genba","name":"ニュースの現場から","type":"podcast","url":"https://podcasts.apple.com/us/podcast/id1526773927","rss_url":"https://www.omnycontent.com/d/playlist/1e3bd144-9b57-451a-93cf-ac0e00e74446/50382bb4-3af3-4250-8ddc-ac0f0033ceb5/684015f9-2396-4ac4-bc1f-ac0f0033d08c/podcast.rss","description":"朝日新聞の記者がニュースの背景と取材現場を掘り下げます。","tags":["news","society"],"related_sources":["荻上チキ・Session"]},
+    {"id":"pod-nichiten","name":"安住紳一郎の日曜天国","type":"podcast","url":"https://podcasts.apple.com/us/podcast/id1647482386","rss_url":"https://feeds.megaphone.fm/TBS2679398439","description":"暮らしの話題とゲストトークを軽快な日本語で楽しめます。","tags":["culture","interviews"],"related_sources":["荻上チキ・Session"]},
+    {"id":"pod-session","name":"荻上チキ・Session","type":"podcast","url":"https://podcasts.apple.com/jp/podcast/id1532201544","rss_url":"https://feeds.megaphone.fm/TBS7072964704","description":"ニュース、社会問題、文化を専門家とともに深く読み解きます。","tags":["news","society"],"related_sources":["ニュースの現場から"]},
+    {"id":"pod-coten","name":"コテンラジオ","type":"podcast","url":"https://podcasts.apple.com/jp/podcast/id1450522865","rss_url":"https://anchor.fm/s/8c2088c/podcast/rss","description":"歴史上の人物や出来事を現代につながる物語として解説します。","tags":["history","culture"],"related_sources":["PIVOT 公式チャンネル"]},
+    {"id":"pod-researchat","name":"Researchat.fm","type":"podcast","url":"https://researchat.fm","rss_url":"https://researchat.fm/feed.xml","description":"研究者が科学論文、研究生活、技術の面白さを語ります。","tags":["science","technology"],"related_sources":["ゆる言語学ラジオ"]},
+    {"id":"pod-rebuild","name":"Rebuild","type":"podcast","url":"https://rebuild.fm","rss_url":"https://feeds.rebuild.fm/rebuildfm","description":"ソフトウェア、ウェブ、ガジェットをエンジニア視点で語る番組です。","tags":["technology","interviews"],"related_sources":["PIVOT 公式チャンネル"]},
+    {"id":"pod-fukabori","name":"fukabori.fm","type":"podcast","url":"https://fukabori.fm","rss_url":"https://fukabori.fm/feed.xml","description":"第一線のエンジニアを迎えて技術とキャリアを深掘りします。","tags":["technology","interviews"],"related_sources":["Rebuild"]},
+    {"id":"pod-bilingual","name":"バイリンガルニュース","type":"podcast","url":"https://podcasts.apple.com/us/podcast/id653415937","rss_url":"https://feeds.soundcloud.com/users/soundcloud:users:25438090/sounds.rss","description":"世界のニュースを日本語と英語で交互に紹介する会話番組です。","tags":["news","language"],"related_sources":["ニュースの現場から"]},
+    {"id":"pod-nikkei","name":"ながら日経","type":"podcast","url":"https://podcasts.apple.com/jp/podcast/id1557671860","rss_url":"https://anchor.fm/s/4eabcf78/podcast/rss","description":"通勤時間にも聞きやすい長さで経済ニュースをまとめます。","tags":["economics","news"],"related_sources":["PIVOT 公式チャンネル"]},
+    {"id":"pod-news-connect","name":"News Connect あなたと経済をつなぐ5分間","type":"podcast","url":"https://podcasts.apple.com/jp/podcast/id1608666340","rss_url":"https://anchor.fm/s/81c65f3c/podcast/rss","description":"国内外の経済ニュースを短く整理し、背景まで解説します。","tags":["economics","news"],"related_sources":["ながら日経"]},
+    {"id":"pod-yuru-science","name":"ゆる科学ラジオ","type":"podcast","url":"https://podcasts.apple.com/jp/podcast/id1631321855","rss_url":"https://anchor.fm/s/a0c8c1b4/podcast/rss","description":"身近な疑問から科学の考え方を楽しく学べるトーク番組です。","tags":["science","culture"],"related_sources":["ゆる言語学ラジオ"]},
+    {"id":"pod-nhk-radio-news","name":"NHKラジオニュース","type":"podcast","url":"https://www.nhk.or.jp/s-media/news/podcast/list.html","rss_url":"https://www.nhk.or.jp/r-news/podcast/nhkradionews.xml","description":"標準的で明瞭な日本語による定時ニュースです。","tags":["news","language"],"related_sources":["ニュースの現場から"]},
+
+    {"id":"yt-pivot","name":"PIVOT 公式チャンネル","type":"youtube","url":"https://www.youtube.com/@pivot00","description":"経済、ビジネス、テクノロジーを専門家との対話で掘り下げます。","tags":["economics","interviews"],"related_sources":["ながら日経"]},
+    {"id":"yt-yuru-language","name":"ゆる言語学ラジオ","type":"youtube","url":"https://www.youtube.com/@yurugengogaku","description":"言葉の仕組みと面白さを軽妙な会話で探究します。","tags":["language","culture"],"related_sources":["コテンラジオ"]},
+    {"id":"yt-tbs-news","name":"TBS NEWS DIG Powered by JNN","type":"youtube","url":"https://www.youtube.com/@tbsnewsdig","description":"国内外のニュース映像と記者解説を継続的に配信します。","tags":["news","society"],"related_sources":["荻上チキ・Session"]},
+    {"id":"yt-ann-news","name":"ANNnewsCH","type":"youtube","url":"https://www.youtube.com/@ANNnewsCH","description":"速報から特集まで幅広いニュースを日本語で視聴できます。","tags":["news","society"],"related_sources":["ニュースの現場から"]},
+    {"id":"yt-tvtokyo-biz","name":"テレ東BIZ","type":"youtube","url":"https://www.youtube.com/@tvtokyobiz","description":"経済ニュース、企業取材、政策解説に強いビジネスチャンネルです。","tags":["economics","news"],"related_sources":["PIVOT 公式チャンネル"]},
+    {"id":"yt-nikkei","name":"日本経済新聞","type":"youtube","url":"https://www.youtube.com/@nikkei","description":"日本と世界の経済、企業、マーケットを動画で解説します。","tags":["economics","news"],"related_sources":["ながら日経"]},
+    {"id":"yt-sakana-kun","name":"さかなクンちゃんねる - FISH BOY - Sakana-kun","type":"youtube","url":"https://www.youtube.com/@sakanakun","description":"魚と海の科学を親しみやすい語り口で学べます。","tags":["science","culture"],"related_sources":["ゆる科学ラジオ"]},
+    {"id":"yt-nhk","name":"NHK","type":"youtube","url":"https://www.youtube.com/@NHK","description":"報道、教養、文化の公式映像を幅広く届けます。","tags":["culture","news"],"related_sources":["NHKラジオニュース"]},
+    {"id":"yt-imaichi","name":"イチからわかる歴史チャンネル","type":"youtube","url":"https://www.youtube.com/@rekishi_channel","description":"日本史と世界史の流れをテーマ別にわかりやすく整理します。","tags":["history","education"],"related_sources":["コテンラジオ"]},
+    {"id":"yt-rietichannel","name":"RIETI Channel","type":"youtube","url":"https://www.youtube.com/@rietichannel","description":"研究者による経済政策や社会課題の講演と討論を視聴できます。","tags":["economics","society"],"related_sources":["PIVOT 公式チャンネル"]},
+    {"id":"yt-jst","name":"JST Channel","type":"youtube","url":"https://www.youtube.com/@JSTChannel","description":"科学技術の研究成果や研究者インタビューを紹介します。","tags":["science","technology"],"related_sources":["Researchat.fm"]},
+    {"id":"yt-digital-agency","name":"デジタル庁","type":"youtube","url":"https://www.youtube.com/@digitalagency","description":"行政デジタル化、制度、技術の公式解説やイベント映像です。","tags":["technology","society"],"related_sources":["Rebuild"]}
+  ]
+}

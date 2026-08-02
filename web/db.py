@@ -74,6 +74,8 @@ class User(Base):
     episodes             = relationship("Episode",            back_populates="owner", cascade="all, delete-orphan")
     vocab                = relationship("VocabItem",          back_populates="user",  cascade="all, delete-orphan")
     transcription_usage  = relationship("TranscriptionUsage", back_populates="user",  cascade="all, delete-orphan")
+    recommendation_dismissals = relationship("RecommendationDismissal", back_populates="user", cascade="all, delete-orphan")
+    playback_progress     = relationship("PlaybackProgress", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserSession(Base):
@@ -199,6 +201,41 @@ class TranscriptionUsage(Base):
 
     user    = relationship("User",    back_populates="transcription_usage")
     episode = relationship("Episode", back_populates="transcription_usage")
+
+
+class RecommendationDismissal(Base):
+    """Permanent per-user dismissal of one curated catalog candidate."""
+    __tablename__ = "recommendation_dismissals"
+
+    id           = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id      = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    candidate_id = Column(String(100), nullable=False)
+    dismissed_at = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "candidate_id", name="uq_recommendation_dismissal_user_candidate"),
+    )
+    user = relationship("User", back_populates="recommendation_dismissals")
+
+
+class PlaybackProgress(Base):
+    """Latest server-side listening state used by recommendation ranking."""
+    __tablename__ = "playback_progress"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id    = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    episode_id = Column(UUID(as_uuid=True), ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False)
+    percent    = Column(Integer, nullable=False, server_default="0")  # 0..100
+    finished   = Column(Boolean, nullable=False, server_default="false")
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "episode_id", name="uq_playback_progress_user_episode"),
+    )
+    user = relationship("User", back_populates="playback_progress")
 
 
 # ── Public helpers ────────────────────────────────────────────────────────────

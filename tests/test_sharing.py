@@ -20,7 +20,10 @@ import dotenv
 dotenv.load_dotenv = lambda *args, **kwargs: None
 
 from web.app import app, _get_source_token, _pipeline_thread, _jobs, _jobs_lock
-from web.db import get_db, User, Episode, TranscriptionUsage
+from web.db import (
+    get_db, User, Episode, PlaybackProgress, RecommendationDismissal,
+    TranscriptionUsage,
+)
 
 @pytest.fixture(autouse=True)
 def setup_db():
@@ -94,6 +97,55 @@ def test_get_source_token_general_url():
     assert token1 is not None
     assert token1.startswith("url:")
     assert token1 == token2
+
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+def test_recommendation_dismissal_is_idempotent_and_per_user(mock_auth_user, mock_app_user,
+                                                              client, test_users):
+    user_a_id, user_b_id = test_users
+    for user_id in (user_a_id, user_a_id, user_b_id):
+        with get_db() as db:
+            user = db.get(User, user_id)
+        mock_auth_user.return_value = user
+        mock_app_user.return_value = user
+        response = client.post("/subscriptions/recommendations/dismiss",
+                               data={"candidate_id": "yt-yuru-language"})
+        assert response.status_code == 302
+    with get_db() as db:
+        rows = db.execute(select(RecommendationDismissal)).scalars().all()
+    assert {(row.user_id, row.candidate_id) for row in rows} == {
+        (user_a_id, "yt-yuru-language"), (user_b_id, "yt-yuru-language")
+    }
+
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+def test_playback_progress_keeps_high_water_mark_and_completion(mock_auth_user, mock_app_user,
+                                                                client, test_users):
+    user_a_id, _ = test_users
+    with get_db() as db:
+        user = db.get(User, user_a_id)
+        episode = Episode(owner_user_id=user_a_id, slug="2026-08-02", date="2026-08-02",
+                          title="Test", channel="PIVOT 公式チャンネル")
+        db.add(episode)
+    mock_auth_user.return_value = user
+    mock_app_user.return_value = user
+    assert client.post("/api/playback", json={
+        "episode": "2026-08-02", "current_time": 50, "duration": 100
+    }).status_code == 200
+    assert client.post("/api/playback", json={
+        "episode": "2026-08-02", "current_time": 100, "duration": 100, "finished": True
+    }).status_code == 200
+    assert client.post("/api/playback", json={
+        "episode": "2026-08-02", "current_time": 10, "duration": 100
+    }).status_code == 200
+    with get_db() as db:
+        row = db.execute(select(PlaybackProgress).where(
+            PlaybackProgress.user_id == user_a_id
+        )).scalar_one()
+    assert row.percent == 100
+    assert row.finished is True
 
 @patch("web.app.get_current_user")
 @patch("web.auth.get_current_user")

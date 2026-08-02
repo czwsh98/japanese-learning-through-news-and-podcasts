@@ -71,7 +71,11 @@ from web.auth import (
     register_user,
     set_auth_cookie,
 )
-from web.db import Episode, TranscriptionUsage, VocabItem, db_available, get_db, init_db
+from web.db import (
+    Episode, PlaybackProgress, RecommendationDismissal, TranscriptionUsage,
+    VocabItem, db_available, get_db, init_db,
+)
+from web.recommendations import load_catalog, normalize_url, rank_recommendations
 from sqlalchemy import func, select, text as sa_text, update
 
 log = logging.getLogger(__name__)
@@ -1430,13 +1434,41 @@ def _build_subscription_view(sources: list[dict], recent_cache: dict, user) -> t
     return source_views, inbox, metrics
 
 
+def _recommendations_for_user(sources: list[dict]) -> tuple[list[dict], bool]:
+    catalog = load_catalog()
+    if not catalog:
+        return [], False
+    user = get_current_user()
+    episodes, playback, dismissed = [], {}, set()
+    if db_available() and user:
+        with get_db() as db:
+            episodes = list(db.execute(
+                select(Episode).where(Episode.owner_user_id == user.id)
+            ).scalars())
+            playback = {
+                str(row.episode_id): {"percent": row.percent / 100.0, "finished": row.finished}
+                for row in db.execute(select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == user.id
+                )).scalars()
+            }
+            dismissed = set(db.execute(select(RecommendationDismissal.candidate_id).where(
+                RecommendationDismissal.user_id == user.id
+            )).scalars())
+    return rank_recommendations(catalog, sources, episodes, playback, dismissed,
+                                str(user.id) if user else "local"), True
+
+
 @app.route("/subscriptions", methods=["GET"])
 @login_required
 def subscriptions_page():
     sources_data = _load_sources()
     sources, inbox, metrics = _build_subscription_view(
         sources_data.get("sources", []), _load_recent_cache(), get_current_user())
-    return render_template("subscriptions.html", sources=sources, inbox=inbox, metrics=metrics)
+    recommendations, catalog_available = _recommendations_for_user(sources)
+    return render_template(
+        "subscriptions.html", sources=sources, inbox=inbox, metrics=metrics,
+        recommendations=recommendations, catalog_available=catalog_available,
+    )
 
 
 @app.route("/api/subscriptions/recent", methods=["POST"])
@@ -1534,6 +1566,14 @@ def subscriptions_add():
     with _sources_lock:
         sources_data = _load_sources()
         if "sources" not in sources_data: sources_data["sources"] = []
+        existing_urls = {
+            normalize_url(candidate)
+            for source in sources_data["sources"]
+            for candidate in (source.get("url", ""), source.get("rss_url", ""))
+            if candidate
+        }
+        if normalize_url(url) in existing_urls or (rss_url and normalize_url(rss_url) in existing_urls):
+            return jsonify({"error": "That source is already subscribed."}), 409
         sources_data["sources"].append(new_source)
         _atomic_write_json(SOURCES_FILE, sources_data)
     return redirect(url_for("subscriptions_page"))
@@ -1565,6 +1605,71 @@ def subscriptions_update():
             if rss_url:
                 match["rss_url"] = rss_url
         _atomic_write_json(SOURCES_FILE, data)
+    return redirect(url_for("subscriptions_page"))
+
+
+def _catalog_candidate_from_request() -> dict:
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    candidate_id = str((payload or {}).get("candidate_id", "")).strip()
+    if not candidate_id:
+        abort(400, "candidate_id is required")
+    candidate = next((item for item in load_catalog() if item["id"] == candidate_id), None)
+    if candidate is None:
+        abort(404, "unknown recommendation candidate")
+    return candidate
+
+
+@app.route("/subscriptions/recommendations/subscribe", methods=["POST"])
+@login_required
+def recommendation_subscribe():
+    candidate = _catalog_candidate_from_request()
+    rss_url = candidate.get("rss_url")
+    if candidate["type"] == "podcast" and not rss_url:
+        rss_url = _resolve_apple_podcast_rss(candidate["url"])
+        if not rss_url:
+            return jsonify({"error": "The podcast feed is temporarily unavailable."}), 503
+    new_source = {
+        "name": candidate["name"],
+        "url": candidate["url"],
+        "description": candidate["description"],
+        "enabled": True,
+        "digest_enabled": True,
+    }
+    if rss_url:
+        new_source["rss_url"] = rss_url
+
+    with _sources_lock:
+        data = _load_sources()
+        existing = {
+            normalize_url(value)
+            for source in data["sources"]
+            for value in (source.get("url", ""), source.get("rss_url", ""))
+            if value
+        }
+        candidate_urls = {normalize_url(candidate["url"])}
+        if rss_url:
+            candidate_urls.add(normalize_url(rss_url))
+        if existing & candidate_urls:
+            return jsonify({"error": "That source is already subscribed."}), 409
+        data["sources"].append(new_source)
+        _atomic_write_json(SOURCES_FILE, data)
+    return redirect(url_for("subscriptions_page"))
+
+
+@app.route("/subscriptions/recommendations/dismiss", methods=["POST"])
+@login_required
+def recommendation_dismiss():
+    candidate = _catalog_candidate_from_request()
+    user = get_current_user()
+    if not db_available() or not user:
+        return jsonify({"error": "Dismissals require an authenticated account."}), 503
+    with get_db() as db:
+        exists = db.execute(select(RecommendationDismissal.id).where(
+            RecommendationDismissal.user_id == user.id,
+            RecommendationDismissal.candidate_id == candidate["id"],
+        )).scalar_one_or_none()
+        if exists is None:
+            db.add(RecommendationDismissal(user_id=user.id, candidate_id=candidate["id"]))
     return redirect(url_for("subscriptions_page"))
 
 
@@ -2524,6 +2629,43 @@ def api_episodes():
             )
             out.append({"date": ep.name, "meta": meta})
     return jsonify(out)
+
+
+@app.route("/api/playback", methods=["POST"])
+@login_required
+def api_playback_progress():
+    """Persist a compact per-user listening signal for recommendation ranking."""
+    if not db_available():
+        return ("", 204)
+    user = get_current_user()
+    data = request.get_json(silent=True) or {}
+    slug = str(data.get("episode", "")).strip()
+    try:
+        current = max(0.0, float(data.get("current_time", 0)))
+        duration = max(0.0, float(data.get("duration", 0)))
+    except (TypeError, ValueError):
+        abort(400, "invalid playback values")
+    if not user or not slug or duration <= 0:
+        abort(400, "episode and positive duration are required")
+    percent = min(100, round(current / duration * 100))
+    finished = bool(data.get("finished")) or percent >= 95
+    with get_db() as db:
+        episode_row = db.execute(select(Episode).where(
+            Episode.owner_user_id == user.id, Episode.slug == slug
+        )).scalar_one_or_none()
+        if episode_row is None:
+            abort(404)
+        row = db.execute(select(PlaybackProgress).where(
+            PlaybackProgress.user_id == user.id,
+            PlaybackProgress.episode_id == episode_row.id,
+        )).scalar_one_or_none()
+        if row is None:
+            db.add(PlaybackProgress(user_id=user.id, episode_id=episode_row.id,
+                                    percent=percent, finished=finished))
+        else:
+            row.percent = max(row.percent, percent)
+            row.finished = row.finished or finished
+    return jsonify({"ok": True, "percent": percent, "finished": finished})
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
