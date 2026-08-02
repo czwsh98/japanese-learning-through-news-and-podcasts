@@ -93,7 +93,11 @@ def test_recommendation_cards_render_before_source_grid(client, tmp_path):
     mock_sources.write_text(json.dumps({"sources": [{"name": "Test", "url": "http://test.com"}]}))
     with patch("web.app.SOURCES_FILE", mock_sources):
         body = client.get("/subscriptions").get_data(as_text=True)
-    assert body.index("Recommended for you") < body.index("Your sources") < body.index("http://test.com")
+    # "http://test.com" also appears earlier, as the value of the inbox's
+    # source-filter <option> — that's the listening-inbox UI (merged in from
+    # dmit-hk's production redesign), not the source grid this test targets,
+    # so only the recommendations-before-source-grid ordering is asserted here.
+    assert body.index("Recommended for you") < body.rindex("Your sources") < body.rindex("http://test.com")
     assert 'class="recommendation-rail"' in body
 
 @patch("lib.analyzer.explain_sentence")
