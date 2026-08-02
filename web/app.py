@@ -72,11 +72,13 @@ from web.auth import (
     set_auth_cookie,
 )
 from web.db import (
-    Episode, PlaybackProgress, RecommendationDismissal, TranscriptionUsage,
+    Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob,
+    RecommendationDismissal, TranscriptionUsage,
     ReviewLog, VocabItem, VocabOccurrence, db_available, get_db, init_db,
 )
 from web.recommendations import load_catalog, normalize_url, rank_recommendations
-from sqlalchemy import func, or_, select, text as sa_text, update
+from sqlalchemy import delete, func, or_, select, text as sa_text, update
+from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger(__name__)
 
@@ -586,6 +588,247 @@ def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
             _jobs[job_id]["step"] = step
             if step_num:
                 _jobs[job_id]["step_num"] = step_num
+    if db_available():
+        try:
+            values = {"current_step": step, "updated_at": datetime.now(timezone.utc)}
+            if step_num:
+                values["step_num"] = step_num
+            with get_db() as db:
+                db.execute(update(ProcessingJob).where(ProcessingJob.id == uuid.UUID(job_id)).values(**values))
+        except Exception as exc:
+            log.warning("Could not persist step for job %s: %s", job_id, exc)
+
+
+def _persist_processing_job(job_id: str, slug: str, user_id, source_url: str,
+                            level: str, total_steps: int, meta: dict,
+                            usage_id=None, unlimited=False, clone_from_id=None) -> None:
+    if not (db_available() and user_id):
+        return
+    source_token = _get_source_token(source_url)
+    artifact_prefix = f"jobs/{user_id}/{job_id}/" if _get_r2() else ""
+    with get_db() as db:
+        db.add(ProcessingJob(
+            id=uuid.UUID(job_id),
+            user_id=user_id,
+            usage_id=uuid.UUID(str(usage_id)) if usage_id else None,
+            slug=slug,
+            source_url=source_url or "",
+            source_token=source_token,
+            level=level,
+            status="queued",
+            current_step="Starting…",
+            total_steps=total_steps,
+            unlimited=bool(unlimited),
+            clone_from_id=uuid.UUID(str(clone_from_id)) if clone_from_id else None,
+            meta_json=meta or {},
+            artifact_prefix=artifact_prefix,
+        ))
+
+
+def _claim_processing_job(job_id: str) -> bool:
+    if not db_available():
+        return True
+    try:
+        now = datetime.now(timezone.utc)
+        with get_db() as db:
+            result = db.execute(
+                update(ProcessingJob)
+                .where(
+                    ProcessingJob.id == uuid.UUID(job_id),
+                    ProcessingJob.status.in_(["queued", "retrying"]),
+                )
+                .values(
+                    status="running",
+                    started_at=now,
+                    updated_at=now,
+                    attempt_count=ProcessingJob.attempt_count + 1,
+                    error_code="",
+                    error_message="",
+                )
+            )
+            return result.rowcount == 1
+    except Exception as exc:
+        log.warning("Could not claim durable job %s: %s", job_id, exc)
+        return False
+
+
+def _finish_processing_job(job_id: str, *, success: bool, episode_id=None,
+                           error_code="", error_message="", retry_from="download") -> None:
+    now = datetime.now(timezone.utc)
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id]["status"] = "done" if success else "error"
+            _jobs[job_id]["step"] = "Complete" if success else "Failed"
+            _jobs[job_id]["error"] = error_message
+    if not db_available():
+        return
+    try:
+        values = {
+            "status": "completed" if success else "failed",
+            "current_step": "Complete" if success else "Failed",
+            "updated_at": now,
+            "finished_at": now,
+            "error_code": error_code,
+            "error_message": error_message[:4000],
+            "retry_from": retry_from,
+            "artifacts_expire_at": None if success else now + timedelta(days=7),
+        }
+        if episode_id is not None:
+            values["episode_id"] = episode_id
+        with get_db() as db:
+            db.execute(update(ProcessingJob).where(ProcessingJob.id == uuid.UUID(job_id)).values(**values))
+    except Exception as exc:
+        log.warning("Could not finish durable job %s: %s", job_id, exc)
+
+
+def _job_error_code(exc: Exception, step_num: int) -> str:
+    text = str(exc).lower()
+    if "429" in text or "rate limit" in text:
+        return "provider_rate_limit"
+    if "timeout" in text or "timed out" in text:
+        return "provider_timeout"
+    if step_num <= 1:
+        return "download_failed"
+    if step_num == 2:
+        return "transcription_failed"
+    if step_num == 3:
+        return "translation_failed"
+    if step_num == 4:
+        return "analysis_failed"
+    return "storage_failed"
+
+
+def _job_to_dict(row: ProcessingJob) -> dict:
+    status_map = {"queued": "processing", "running": "processing", "retrying": "processing",
+                  "completed": "done", "failed": "error"}
+    return {
+        "job_id": str(row.id),
+        "slug": row.slug,
+        "status": status_map.get(row.status, row.status),
+        "step": row.current_step,
+        "step_num": row.step_num,
+        "total_steps": row.total_steps,
+        "error": row.error_message,
+        "error_code": row.error_code,
+        "retry_from": row.retry_from,
+        "attempt_count": row.attempt_count,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "title": (row.meta_json or {}).get("title") or row.slug,
+        "can_retry": row.status == "failed" and row.attempt_count < 3,
+    }
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _checkpoint_artifact(job_id: str, stage: str, path: Path) -> None:
+    """Upload and validate one retry checkpoint, then record its manifest row."""
+    if not (db_available() and _get_r2() and path.exists()):
+        return
+    with get_db() as db:
+        job = db.get(ProcessingJob, uuid.UUID(job_id))
+        if not job or not job.artifact_prefix:
+            return
+        object_key = f"{job.artifact_prefix}{path.name}"
+    size = path.stat().st_size
+    checksum = _sha256_path(path)
+    _get_r2().upload_file(
+        str(path), _r2_bucket(), object_key,
+        ExtraArgs={"ContentType": mimetypes.guess_type(path.name)[0] or "application/octet-stream"},
+    )
+    head = _get_r2().head_object(Bucket=_r2_bucket(), Key=object_key)
+    if int(head.get("ContentLength", -1)) != size:
+        raise RuntimeError(f"Checkpoint validation failed for {stage}: uploaded size mismatch")
+    with get_db() as db:
+        artifact = db.execute(select(ProcessingArtifact).where(
+            ProcessingArtifact.job_id == uuid.UUID(job_id),
+            ProcessingArtifact.stage == stage,
+        )).scalar_one_or_none()
+        values = {
+            "object_key": object_key,
+            "filename": path.name,
+            "size_bytes": size,
+            "sha256": checksum,
+            "validated": True,
+        }
+        if artifact:
+            for key, value in values.items():
+                setattr(artifact, key, value)
+        else:
+            db.add(ProcessingArtifact(job_id=uuid.UUID(job_id), stage=stage, **values))
+
+
+def _checkpoint_json(job_id: str, stage: str, path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _checkpoint_artifact(job_id, stage, path)
+
+
+def _try_checkpoint_artifact(job_id: str, stage: str, path: Path, payload: dict | None = None) -> bool:
+    try:
+        if payload is None:
+            _checkpoint_artifact(job_id, stage, path)
+        else:
+            _checkpoint_json(job_id, stage, path, payload)
+        return True
+    except Exception as exc:
+        log.warning("Checkpoint %s failed for job %s; pipeline will continue: %s", stage, job_id, exc)
+        return False
+
+
+def _restore_job_artifacts(job_id: str, ep_dir: Path) -> dict[str, Path]:
+    """Download validated checkpoints and verify hashes before any stage reuse."""
+    restored: dict[str, Path] = {}
+    if not (db_available() and _get_r2()):
+        return restored
+    with get_db() as db:
+        rows = db.execute(
+            select(ProcessingArtifact)
+            .where(
+                ProcessingArtifact.job_id == uuid.UUID(job_id),
+                ProcessingArtifact.validated.is_(True),
+            )
+            .order_by(ProcessingArtifact.created_at)
+        ).scalars().all()
+    for artifact in rows:
+        target = ep_dir / artifact.filename
+        try:
+            _get_r2().download_file(_r2_bucket(), artifact.object_key, str(target))
+            if target.stat().st_size != artifact.size_bytes or _sha256_path(target) != artifact.sha256:
+                target.unlink(missing_ok=True)
+                log.warning("Ignoring invalid checkpoint %s for job %s", artifact.stage, job_id)
+                continue
+            if target.suffix == ".json":
+                json.loads(target.read_text(encoding="utf-8"))
+            restored[artifact.stage] = target
+        except Exception as exc:
+            target.unlink(missing_ok=True)
+            log.warning("Could not restore checkpoint %s for job %s: %s", artifact.stage, job_id, exc)
+    return restored
+
+
+def _delete_job_artifacts(job_id: str) -> None:
+    """Remove promoted temporary objects after successful episode persistence."""
+    if not (db_available() and _get_r2()):
+        return
+    with get_db() as db:
+        job = db.get(ProcessingJob, uuid.UUID(job_id))
+        prefix = job.artifact_prefix if job else ""
+    if prefix:
+        paginator = _get_r2().get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=prefix):
+            objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if objects:
+                _get_r2().delete_objects(Bucket=_r2_bucket(), Delete={"Objects": objects})
+    with get_db() as db:
+        db.execute(delete(ProcessingArtifact).where(
+            ProcessingArtifact.job_id == uuid.UUID(job_id)
+        ))
 
 
 def _prune_old_jobs() -> None:
@@ -622,6 +865,11 @@ def _pipeline_thread(
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files, _write_cards
     from lib.tokenizer import tokenize_segments
+
+    if not _claim_processing_job(job_id):
+        log.warning("Job %s was not claimed; another worker may own it", job_id)
+        return
+    restored_artifacts = _restore_job_artifacts(job_id, ep_dir)
 
     if clone_from_id and db_available() and _get_r2():
         try:
@@ -681,20 +929,19 @@ def _pipeline_thread(
                 ))
             shutil.rmtree(ep_dir, ignore_errors=True)
             with _jobs_lock:
-                _jobs[job_id]["status"]      = "done"
-                _jobs[job_id]["step"]        = "Complete"
                 _jobs[job_id]["step_num"]    = done_step
                 _jobs[job_id]["total_steps"] = done_step
+            _finish_processing_job(job_id, success=True)
             return
 
         except Exception as exc:
             tb = traceback.format_exc()
             log.error(f"Job {job_id} fast-path failed:\n{tb}")
             shutil.rmtree(ep_dir, ignore_errors=True)
-            with _jobs_lock:
-                _jobs[job_id]["status"] = "error"
-                _jobs[job_id]["error"]  = str(exc)
-                _jobs[job_id]["step"]   = "Failed"
+            _finish_processing_job(
+                job_id, success=False, error_code="clone_failed",
+                error_message=str(exc), retry_from="analysis",
+            )
             return
 
     total_steps = 6 if (user_id and db_available() and _get_r2()) else 5
@@ -715,7 +962,10 @@ def _pipeline_thread(
 
     try:
         # ── Step 1: Download ────────────────────────────────────────────────
-        if source_url and audio_path is None:
+        if "audio" in restored_artifacts:
+            audio_path = restored_artifacts["audio"]
+            _set_step(job_id, "Reusing validated audio checkpoint…", 1)
+        elif source_url and audio_path is None:
             from lib.downloader import download_latest
             _set_step(job_id, "Downloading audio…", 1)
             _ovr_title   = (meta or {}).get("title", "")
@@ -747,19 +997,36 @@ def _pipeline_thread(
         # Byte size alone doesn't bound Whisper cost (low-bitrate = long audio).
         from lib.transcriber import check_audio_duration
         check_audio_duration(audio_path, unlimited=unlimited)
+        if "audio" not in restored_artifacts:
+            _try_checkpoint_artifact(job_id, "audio", audio_path)
 
         # ── Step 2: Transcribe ───────────────────────────────────────────────
-        _set_step(job_id, "Transcribing with Whisper…", 2)
-        whisper_result = transcribe_audio(audio_path)
+        if "transcription" in restored_artifacts:
+            _set_step(job_id, "Reusing validated transcript checkpoint…", 2)
+            whisper_result = json.loads(restored_artifacts["transcription"].read_text(encoding="utf-8"))
+        else:
+            _set_step(job_id, "Transcribing with Whisper…", 2)
+            whisper_result = transcribe_audio(audio_path)
+            _try_checkpoint_artifact(job_id, "transcription", ep_dir / "checkpoint_transcription.json", whisper_result)
 
         # ── Step 3: Translate ────────────────────────────────────────────────
-        _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
-        segments = translate_segments(whisper_result["segments"])
-        segments = tokenize_segments(segments)
+        if "translation" in restored_artifacts:
+            _set_step(job_id, "Reusing validated translation checkpoint…", 3)
+            segments = json.loads(restored_artifacts["translation"].read_text(encoding="utf-8"))["segments"]
+        else:
+            _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
+            segments = translate_segments(whisper_result["segments"])
+            segments = tokenize_segments(segments)
+            _try_checkpoint_artifact(job_id, "translation", ep_dir / "checkpoint_translation.json", {"segments": segments})
 
         # ── Step 4: Analyse ──────────────────────────────────────────────────
-        _set_step(job_id, "Analysing vocabulary and grammar…", 4)
-        analysis = analyze_transcript(segments, level=level)
+        if "analysis" in restored_artifacts:
+            _set_step(job_id, "Reusing validated analysis checkpoint…", 4)
+            analysis = json.loads(restored_artifacts["analysis"].read_text(encoding="utf-8"))
+        else:
+            _set_step(job_id, "Analysing vocabulary and grammar…", 4)
+            analysis = analyze_transcript(segments, level=level)
+            _try_checkpoint_artifact(job_id, "analysis", ep_dir / "checkpoint_analysis.json", analysis)
 
         # ── Step 5: Write files ──────────────────────────────────────────────
         _set_step(job_id, "Writing episode files…", 5)
@@ -845,9 +1112,12 @@ def _pipeline_thread(
             log.info(f"Cleaned up local ep_dir after R2 upload: {ep_dir}")
 
         with _jobs_lock:
-            _jobs[job_id]["status"]   = "done"
-            _jobs[job_id]["step"]     = "Complete"
             _jobs[job_id]["step_num"] = total_steps
+        _finish_processing_job(job_id, success=True, episode_id=episode_row_id)
+        try:
+            _delete_job_artifacts(job_id)
+        except Exception as exc:
+            log.warning("Could not clean promoted checkpoints for job %s: %s", job_id, exc)
 
     except Exception as exc:
         tb = traceback.format_exc()
@@ -875,9 +1145,15 @@ def _pipeline_thread(
             except Exception as _del_exc:
                 log.warning("Could not clean up skeleton Episode row for %s: %s", slug, _del_exc)
         with _jobs_lock:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"]  = str(exc)
-            _jobs[job_id]["step"]   = "Failed"
+            failed_step = int(_jobs.get(job_id, {}).get("step_num", 0) or 0)
+        retry_stage = {1: "download", 2: "transcription", 3: "translation", 4: "analysis", 5: "write", 6: "storage"}.get(failed_step, "download")
+        _finish_processing_job(
+            job_id,
+            success=False,
+            error_code=_job_error_code(exc, failed_step),
+            error_message=str(exc),
+            retry_from=retry_stage,
+        )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -948,12 +1224,16 @@ def _unique_ep_slug(base: str, user_id=None) -> str:
     counter = 2
     if user_id and db_available():
         with get_db() as db:
-            while db.execute(
-                select(Episode).where(
+            while (
+                db.execute(select(Episode).where(
                     Episode.owner_user_id == user_id,
                     Episode.slug == slug,
-                )
-            ).scalar_one_or_none() is not None:
+                )).scalar_one_or_none() is not None
+                or db.execute(select(ProcessingJob.id).where(
+                    ProcessingJob.user_id == user_id,
+                    ProcessingJob.slug == slug,
+                ).limit(1)).scalar_one_or_none() is not None
+            ):
                 slug = f"{base}-{counter}"
                 counter += 1
     else:
@@ -2380,6 +2660,36 @@ def upload_process():
             "source_token": _get_source_token(source_url),
         }
 
+    try:
+        _persist_processing_job(
+            job_id, slug, user_id, source_url, level, total_steps, meta,
+            usage_id=usage_id, unlimited=unlimited, clone_from_id=clone_from_id,
+        )
+    except IntegrityError:
+        with _jobs_lock:
+            _jobs.pop(job_id, None)
+        shutil.rmtree(ep_dir, ignore_errors=True)
+        if usage_id:
+            with get_db() as db:
+                db.execute(update(TranscriptionUsage).where(
+                    TranscriptionUsage.id == uuid.UUID(str(usage_id))
+                ).values(status="failed"))
+                db.execute(delete(Episode).where(
+                    Episode.owner_user_id == user_id,
+                    Episode.slug == slug,
+                    Episode.r2_prefix == "",
+                ))
+        if user_id and _get_source_token(source_url):
+            with get_db() as db:
+                active = db.execute(select(ProcessingJob).where(
+                    ProcessingJob.user_id == user_id,
+                    ProcessingJob.source_token == _get_source_token(source_url),
+                    ProcessingJob.status.in_(["queued", "running", "retrying"]),
+                )).scalar_one_or_none()
+            if active:
+                return redirect(url_for("job_page", job_id=str(active.id)))
+        raise
+
     _prune_old_jobs()
 
     t = threading.Thread(
@@ -2401,9 +2711,28 @@ def upload_process():
 
 # ── Job status ────────────────────────────────────────────────────────────────
 
+def _owned_processing_job(job_id: str) -> "ProcessingJob | None":
+    if not db_available():
+        return None
+    user = get_current_user()
+    if user is None:
+        return None
+    try:
+        parsed = uuid.UUID(job_id)
+    except (ValueError, TypeError):
+        return None
+    with get_db() as db:
+        return db.execute(select(ProcessingJob).where(
+            ProcessingJob.id == parsed,
+            ProcessingJob.user_id == user.id,
+        )).scalar_one_or_none()
+
 @app.route("/job/<job_id>")
 @login_required
 def job_page(job_id: str):
+    durable = _owned_processing_job(job_id)
+    if durable is not None:
+        return render_template("job.html", job_id=job_id, slug=durable.slug)
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
@@ -2414,6 +2743,9 @@ def job_page(job_id: str):
 @app.route("/api/job/<job_id>/status")
 @login_required
 def api_job_status(job_id: str):
+    durable = _owned_processing_job(job_id)
+    if durable is not None:
+        return jsonify(_job_to_dict(durable))
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
@@ -2434,6 +2766,17 @@ def api_jobs_active():
     """Return all in-progress jobs belonging to the current user."""
     user = get_current_user()
     uid = str(user.id) if user else None
+    if db_available() and user:
+        with get_db() as db:
+            rows = db.execute(
+                select(ProcessingJob)
+                .where(
+                    ProcessingJob.user_id == user.id,
+                    ProcessingJob.status.in_(["queued", "running", "retrying"]),
+                )
+                .order_by(ProcessingJob.created_at.desc())
+            ).scalars().all()
+        return jsonify({"jobs": [_job_to_dict(row) for row in rows]})
     with _jobs_lock:
         jobs = [
             {
@@ -2448,6 +2791,93 @@ def api_jobs_active():
             if j.get("status") == "processing" and j.get("user_id") == uid
         ]
     return jsonify({"jobs": jobs})
+
+
+@app.route("/api/jobs/history")
+@login_required
+def api_jobs_history():
+    if not db_available():
+        return jsonify({"jobs": []})
+    user = get_current_user()
+    if user is None:
+        return jsonify({"jobs": []})
+    with get_db() as db:
+        rows = db.execute(
+            select(ProcessingJob)
+            .where(ProcessingJob.user_id == user.id)
+            .order_by(ProcessingJob.created_at.desc())
+            .limit(50)
+        ).scalars().all()
+    return jsonify({"jobs": [_job_to_dict(row) for row in rows]})
+
+
+@app.route("/activity")
+@login_required
+def activity_page():
+    return render_template("activity.html")
+
+
+@app.route("/api/job/<job_id>/retry", methods=["POST"])
+@login_required
+def api_job_retry(job_id: str):
+    job = _owned_processing_job(job_id)
+    if job is None:
+        return jsonify({"error": "Job not found"}), 404
+    if job.status != "failed":
+        return jsonify({"error": "Only failed jobs can be retried"}), 409
+    if job.attempt_count >= 3:
+        return jsonify({"error": "Retry limit reached"}), 409
+
+    with get_db() as db:
+        stages = set(db.execute(select(ProcessingArtifact.stage).where(
+            ProcessingArtifact.job_id == job.id,
+            ProcessingArtifact.validated.is_(True),
+        )).scalars().all())
+    if not job.source_url and "audio" not in stages:
+        return jsonify({"error": "The uploaded audio checkpoint has expired; upload the file again."}), 409
+
+    ep_dir = EPISODES_DIR / job.slug
+    shutil.rmtree(ep_dir, ignore_errors=True)
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    with get_db() as db:
+        db.execute(
+            update(ProcessingJob)
+            .where(ProcessingJob.id == job.id, ProcessingJob.status == "failed")
+            .values(
+                status="retrying",
+                current_step=f"Retrying from {job.retry_from}…",
+                error_code="",
+                error_message="",
+                finished_at=None,
+                updated_at=now,
+                artifacts_expire_at=None,
+            )
+        )
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "processing",
+            "slug": job.slug,
+            "user_id": str(job.user_id),
+            "step": f"Retrying from {job.retry_from}…",
+            "step_num": 0,
+            "total_steps": job.total_steps,
+            "error": "",
+            "started_at": time.time(),
+            "source_token": job.source_token,
+        }
+    threading.Thread(
+        target=_pipeline_thread,
+        args=(job_id, job.slug, ep_dir, job.source_url or None, None, job.meta_json or {}, job.level),
+        kwargs={
+            "user_id": job.user_id,
+            "usage_id": job.usage_id,
+            "unlimited": job.unlimited,
+            "clone_from_id": job.clone_from_id,
+        },
+        daemon=True,
+    ).start()
+    return jsonify({"status": "retrying", "job_id": job_id, "slug": job.slug})
 
 
 # ── Static episode assets ─────────────────────────────────────────────────────
@@ -2802,6 +3232,31 @@ def api_upload():
             "started_at":  time.time(),
             "source_token": _get_source_token(source_url),
         }
+
+    try:
+        _persist_processing_job(
+            job_id, slug, user_id, source_url, level, total_steps, meta,
+            usage_id=usage_id, unlimited=unlimited, clone_from_id=clone_from_id,
+        )
+    except IntegrityError:
+        with _jobs_lock:
+            _jobs.pop(job_id, None)
+        shutil.rmtree(ep_dir, ignore_errors=True)
+        if usage_id:
+            with get_db() as db:
+                db.execute(update(TranscriptionUsage).where(
+                    TranscriptionUsage.id == uuid.UUID(str(usage_id))
+                ).values(status="failed"))
+        if user_id and _get_source_token(source_url):
+            with get_db() as db:
+                active = db.execute(select(ProcessingJob).where(
+                    ProcessingJob.user_id == user_id,
+                    ProcessingJob.source_token == _get_source_token(source_url),
+                    ProcessingJob.status.in_(["queued", "running", "retrying"]),
+                )).scalar_one_or_none()
+            if active:
+                return jsonify({"job_id": str(active.id), "slug": active.slug})
+        raise
 
     _prune_old_jobs()
     threading.Thread(

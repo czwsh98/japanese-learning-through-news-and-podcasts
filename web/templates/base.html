@@ -19,6 +19,7 @@
   {% set mobile_home_active = episodes_active or current_path.startswith('/trash') %}
   {% set inbox_active = current_path.startswith('/subscriptions') %}
   {% set upload_active = current_path.startswith('/upload') or current_path.startswith('/job') %}
+  {% set mobile_upload_active = upload_active or current_path.startswith('/activity') %}
   {% set vocab_active = current_path.startswith('/vocab') or current_path.startswith('/review') %}
   {% set admin_active = current_path.startswith('/admin') %}
 
@@ -33,6 +34,7 @@
     <a href="/vocab" class="desktop-nav-link {{ 'desktop-nav-active' if vocab_active }} hidden sm:inline"{% if vocab_active %} aria-current="page"{% endif %}>Vocab</a>
     <a href="/trash" class="desktop-nav-link {{ 'desktop-nav-active' if current_path.startswith('/trash') }} hidden lg:inline"{% if current_path.startswith('/trash') %} aria-current="page"{% endif %}>Trash</a>
     <a href="/upload" class="desktop-nav-link {{ 'desktop-nav-active' if upload_active }} hidden sm:inline"{% if upload_active %} aria-current="page"{% endif %}>Upload</a>
+    <a href="/activity" class="desktop-nav-link {{ 'desktop-nav-active' if current_path.startswith('/activity') }} hidden lg:inline"{% if current_path.startswith('/activity') %} aria-current="page"{% endif %}>Activity</a>
     {% if current_user and current_user.is_admin %}
     <a href="/admin" class="desktop-nav-link desktop-nav-admin {{ 'desktop-nav-active' if admin_active }} hidden sm:inline"{% if admin_active %} aria-current="page"{% endif %}>Admin</a>
     {% endif %}
@@ -92,7 +94,7 @@
       <span class="text-[9px] font-medium tracking-wide uppercase">Inbox</span>
     </a>
     <a href="/upload" id="tab-upload"
-       class="mobile-nav-link {{ 'mobile-nav-active' if upload_active }}"{% if upload_active %} aria-current="page"{% endif %}>
+       class="mobile-nav-link {{ 'mobile-nav-active' if mobile_upload_active }}"{% if mobile_upload_active %} aria-current="page"{% endif %}>
       <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
       </svg>

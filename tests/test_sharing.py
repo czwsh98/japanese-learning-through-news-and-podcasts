@@ -19,10 +19,13 @@ os.environ["SECRET_KEY"] = "test-secret-key-12345"
 import dotenv
 dotenv.load_dotenv = lambda *args, **kwargs: None
 
-from web.app import app, _get_source_token, _pipeline_thread, _jobs, _jobs_lock
+from web.app import (
+    app, _checkpoint_artifact, _claim_processing_job, _get_source_token,
+    _jobs, _jobs_lock, _pipeline_thread, _restore_job_artifacts,
+)
 from web.db import (
-    get_db, User, Episode, PlaybackProgress, RecommendationDismissal,
-    TranscriptionUsage, VocabItem, VocabOccurrence,
+    get_db, User, Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob,
+    RecommendationDismissal, TranscriptionUsage, VocabItem, VocabOccurrence,
 )
 
 @pytest.fixture(autouse=True)
@@ -240,6 +243,96 @@ def test_daily_review_schedules_and_undoes_latest_answer(mock_auth_user, mock_ap
         restored = db.get(VocabItem, uuid.UUID(item_id))
         assert restored.due_at is None
         assert restored.repetitions == 0
+
+
+def test_processing_job_claim_is_atomic(test_users):
+    user_a_id, _ = test_users
+    job_id = uuid.uuid4()
+    with get_db() as db:
+        db.add(ProcessingJob(
+            id=job_id,
+            user_id=user_a_id,
+            slug="2026-08-02",
+            status="queued",
+            meta_json={},
+        ))
+
+    assert _claim_processing_job(str(job_id)) is True
+    assert _claim_processing_job(str(job_id)) is False
+    with get_db() as db:
+        job = db.get(ProcessingJob, job_id)
+        assert job.status == "running"
+        assert job.attempt_count == 1
+
+
+@patch("web.app._get_r2")
+def test_processing_artifact_is_hashed_and_validated_before_reuse(mock_get_r2,
+                                                                  test_users, tmp_path):
+    user_a_id, _ = test_users
+    job_id = uuid.uuid4()
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"durable-audio-checkpoint")
+    r2 = MagicMock()
+    r2.head_object.return_value = {"ContentLength": audio.stat().st_size}
+    r2.download_file.side_effect = lambda bucket, key, target: Path(target).write_bytes(audio.read_bytes())
+    mock_get_r2.return_value = r2
+    with get_db() as db:
+        db.add(ProcessingJob(
+            id=job_id,
+            user_id=user_a_id,
+            slug="2026-08-02",
+            status="running",
+            artifact_prefix=f"jobs/{user_a_id}/{job_id}/",
+            meta_json={},
+        ))
+
+    _checkpoint_artifact(str(job_id), "audio", audio)
+    restore_dir = tmp_path / "restore"
+    restore_dir.mkdir()
+    restored = _restore_job_artifacts(str(job_id), restore_dir)
+
+    assert restored["audio"].read_bytes() == b"durable-audio-checkpoint"
+    with get_db() as db:
+        artifact = db.execute(select(ProcessingArtifact)).scalar_one()
+        assert artifact.validated is True
+        assert len(artifact.sha256) == 64
+
+
+@patch("web.app.threading.Thread")
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+def test_failed_url_job_can_be_retried_from_durable_history(mock_auth_user, mock_app_user,
+                                                            mock_thread, client, test_users,
+                                                            tmp_path):
+    user_a_id, _ = test_users
+    job_id = uuid.uuid4()
+    with get_db() as db:
+        user = db.get(User, user_a_id)
+        db.add(ProcessingJob(
+            id=job_id,
+            user_id=user_a_id,
+            slug="2026-08-02",
+            source_url="https://example.com/episode.mp3",
+            level="advanced",
+            status="failed",
+            retry_from="translation",
+            attempt_count=1,
+            total_steps=6,
+            meta_json={"title": "Retry me"},
+        ))
+    mock_auth_user.return_value = user
+    mock_app_user.return_value = user
+
+    with patch("web.app.EPISODES_DIR", tmp_path):
+        response = client.post(f"/api/job/{job_id}/retry")
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "retrying"
+    mock_thread.return_value.start.assert_called_once()
+    with get_db() as db:
+        job = db.get(ProcessingJob, job_id)
+        assert job.status == "retrying"
+        assert job.error_message == ""
 
 @patch("web.app.get_current_user")
 @patch("web.auth.get_current_user")

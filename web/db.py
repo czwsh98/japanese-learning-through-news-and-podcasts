@@ -20,7 +20,7 @@ import logging
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Generator
 
 from sqlalchemy import (
@@ -31,6 +31,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -76,6 +77,7 @@ class User(Base):
     transcription_usage  = relationship("TranscriptionUsage", back_populates="user",  cascade="all, delete-orphan")
     recommendation_dismissals = relationship("RecommendationDismissal", back_populates="user", cascade="all, delete-orphan")
     playback_progress     = relationship("PlaybackProgress", back_populates="user", cascade="all, delete-orphan")
+    processing_jobs       = relationship("ProcessingJob", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserSession(Base):
@@ -145,6 +147,7 @@ class Episode(Base):
     owner               = relationship("User",               back_populates="episodes")
     transcription_usage = relationship("TranscriptionUsage", back_populates="episode")
     vocab_occurrences   = relationship("VocabOccurrence",    back_populates="episode", passive_deletes=True)
+    processing_jobs     = relationship("ProcessingJob",      back_populates="episode", passive_deletes=True)
 
 
 class VocabItem(Base):
@@ -272,6 +275,62 @@ class TranscriptionUsage(Base):
     episode = relationship("Episode", back_populates="transcription_usage")
 
 
+class ProcessingJob(Base):
+    """Durable pipeline state; the in-memory job map is only a live cache."""
+    __tablename__ = "processing_jobs"
+
+    id               = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id          = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    episode_id       = Column(UUID(as_uuid=True), ForeignKey("episodes.id", ondelete="SET NULL"), nullable=True)
+    usage_id         = Column(UUID(as_uuid=True), ForeignKey("transcription_usage.id", ondelete="SET NULL"), nullable=True)
+    slug             = Column(Text, nullable=False)
+    source_url       = Column(Text, nullable=False, server_default="")
+    source_token     = Column(Text, nullable=True)
+    level            = Column(Text, nullable=False, server_default="advanced")
+    status           = Column(String(20), nullable=False, server_default="queued")
+    current_step     = Column(Text, nullable=False, server_default="Starting…")
+    step_num         = Column(Integer, nullable=False, server_default="0")
+    total_steps      = Column(Integer, nullable=False, server_default="6")
+    error_code       = Column(String(64), nullable=False, server_default="")
+    error_message    = Column(Text, nullable=False, server_default="")
+    retry_from       = Column(String(32), nullable=False, server_default="download")
+    attempt_count    = Column(Integer, nullable=False, server_default="0")
+    unlimited        = Column(Boolean, nullable=False, default=False, server_default="false")
+    clone_from_id    = Column(UUID(as_uuid=True), nullable=True)
+    meta_json        = Column(JSON, nullable=False, default=dict)
+    artifact_prefix  = Column(Text, nullable=False, server_default="")
+    artifacts_expire_at = Column(DateTime(timezone=True), nullable=True)
+    created_at       = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    started_at       = Column(DateTime(timezone=True), nullable=True)
+    updated_at       = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    finished_at      = Column(DateTime(timezone=True), nullable=True)
+
+    user      = relationship("User", back_populates="processing_jobs")
+    episode   = relationship("Episode", back_populates="processing_jobs")
+    artifacts = relationship("ProcessingArtifact", back_populates="job", cascade="all, delete-orphan")
+
+
+class ProcessingArtifact(Base):
+    """Validated checkpoint object for one completed pipeline stage."""
+    __tablename__ = "processing_artifacts"
+
+    id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id         = Column(UUID(as_uuid=True), ForeignKey("processing_jobs.id", ondelete="CASCADE"), nullable=False)
+    stage          = Column(String(32), nullable=False)
+    object_key     = Column(Text, nullable=False)
+    filename       = Column(Text, nullable=False)
+    size_bytes     = Column(BigInteger, nullable=False)
+    sha256         = Column(String(64), nullable=False)
+    schema_version = Column(Integer, nullable=False, server_default="1")
+    validated      = Column(Boolean, nullable=False, default=True, server_default="true")
+    created_at     = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "stage", name="uq_processing_artifact_job_stage"),
+    )
+    job = relationship("ProcessingJob", back_populates="artifacts")
+
+
 class RecommendationDismissal(Base):
     """Permanent per-user dismissal of one curated catalog candidate."""
     __tablename__ = "recommendation_dismissals"
@@ -358,6 +417,12 @@ def init_db() -> bool:
                 "WHERE completed_at IS NOT NULL AND delete_after IS NULL "
                 "AND retention_exempt = FALSE AND deleted_at IS NULL;"
             ))
+            if _engine.dialect.name == "postgresql":
+                conn.execute(sa_text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_processing_job_source "
+                    "ON processing_jobs (user_id, source_token) "
+                    "WHERE source_token IS NOT NULL AND status IN ('queued', 'running', 'retrying');"
+                ))
         log.info("Database migration: episode source/resume/completion columns ensured")
     except Exception as e:
         log.warning(f"Could not ensure episode migration columns: {e}")
@@ -389,6 +454,34 @@ def init_db() -> bool:
             log.info("Database migration: backfilled %d vocab occurrences", len(legacy_items))
     except Exception as e:
         log.warning(f"Could not backfill vocab occurrences: {e}")
+    # A process restart terminates all background pipeline threads. Persist
+    # that fact instead of leaving browsers polling a permanently "running"
+    # job. The production container intentionally uses one Gunicorn worker;
+    # a future external worker queue should replace this reconciliation.
+    try:
+        with _SessionFactory() as session:
+            interrupted_jobs = session.query(ProcessingJob).filter(
+                ProcessingJob.status.in_(["queued", "running", "retrying"])
+            ).all()
+            stage_order = ["audio", "transcription", "translation", "analysis"]
+            retry_after = {"audio": "transcription", "transcription": "translation",
+                           "translation": "analysis", "analysis": "write"}
+            now = datetime.now(timezone.utc)
+            for job in interrupted_jobs:
+                stages = {artifact.stage for artifact in job.artifacts if artifact.validated}
+                highest = next((stage for stage in reversed(stage_order) if stage in stages), None)
+                job.status = "failed"
+                job.current_step = "Interrupted by server restart"
+                job.error_code = "worker_interrupted"
+                job.error_message = "Processing was interrupted by a server restart. Your validated checkpoints can be retried."
+                job.retry_from = retry_after.get(highest, "download")
+                job.finished_at = now
+                job.artifacts_expire_at = now + timedelta(days=7)
+            session.commit()
+        if interrupted_jobs:
+            log.warning("Database recovery: marked %d interrupted processing jobs failed", len(interrupted_jobs))
+    except Exception as e:
+        log.warning(f"Could not reconcile interrupted processing jobs: {e}")
     log.info("Database connected — all tables ensured")
     return True
 

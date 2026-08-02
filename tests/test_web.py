@@ -61,6 +61,15 @@ def test_review_page_has_mobile_safe_rating_controls(client):
     assert 'id="tab-vocab"' in body
     assert 'mobile-nav-active' in body
 
+
+def test_activity_page_uses_upload_mobile_tab(client):
+    body = client.get("/activity").get_data(as_text=True)
+
+    assert '<title>Processing Activity — Mimichan</title>' in body
+    assert 'id="activity-list"' in body
+    assert 'id="tab-upload"' in body
+    assert 'mobile-nav-active' in body
+
 def test_subscriptions_add(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": []}))
