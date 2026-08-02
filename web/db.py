@@ -144,6 +144,7 @@ class Episode(Base):
 
     owner               = relationship("User",               back_populates="episodes")
     transcription_usage = relationship("TranscriptionUsage", back_populates="episode")
+    vocab_occurrences   = relationship("VocabOccurrence",    back_populates="episode", passive_deletes=True)
 
 
 class VocabItem(Base):
@@ -172,7 +173,49 @@ class VocabItem(Base):
         UniqueConstraint("user_id", "word", name="uq_vocab_user_word"),
     )
 
-    user = relationship("User", back_populates="vocab")
+    user        = relationship("User", back_populates="vocab")
+    occurrences = relationship(
+        "VocabOccurrence",
+        back_populates="vocab_item",
+        cascade="all, delete-orphan",
+        order_by="VocabOccurrence.saved_at.desc()",
+    )
+
+
+class VocabOccurrence(Base):
+    """One contextual encounter with a saved vocabulary item.
+
+    Episode references may be cleared by retention, while immutable snapshots
+    keep the learning context useful after the source episode is purged.
+    """
+    __tablename__ = "vocab_occurrences"
+
+    id                     = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    vocab_item_id          = Column(UUID(as_uuid=True), ForeignKey("vocab.id", ondelete="CASCADE"), nullable=False)
+    episode_id             = Column(UUID(as_uuid=True), ForeignKey("episodes.id", ondelete="SET NULL"), nullable=True)
+    episode_slug_snapshot  = Column(Text, nullable=False, server_default="")
+    episode_title_snapshot = Column(Text, nullable=False, server_default="")
+    segment_index          = Column(Integer, nullable=True)
+    start_time             = Column(Float, nullable=True)
+    end_time               = Column(Float, nullable=True)
+    source_text            = Column(Text, nullable=False, server_default="")
+    source_en              = Column(Text, nullable=False, server_default="")
+    source_zh              = Column(Text, nullable=False, server_default="")
+    clip_key               = Column(Text, nullable=False, server_default="")
+    saved_at               = Column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "vocab_item_id", "episode_id", "start_time",
+            name="uq_vocab_occurrence_item_episode_time",
+        ),
+    )
+
+    vocab_item = relationship("VocabItem", back_populates="occurrences")
+    episode    = relationship("Episode", back_populates="vocab_occurrences")
 
 
 class TranscriptionUsage(Base):
@@ -286,6 +329,34 @@ def init_db() -> bool:
         log.info("Database migration: episode source/resume/completion columns ensured")
     except Exception as e:
         log.warning(f"Could not ensure episode migration columns: {e}")
+    # Backfill the legacy single source_episode value into the normalized
+    # occurrence table. This is deliberately ORM-based so it works in local
+    # SQLite tests as well as production Postgres.
+    try:
+        with _SessionFactory() as session:
+            existing_ids = set(session.query(VocabOccurrence.vocab_item_id).all())
+            existing_ids = {row[0] for row in existing_ids}
+            legacy_items = session.query(VocabItem).filter(
+                VocabItem.source_episode != "",
+                ~VocabItem.id.in_(existing_ids) if existing_ids else True,
+            ).all()
+            for item in legacy_items:
+                episode = session.query(Episode).filter(
+                    Episode.owner_user_id == item.user_id,
+                    Episode.slug == item.source_episode,
+                ).one_or_none()
+                session.add(VocabOccurrence(
+                    vocab_item_id=item.id,
+                    episode_id=episode.id if episode else None,
+                    episode_slug_snapshot=item.source_episode,
+                    episode_title_snapshot=episode.title if episode else "",
+                    source_text=item.example,
+                ))
+            session.commit()
+        if legacy_items:
+            log.info("Database migration: backfilled %d vocab occurrences", len(legacy_items))
+    except Exception as e:
+        log.warning(f"Could not backfill vocab occurrences: {e}")
     log.info("Database connected — all tables ensured")
     return True
 

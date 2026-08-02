@@ -61,6 +61,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const RESUME_END_MARGIN  = 15;  // within 15s of the end counts as "finished"
   const RESUME_SAVE_EVERY  = 5000; // ms between periodic saves
   const PLAYBACK_REPORT_EVERY = 30000;
+  const requestedTimeParam = new URLSearchParams(window.location.search).get("t");
+  const requestedTime = requestedTimeParam === null ? null : Number(requestedTimeParam);
   let resumeApplied  = false;
   // Start the throttle window at load time (not 0) so the first periodic tick
   // doesn't fire immediately — that race can capture a stale/zero position
@@ -254,6 +256,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   // resumed near the very end (treat as finished, don't loop back to the tail).
   function maybeApplyResume(duration, seekFn, serverResume) {
     if (resumeApplied) return;
+    if (Number.isFinite(requestedTime) && requestedTime >= 0) {
+      resumeApplied = true;
+      const target = duration > 0 ? Math.min(requestedTime, Math.max(0, duration - 0.1)) : requestedTime;
+      seekFn(target);
+      showPlayerToast(`Opened source at ${formatResumeTime(target)}`);
+      return;
+    }
     if (serverResume?.completed) {
       try { localStorage.removeItem(RESUME_KEY); } catch {}
       resumeApplied = true;
@@ -356,17 +365,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Vocab Storage Integration ───────────────────────────────────────────
 
-  async function handleSaveVocab(e) {
-    const btn = e.target.closest(".btn-anki");
-    if (!btn) return;
-    e.stopPropagation();
-    
-    const cardData = JSON.parse(btn.dataset.card);
+  function addSourceContext(cardData, origin) {
     cardData.source_episode = dateStr;
-    
+    const segmentEl = origin?.closest?.("[data-start]");
+    if (!segmentEl) return cardData;
+    const idMatch = (segmentEl.id || "").match(/(?:modal-)?seg-(\d+)/);
+    const segmentIndex = idMatch ? Number(idMatch[1]) : null;
+    const segment = Number.isInteger(segmentIndex) ? segments[segmentIndex] : null;
+    cardData.source_segment_index = segmentIndex;
+    cardData.source_start = Number(segmentEl.dataset.start);
+    cardData.source_end = Number(segmentEl.dataset.end);
+    cardData.source_text = segment?.ja || segmentEl.querySelector(".segment-ja, .modal-seg-ja")?.innerText || "";
+    cardData.source_en = segment?.en || "";
+    cardData.source_zh = segment?.zh || "";
+    if (!cardData.example) cardData.example = cardData.source_text;
+    return cardData;
+  }
+
+  async function saveVocabButton(btn, origin) {
+    const cardData = addSourceContext(JSON.parse(btn.dataset.card), origin || btn);
+    const compactButton = btn.classList.contains("btn-tooltip-save");
     const originalHTML = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+    btn.innerHTML = compactButton ? "Saving…" : '<svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
 
     try {
       const resp = await fetch("/api/vocab", {
@@ -375,21 +396,30 @@ document.addEventListener("DOMContentLoaded", async () => {
         body: JSON.stringify(cardData)
       });
       const result = await resp.json();
-      
-      if (result.status === "exists") {
-        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>';
-        btn.title = "Already saved";
+      if (!resp.ok) throw new Error(result.error || `HTTP ${resp.status}`);
+      savedWords.add(cardData.front);
+      if (compactButton) {
+        btn.textContent = result.status === "exists" ? "✓ Context saved" : "✓ Saved";
+        btn.classList.add("saved");
       } else {
-        savedWords.add(cardData.front);  // keep in-session state in sync
         btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-        btn.title = "Saved!";
+        btn.title = result.status === "occurrence_added" ? "Context saved" : "Saved";
       }
+      showToast(result.status === "occurrence_added" ? "Saved another source context" : "Saved to vocab", "success");
     } catch (err) {
       console.error(err);
       showToast("Error saving to vocab: " + err.message);
       btn.innerHTML = originalHTML;
       btn.disabled = false;
     }
+  }
+
+  async function handleSaveVocab(e) {
+    const btn = e.target.closest(".btn-anki, .btn-tooltip-save");
+    if (!btn) return;
+    e.stopPropagation();
+    const origin = btn.classList.contains("btn-tooltip-save") ? tooltip._sourceSpan : btn;
+    await saveVocabButton(btn, origin);
   }
 
   // ── Helpers (Hoisted or defined before use) ────────────────────────────────
@@ -1348,9 +1378,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Tooltips & Modals ─────────────────────────────────────────────────────
 
-  function showTooltip(hl, x, y) {
+  function showTooltip(hl, x, y, sourceSpan) {
     const lvl = (hl.level || "").toLowerCase();
-    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">【${esc(hl.reading)}】</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(hl.en)}</div><div class="tt-zh">${esc(hl.zh)}</div>`;
+    const card = {
+      type: hl.type || "vocab",
+      front: hl.word,
+      reading: hl.reading || "",
+      en: hl.en || hl.meaning_en || "",
+      zh: hl.zh || hl.meaning_zh || "",
+      example: "",
+      level: hl.level || "",
+    };
+    const cardJson = JSON.stringify(card).replace(/'/g, "&#39;");
+    const saveLabel = savedWords.has(hl.word) ? "＋ Save this context" : "＋ Save";
+    tooltip.innerHTML = `<div><span class="tt-word">${esc(hl.word)}</span><span class="tt-reading">${hl.reading ? `【${esc(hl.reading)}】` : ""}</span><span class="tt-badge tt-badge-${lvl}">${esc(hl.level)}</span></div><div class="tt-register">${esc(hl.register)}</div><div class="tt-en">${esc(card.en)}</div><div class="tt-zh">${esc(card.zh)}</div><button type="button" class="btn-tooltip-save" data-card='${cardJson}'>${saveLabel}</button>`;
+    tooltip._sourceSpan = sourceSpan;
     tooltip.style.left = x + "px"; tooltip.style.top = y + "px"; tooltip.classList.remove("hidden");
   }
 
@@ -1364,7 +1406,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const db = document.getElementById("drawer-trigger-bar");
       const dbRect = db ? db.getBoundingClientRect() : null;
       const bc = (dbRect && dbRect.height > 0) ? (window.innerHeight - dbRect.top + 8) : 0;
-      showTooltip(hl, Math.max(8, Math.min(rect.left, window.innerWidth - 268)), Math.min(rect.bottom + 8, window.innerHeight - 160 - bc));
+      showTooltip(hl, Math.max(8, Math.min(rect.left, window.innerWidth - 288)), Math.min(rect.bottom + 8, window.innerHeight - 210 - bc), span);
       activeSpan = span;
     });
   }
@@ -1375,20 +1417,29 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.addEventListener("mouseover", e => {
       const span = e.target.closest("[data-hl]");
       if (span && span !== hoveredSpan) {
-        showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14);
+        showTooltip(JSON.parse(span.dataset.hl), e.clientX + 14, e.clientY + 14, span);
         hoveredSpan = span;
       }
     });
     document.addEventListener("mouseout", e => {
       const to = e.relatedTarget;
-      if (!to || !to.closest?.("[data-hl]")) {
+      if ((!to || !to.closest?.("[data-hl]")) && !to?.closest?.("#tooltip")) {
         tooltip.classList.add("hidden");
         hoveredSpan = null;
       }
     });
   }
 
-  tooltip.addEventListener("click", () => tooltip.classList.add("hidden"));
+  tooltip.addEventListener("click", e => {
+    if (e.target.closest(".btn-tooltip-save")) {
+      handleSaveVocab(e);
+      return;
+    }
+    tooltip.classList.add("hidden");
+  });
+  tooltip.addEventListener("mouseleave", () => {
+    if (!isTouch) tooltip.classList.add("hidden");
+  });
 
   const transcriptModal = document.getElementById("transcript-modal");
   const modalClose = document.getElementById("modal-close");

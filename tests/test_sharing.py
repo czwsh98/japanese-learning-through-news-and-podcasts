@@ -22,7 +22,7 @@ dotenv.load_dotenv = lambda *args, **kwargs: None
 from web.app import app, _get_source_token, _pipeline_thread, _jobs, _jobs_lock
 from web.db import (
     get_db, User, Episode, PlaybackProgress, RecommendationDismissal,
-    TranscriptionUsage,
+    TranscriptionUsage, VocabItem, VocabOccurrence,
 )
 
 @pytest.fixture(autouse=True)
@@ -146,6 +146,55 @@ def test_playback_progress_keeps_high_water_mark_and_completion(mock_auth_user, 
         )).scalar_one()
     assert row.percent == 100
     assert row.finished is True
+
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+def test_vocab_keeps_multiple_exact_source_occurrences(mock_auth_user, mock_app_user,
+                                                        client, test_users):
+    user_a_id, _ = test_users
+    with get_db() as db:
+        user = db.get(User, user_a_id)
+        db.add(Episode(
+            owner_user_id=user_a_id,
+            slug="2026-08-02",
+            date="2026-08-02",
+            title="Source title from the server",
+            r2_prefix="episodes/test/",
+        ))
+    mock_auth_user.return_value = user
+    mock_app_user.return_value = user
+
+    payload = {
+        "front": "経済",
+        "reading": "けいざい",
+        "en": "economy",
+        "type": "vocab",
+        "source_episode": "2026-08-02",
+        "source_segment_index": 3,
+        "source_start": 42.5,
+        "source_end": 48.0,
+        "source_text": "日本の経済について話します。",
+        "source_en": "We will discuss Japan's economy.",
+    }
+    first = client.post("/api/vocab", json=payload)
+    duplicate = client.post("/api/vocab", json=payload)
+    second_context = client.post("/api/vocab", json={**payload, "source_start": 90.0})
+
+    assert first.status_code == 201
+    assert first.get_json()["status"] == "success"
+    assert duplicate.get_json()["status"] == "exists"
+    assert second_context.get_json()["status"] == "occurrence_added"
+
+    items = client.get("/api/vocab").get_json()
+    assert len(items) == 1
+    assert len(items[0]["occurrences"]) == 2
+    assert items[0]["occurrences"][0]["episode_title"] == "Source title from the server"
+    assert {o["start_time"] for o in items[0]["occurrences"]} == {42.5, 90.0}
+
+    with get_db() as db:
+        assert len(db.execute(select(VocabItem)).scalars().all()) == 1
+        assert len(db.execute(select(VocabOccurrence)).scalars().all()) == 2
 
 @patch("web.app.get_current_user")
 @patch("web.auth.get_current_user")

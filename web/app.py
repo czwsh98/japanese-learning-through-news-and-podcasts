@@ -73,7 +73,7 @@ from web.auth import (
 )
 from web.db import (
     Episode, PlaybackProgress, RecommendationDismissal, TranscriptionUsage,
-    VocabItem, db_available, get_db, init_db,
+    VocabItem, VocabOccurrence, db_available, get_db, init_db,
 )
 from web.recommendations import load_catalog, normalize_url, rank_recommendations
 from sqlalchemy import func, select, text as sa_text, update
@@ -1693,7 +1693,24 @@ def vocab_page():
     return render_template("vocab.html")
 
 
-def _vocab_item_to_dict(row: VocabItem) -> dict:
+def _vocab_occurrence_to_dict(row: VocabOccurrence) -> dict:
+    return {
+        "id":                     str(row.id),
+        "episode_slug":           row.episode_slug_snapshot,
+        "episode_title":          row.episode_title_snapshot,
+        "segment_index":          row.segment_index,
+        "start_time":             row.start_time,
+        "end_time":               row.end_time,
+        "source_text":            row.source_text,
+        "source_en":              row.source_en,
+        "source_zh":              row.source_zh,
+        "clip_available":         bool(row.clip_key),
+        "source_episode_available": row.episode_id is not None,
+        "saved_at": row.saved_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.saved_at else "",
+    }
+
+
+def _vocab_item_to_dict(row: VocabItem, occurrences: list[VocabOccurrence] | None = None) -> dict:
     """Serialize a VocabItem ORM row to the same dict shape the frontend expects."""
     return {
         "id":             str(row.id),
@@ -1706,7 +1723,24 @@ def _vocab_item_to_dict(row: VocabItem) -> dict:
         "type":           row.type,
         "source_episode": row.source_episode,
         "saved_at":       row.saved_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.saved_at else "",
+        "occurrences":     [_vocab_occurrence_to_dict(o) for o in (occurrences or [])],
     }
+
+
+def _context_number(value, *, integer: bool = False):
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value) if integer else float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
+
+
+def _context_text(value, limit: int = 4000) -> str:
+    return str(value or "").strip()[:limit]
 
 
 @app.route("/api/vocab", methods=["GET"])
@@ -1728,7 +1762,16 @@ def api_vocab_get():
             if vtype and vtype != "all":
                 stmt = stmt.where(VocabItem.type == vtype)
             rows = db.execute(stmt).scalars().all()
-        items = [_vocab_item_to_dict(r) for r in rows]
+            occurrences_by_item: dict[uuid.UUID, list[VocabOccurrence]] = {}
+            if rows:
+                occurrences = db.execute(
+                    select(VocabOccurrence)
+                    .where(VocabOccurrence.vocab_item_id.in_([r.id for r in rows]))
+                    .order_by(VocabOccurrence.saved_at.desc())
+                ).scalars().all()
+                for occurrence in occurrences:
+                    occurrences_by_item.setdefault(occurrence.vocab_item_id, []).append(occurrence)
+        items = [_vocab_item_to_dict(r, occurrences_by_item.get(r.id, [])) for r in rows]
         if q:
             items = [i for i in items if
                      q in i["word"].lower() or q in i["reading"].lower() or
@@ -1769,30 +1812,95 @@ def api_vocab_add():
                     VocabItem.word    == word,
                 )
             ).scalar_one_or_none()
-            if existing:
-                return jsonify({"status": "exists", "id": str(existing.id)}), 200
-
-            row = VocabItem(
+            created = existing is None
+            row = existing or VocabItem(
                 user_id        = user.id,
                 word           = word,
-                reading        = new_item.get("reading", ""),
-                en             = new_item.get("en", ""),
-                zh             = new_item.get("zh", ""),
-                example        = new_item.get("example", ""),
-                level          = new_item.get("level", ""),
-                type           = new_item.get("type", "vocab"),
-                source_episode = new_item.get("source_episode", ""),
+                reading        = _context_text(new_item.get("reading"), 500),
+                en             = _context_text(new_item.get("en"), 2000),
+                zh             = _context_text(new_item.get("zh"), 2000),
+                example        = _context_text(new_item.get("example")),
+                level          = _context_text(new_item.get("level"), 100),
+                type           = _context_text(new_item.get("type", "vocab"), 100),
+                source_episode = _context_text(new_item.get("source_episode"), 100),
             )
-            db.add(row)
-        return jsonify({"status": "success", "id": str(row.id)}), 201
+            if created:
+                db.add(row)
+                db.flush()
+
+            occurrence_added = False
+            source_slug = _context_text(new_item.get("source_episode"), 100)
+            if source_slug and _SLUG_RE.match(source_slug):
+                episode = db.execute(
+                    select(Episode).where(
+                        Episode.owner_user_id == user.id,
+                        Episode.slug == source_slug,
+                    )
+                ).scalar_one_or_none()
+                if episode:
+                    start_time = _context_number(new_item.get("source_start"))
+                    occurrence_stmt = select(VocabOccurrence).where(
+                        VocabOccurrence.vocab_item_id == row.id,
+                        VocabOccurrence.episode_id == episode.id,
+                    )
+                    if start_time is not None:
+                        occurrence_stmt = occurrence_stmt.where(VocabOccurrence.start_time == start_time)
+                    else:
+                        occurrence_stmt = occurrence_stmt.where(
+                            VocabOccurrence.segment_index == _context_number(
+                                new_item.get("source_segment_index"), integer=True
+                            )
+                        )
+                    occurrence = db.execute(occurrence_stmt).scalar_one_or_none()
+                    if occurrence is None:
+                        db.add(VocabOccurrence(
+                            vocab_item_id=row.id,
+                            episode_id=episode.id,
+                            episode_slug_snapshot=episode.slug,
+                            episode_title_snapshot=episode.title,
+                            segment_index=_context_number(new_item.get("source_segment_index"), integer=True),
+                            start_time=start_time,
+                            end_time=_context_number(new_item.get("source_end")),
+                            source_text=_context_text(new_item.get("source_text") or new_item.get("example")),
+                            source_en=_context_text(new_item.get("source_en"), 4000),
+                            source_zh=_context_text(new_item.get("source_zh"), 4000),
+                        ))
+                        occurrence_added = True
+
+            status = "success" if created else ("occurrence_added" if occurrence_added else "exists")
+            response_id = str(row.id)
+        return jsonify({"status": status, "id": response_id}), 201 if created else 200
 
     # ── File fallback ─────────────────────────────────────────────────────────
     with _vocab_lock:
         data = json.loads(VOCAB_FILE.read_text(encoding="utf-8")) if VOCAB_FILE.exists() else {"items": []}
         items = data.get("items", [])
 
-        if any(i.get("word") == word for i in items):
-            return jsonify({"status": "exists"}), 200
+        existing = next((i for i in items if i.get("word") == word), None)
+        if existing:
+            occurrences = existing.setdefault("occurrences", [])
+            source_start = _context_number(new_item.get("source_start"))
+            duplicate = any(
+                o.get("episode_slug") == new_item.get("source_episode")
+                and o.get("start_time") == source_start
+                for o in occurrences
+            )
+            if not duplicate and new_item.get("source_episode"):
+                occurrences.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "episode_slug": new_item.get("source_episode", ""),
+                    "episode_title": "",
+                    "segment_index": _context_number(new_item.get("source_segment_index"), integer=True),
+                    "start_time": source_start,
+                    "end_time": _context_number(new_item.get("source_end")),
+                    "source_text": _context_text(new_item.get("source_text") or new_item.get("example")),
+                    "source_en": _context_text(new_item.get("source_en")),
+                    "source_zh": _context_text(new_item.get("source_zh")),
+                    "source_episode_available": True,
+                })
+                VOCAB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                return jsonify({"status": "occurrence_added", "id": existing.get("id")}), 200
+            return jsonify({"status": "exists", "id": existing.get("id")}), 200
 
         item = {
             "id": str(uuid.uuid4())[:8],
@@ -1805,6 +1913,18 @@ def api_vocab_add():
             "type": new_item.get("type", ""),
             "source_episode": new_item.get("source_episode", ""),
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "occurrences": [{
+                "id": str(uuid.uuid4())[:8],
+                "episode_slug": new_item.get("source_episode", ""),
+                "episode_title": "",
+                "segment_index": _context_number(new_item.get("source_segment_index"), integer=True),
+                "start_time": _context_number(new_item.get("source_start")),
+                "end_time": _context_number(new_item.get("source_end")),
+                "source_text": _context_text(new_item.get("source_text") or new_item.get("example")),
+                "source_en": _context_text(new_item.get("source_en")),
+                "source_zh": _context_text(new_item.get("source_zh")),
+                "source_episode_available": True,
+            }] if new_item.get("source_episode") else [],
         }
         items.append(item)
         data["items"] = items

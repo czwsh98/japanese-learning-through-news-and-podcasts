@@ -223,6 +223,22 @@ nav {
 .tt-register { font-size: 11px; color: #6b7280; margin-top: 1px; margin-bottom: 5px; }
 .tt-en  { color: #93c5fd; font-size: 13px; }
 .tt-zh  { color: #6ee7b7; font-size: 13px; }
+.btn-tooltip-save {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 9px;
+  border: 1px solid #1d4ed8;
+  border-radius: 8px;
+  background: rgba(30, 64, 175, 0.28);
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.btn-tooltip-save:hover { background: rgba(37, 99, 235, 0.42); border-color: #3b82f6; }
+.btn-tooltip-save.saved { color: #86efac; border-color: #166534; background: rgba(20, 83, 45, 0.3); }
+.btn-tooltip-save:disabled { cursor: default; }
 
 /* ── Transcript segments ─────────────────────────────────────────────────── */
 
