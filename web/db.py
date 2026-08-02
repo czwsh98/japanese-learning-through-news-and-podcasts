@@ -28,6 +28,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -119,6 +120,17 @@ class Episode(Base):
     r2_prefix      = Column(Text, nullable=False, server_default="")
     # Unique token to identify duplicate YouTube / podcast URL transcribing
     source_token   = Column(Text, nullable=True, index=True)
+    # Cross-device playback resume position (seconds). resume_updated_at lets
+    # the client reconcile against its own localStorage copy by recency.
+    resume_position   = Column(Float, nullable=True)
+    resume_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # max_position is the playback high-water mark; completed_at preserves the
+    # fact of completion even after the current resume point changes.
+    max_position      = Column(Float, nullable=True)
+    completed_at      = Column(DateTime(timezone=True), nullable=True)
+    retention_exempt  = Column(Boolean, nullable=False, server_default="false")
+    delete_after      = Column(DateTime(timezone=True), nullable=True)
+    deleted_at        = Column(DateTime(timezone=True), nullable=True)
     created_at     = Column(
         DateTime(timezone=True), nullable=False,
         default=lambda: datetime.now(timezone.utc),
@@ -222,9 +234,21 @@ def init_db() -> bool:
         from sqlalchemy import text as sa_text
         with _engine.begin() as conn:
             conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS source_token TEXT;"))
-        log.info("Database migration: source_token column ensured on episodes table")
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS resume_position DOUBLE PRECISION;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS resume_updated_at TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS max_position DOUBLE PRECISION;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS retention_exempt BOOLEAN NOT NULL DEFAULT FALSE;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS delete_after TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;"))
+            conn.execute(sa_text(
+                "UPDATE episodes SET delete_after = completed_at + INTERVAL '30 days' "
+                "WHERE completed_at IS NOT NULL AND delete_after IS NULL "
+                "AND retention_exempt = FALSE AND deleted_at IS NULL;"
+            ))
+        log.info("Database migration: episode source/resume/completion columns ensured")
     except Exception as e:
-        log.warning(f"Could not check/add source_token column in database: {e}")
+        log.warning(f"Could not ensure episode migration columns: {e}")
     log.info("Database connected — all tables ensured")
     return True
 

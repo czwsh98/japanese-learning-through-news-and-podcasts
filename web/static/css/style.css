@@ -137,12 +137,12 @@ nav {
   grid-template-columns: 52px 1fr;
   column-gap: 6px;
   align-items: start;
-  padding: 12px 16px;
+  padding: 6px 12px;
   border-left: 3px solid transparent;
   border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.12s, border-color 0.12s;
-  margin-bottom: 8px;
+  margin-bottom: 2px;
 }
 .segment:hover { background-color: #161f2e; }
 
@@ -152,6 +152,15 @@ nav {
   box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.10);
 }
 
+/* Loop-armed line: distinct from segment-active (amber vs blue) so both
+   states are readable together (looping while it's also the playing line). */
+.segment-looping,
+.modal-seg-looping {
+  border-left-color: #d97706 !important;
+  box-shadow: inset 0 0 0 1px rgba(217, 119, 6, 0.25);
+}
+.btn-loop.loop-active { color: #d97706 !important; }
+
 .segment-time {
   font-size: 10px;
   color: #4b5563;
@@ -159,6 +168,12 @@ nav {
   padding-top: 4px;
   user-select: none;
   line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.segment:hover .segment-time,
+.segment-active .segment-time {
+  opacity: 1;
 }
 
 .segment-body {
@@ -181,8 +196,14 @@ nav {
   gap: 5px;
 }
 .translation-en { color: #60a5fa; }
-.translation-zh { color: #4ade80; font-weight: 500; font-size: 13px; }
-.translation-zh .trans-tag { color: #4ade80; background: rgba(74,222,128,0.14); }
+.translation-zh { color: #7dd3a8; font-weight: 500; font-size: 15px; }
+.translation-zh .trans-tag { color: #7dd3a8; background: rgba(125,211,168,0.14); }
+
+/* When only one translation is showing, its tag pill is redundant noise. */
+.segment-body:not(:has(.translation-en:not(.hidden))) .translation-zh .trans-tag,
+.segment-body:not(:has(.translation-zh:not(.hidden))) .translation-en .trans-tag {
+  display: none;
+}
 
 .trans-tag {
   font-size: 0.65rem;
@@ -217,6 +238,29 @@ nav {
   color: #93c5fd;
   box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3), 0 0 10px rgba(59, 130, 246, 0.12);
 }
+
+/* ── Episode completion marker ───────────────────────────────────────────── */
+
+.completion-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.completion-marker:hover { background: #1f2937; color: #e5e7eb; }
+.completion-marker.completed {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.1);
+  color: #86efac;
+}
+.completion-marker:disabled { cursor: wait; opacity: 0.65; }
 
 /* ── Playback speed buttons ──────────────────────────────────────────────── */
 
@@ -625,7 +669,7 @@ nav {
 
   .segment {
     grid-template-columns: 1fr;
-    padding: 12px 10px;
+    padding: 8px 10px;
     /* Page-scroll auto-follow targets window scroll; keep the active line
        clear of the sticky nav + audio player (top) and the fixed drawer
        trigger bar (bottom) so it isn't hidden behind them. */

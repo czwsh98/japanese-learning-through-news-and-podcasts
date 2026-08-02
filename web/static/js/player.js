@@ -22,15 +22,26 @@ document.addEventListener("DOMContentLoaded", async () => {
   const jumpPill          = document.getElementById("jump-now-pill");
   const modalJumpPill     = document.getElementById("modal-jump-pill");
   const transcriptCard    = document.getElementById("transcript-card");
+  const completionBtn     = document.getElementById("btn-completion");
+  const retentionRow      = document.getElementById("completion-retention");
+  const retentionLabel    = document.getElementById("completion-retention-label");
+  const keepEpisodeBtn    = document.getElementById("btn-keep-episode");
 
   let segments   = [];
   let highlights = [];
   let currentIdx = -1;
+  let loopIdx    = -1;
   let showEn     = false;
-  let showZh     = false;
+  // Default ON (primary use case is JA+ZH); persisted value only overrides
+  // when the user has explicitly turned it off before.
+  let showZh     = localStorage.getItem('mimichan.showZh') !== 'false';
   let showFurigana = true;
   let sidebarCollapsed = localStorage.getItem('mimichan.sidebarCollapsed') === 'true';
   let ytPlayer   = null;
+  let completionState = false;
+  let autoCompletionSuppressed = false;
+  let retentionExempt = false;
+  let deleteAfter = null;
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
   let isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
@@ -39,8 +50,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Resume playback position ────────────────────────────────────────────
   // Position is keyed by episode + shared across audio/video toggle since
-  // both represent the same underlying timeline.
-  const RESUME_KEY        = `mimichan.resume.${dateStr}`;
+  // both represent the same underlying timeline. Persisted both locally
+  // (localStorage, instant, survives network blips) and server-side (DB row
+  // per user+episode, so it syncs across devices). On load the two are
+  // reconciled by recency (savedAt vs the server's updated_at) so whichever
+  // device paused most recently wins.
+  const RESUME_KEY         = `mimichan.resume.${dateStr}`;
+  const RESUME_API         = `/api/episode/${dateStr}/resume`;
   const RESUME_MIN_T       = 5;   // don't bother resuming inside the first 5s
   const RESUME_END_MARGIN  = 15;  // within 15s of the end counts as "finished"
   const RESUME_SAVE_EVERY  = 5000; // ms between periodic saves
@@ -50,30 +66,138 @@ document.addEventListener("DOMContentLoaded", async () => {
   // (e.g. YouTube's getCurrentTime() before a seekTo() has settled) and
   // clobber a resume point that was just restored.
   let lastResumeSave  = Date.now();
+  let lastServerSave  = 0; // ms epoch of the last successful server sync
 
-  function loadResumeT() {
+  function loadLocalResume() {
     try {
       const raw = localStorage.getItem(RESUME_KEY);
       if (!raw) return null;
-      const t = JSON.parse(raw).t;
-      return typeof t === "number" && t > 0 ? t : null;
+      const { t, savedAt } = JSON.parse(raw);
+      return typeof t === "number" && t > 0 ? { t, savedAt: savedAt || 0 } : null;
+    } catch { return null; }
+  }
+
+  function saveLocalResume(t) {
+    try {
+      if (!(t > RESUME_MIN_T)) { localStorage.removeItem(RESUME_KEY); return; }
+      localStorage.setItem(RESUME_KEY, JSON.stringify({ t, savedAt: Date.now() }));
+    } catch { /* localStorage unavailable (private mode, quota) — local cache just won't persist */ }
+  }
+
+  function syncResumeToServer(t, useBeacon, completed = null) {
+    try {
+      const payload = { t };
+      if (completed === true) payload.completed = true;
+      const body = JSON.stringify(payload);
+      if (useBeacon && navigator.sendBeacon) {
+        return navigator.sendBeacon(RESUME_API, new Blob([body], { type: "application/json" }));
+      } else {
+        return fetch(RESUME_API, { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: useBeacon });
+      }
     } catch { return null; }
   }
 
   function saveResumeT(t, force) {
+    if (completionState) return;
     if (!force) {
       const now = Date.now();
       if (now - lastResumeSave < RESUME_SAVE_EVERY) return;
       lastResumeSave = now;
     }
-    try {
-      if (!(t > RESUME_MIN_T)) { localStorage.removeItem(RESUME_KEY); return; }
-      localStorage.setItem(RESUME_KEY, JSON.stringify({ t, savedAt: Date.now() }));
-    } catch { /* localStorage unavailable (private mode, quota) — resume just won't persist */ }
+    saveLocalResume(t);
+    const now = Date.now();
+    if (force || now - lastServerSave >= RESUME_SAVE_EVERY) {
+      lastServerSave = now;
+      const request = syncResumeToServer(t, force);
+      request?.catch?.(() => {}); // local copy already has the position
+    }
   }
 
-  function clearResumeT() {
+  function markCompleted(t) {
+    if (completionState) return;
+    setCompletionUI(true);
     try { localStorage.removeItem(RESUME_KEY); } catch {}
+    const request = syncResumeToServer(t, false, true);
+    request?.then(async response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      applyCompletionData(await response.json());
+    }).catch(error => {
+      setCompletionUI(false);
+      autoCompletionSuppressed = true;
+      console.error("Automatic completion update failed:", error);
+    });
+  }
+
+  function setCompletionUI(completed) {
+    completionState = Boolean(completed);
+    if (!completionBtn) return;
+    completionBtn.classList.toggle("completed", completionState);
+    completionBtn.setAttribute("aria-pressed", completionState ? "true" : "false");
+    completionBtn.title = completionState
+      ? "Mark this episode as unfinished"
+      : "Mark this episode as finished";
+    const icon = completionBtn.querySelector(".completion-marker-icon");
+    const label = completionBtn.querySelector(".completion-marker-label");
+    if (icon) icon.textContent = completionState ? "✓" : "○";
+    if (label) label.textContent = completionState ? "Finished" : "Mark finished";
+    renderRetentionUI();
+  }
+
+  function applyCompletionData(data) {
+    setCompletionUI(Boolean(data?.completed));
+    retentionExempt = Boolean(data?.retention_exempt);
+    deleteAfter = data?.delete_after ? Date.parse(data.delete_after) : null;
+    renderRetentionUI();
+  }
+
+  function renderRetentionUI() {
+    if (!retentionRow || !retentionLabel || !keepEpisodeBtn) return;
+    if (!completionState) {
+      retentionRow.classList.add("hidden");
+      retentionRow.classList.remove("flex");
+      return;
+    }
+    retentionRow.classList.remove("hidden");
+    retentionRow.classList.add("flex");
+    if (retentionExempt) {
+      retentionLabel.textContent = "Kept indefinitely";
+      keepEpisodeBtn.textContent = "Use auto-delete";
+      return;
+    }
+    const days = deleteAfter ? Math.max(0, Math.ceil((deleteAfter - Date.now()) / 86400000)) : 30;
+    retentionLabel.textContent = days <= 7
+      ? `Deletes in ${days} day${days === 1 ? "" : "s"}`
+      : `Auto-deletes in ${days} days`;
+    keepEpisodeBtn.textContent = "Keep";
+  }
+
+  async function toggleRetention() {
+    if (!keepEpisodeBtn) return;
+    keepEpisodeBtn.disabled = true;
+    try {
+      const response = await fetch(`/api/episode/${dateStr}/retention`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keep: !retentionExempt }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      applyCompletionData(await response.json());
+      showPlayerToast(retentionExempt ? "Episode will be kept" : "30-day auto-delete enabled");
+    } catch (error) {
+      showPlayerToast("Could not update retention setting");
+      console.error("Retention update failed:", error);
+    } finally {
+      keepEpisodeBtn.disabled = false;
+    }
+  }
+
+  function maybeAutoComplete(t, duration) {
+    if (!(duration > 0)) return;
+    if (t / duration < 0.9) {
+      autoCompletionSuppressed = false;
+      return;
+    }
+    if (!completionState && !autoCompletionSuppressed) markCompleted(t);
   }
 
   function formatResumeTime(t) {
@@ -82,30 +206,94 @@ document.addEventListener("DOMContentLoaded", async () => {
     return `${m}:${String(s).padStart(2, "0")}`;
   }
 
-  function showResumeToast(t) {
+  function showPlayerToast(message) {
     const el = document.createElement("div");
     el.className = "fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-40 bg-gray-900/95 " +
       "border border-gray-700 text-gray-300 text-xs px-4 py-2 rounded-full shadow-lg " +
       "pointer-events-none transition-opacity duration-500";
-    el.textContent = `Resumed at ${formatResumeTime(t)}`;
+    el.textContent = message;
     document.body.appendChild(el);
     setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 500); }, 3000);
   }
 
+  function showResumeToast(t) { showPlayerToast(`Resumed at ${formatResumeTime(t)}`); }
+
+  // Reconcile local vs server resume points by recency, returning the winner
+  // (or null if neither has a usable position). Also refreshes the local
+  // cache when the server turns out to be the more recent copy.
+  function reconcileResume(serverResume) {
+    const local = loadLocalResume();
+    const server = (serverResume && typeof serverResume.t === "number" && serverResume.t > RESUME_MIN_T)
+      ? { t: serverResume.t, savedAt: serverResume.updated_at ? Date.parse(serverResume.updated_at) : 0 }
+      : null;
+    if (!local && !server) return null;
+    if (!local) { saveLocalResume(server.t); return server.t; }
+    if (!server) return local.t;
+    return server.savedAt > local.savedAt ? (saveLocalResume(server.t), server.t) : local.t;
+  }
+
   // Try to restore position once the given duration is known; skips episodes
   // resumed near the very end (treat as finished, don't loop back to the tail).
-  function maybeApplyResume(duration, seekFn) {
+  function maybeApplyResume(duration, seekFn, serverResume) {
     if (resumeApplied) return;
-    const t = loadResumeT();
+    if (serverResume?.completed) {
+      try { localStorage.removeItem(RESUME_KEY); } catch {}
+      resumeApplied = true;
+      return;
+    }
+    const t = reconcileResume(serverResume);
     if (t == null) { resumeApplied = true; return; }
     if (duration > 0 && t >= duration - RESUME_END_MARGIN) {
-      clearResumeT();
+      markCompleted(t);
       resumeApplied = true;
       return;
     }
     resumeApplied = true;
     seekFn(t);
     showResumeToast(t);
+  }
+
+  async function toggleCompletionManually() {
+    if (!completionBtn) return;
+    const previous = completionState;
+    const completed = !previous;
+    const t = useYoutube
+      ? (ytPlayer?.getCurrentTime?.() || 0)
+      : (audio?.currentTime || 0);
+    completionBtn.disabled = true;
+    setCompletionUI(completed);
+    if (completed) {
+      try { localStorage.removeItem(RESUME_KEY); } catch {}
+    } else {
+      // Reset progress to 0 rather than keeping the current (often near-end)
+      // playhead: leaving resume_position near the end meant the very next
+      // load's maybeApplyResume() saw t within RESUME_END_MARGIN of the end
+      // and immediately re-called markCompleted(), silently undoing this.
+      autoCompletionSuppressed = true;
+      try { localStorage.removeItem(RESUME_KEY); } catch {}
+    }
+    try {
+      const response = await fetch(RESUME_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          t: completed ? t : 0,
+          completed,
+          manual_completion: true,
+          reset_progress: !completed,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      applyCompletionData(result);
+      showPlayerToast(result.completed ? "Marked as finished" : "Marked as unfinished");
+    } catch (error) {
+      setCompletionUI(previous);
+      showPlayerToast("Could not update completion status");
+      console.error("Completion update failed:", error);
+    } finally {
+      completionBtn.disabled = false;
+    }
   }
 
   window.addEventListener("pagehide", () => {
@@ -312,7 +500,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         <div class="segment-body">
           <div class="flex items-start justify-between">
             <div class="segment-ja">${jaHtml}</div>
-            <button class="btn-explain ml-2 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
+            <button class="btn-loop ml-2 text-gray-700 hover:text-amber-400 transition-colors p-1" title="Loop this line (L)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+            <button class="btn-explain ml-1 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             </button>
           </div>
@@ -333,7 +524,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         <div class="modal-seg-body">
           <div class="flex items-start justify-between">
             <div class="modal-seg-ja">${jaHtml}</div>
-            <button class="btn-explain ml-2 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
+            <button class="btn-loop ml-2 text-gray-700 hover:text-amber-400 transition-colors p-1" title="Loop this line (L)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+            <button class="btn-explain ml-1 text-gray-700 hover:text-blue-400 transition-colors p-1" title="Explain this sentence">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             </button>
           </div>
@@ -383,6 +577,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     currentIdx = idx;
   }
 
+  // Anchor point for the active line while playback auto-follows: keep it a
+  // fixed distance down from the top of the viewport so there's always
+  // lookahead text visible, instead of scrollIntoView("nearest")'s behavior
+  // of pinning the active line to the bottom edge once it drifts there.
+  const READ_ANCHOR = 0.38;
+  const DEAD_ZONE    = 0.10;
+
   function scrollActiveIntoView(idx, force) {
     // If we are in compact mode (mobile video), don't scroll the container
     if (useYoutube && !isDesktopLayout) return;
@@ -396,9 +597,34 @@ document.addEventListener("DOMContentLoaded", async () => {
     const overflowY = window.getComputedStyle(transcriptEl).overflowY;
     const isContainerScrollable = (overflowY === "auto" || overflowY === "scroll") &&
                                    transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
-    const scrollTarget = isContainerScrollable ? transcriptEl : window;
 
-    setProgrammaticScroll(scrollTarget);
+    if (isContainerScrollable) {
+      if (force) {
+        // Explicit jump (seek, "now playing" pill): always land on the anchor.
+        setProgrammaticScroll(transcriptEl);
+        transcriptEl.scrollTo({
+          top: Math.max(0, el.offsetTop - transcriptEl.clientHeight * READ_ANCHOR),
+          behavior: "smooth",
+        });
+        return;
+      }
+      // Steady playback: only move once the line drifts outside a dead zone
+      // around the anchor, so scrolling is a slow continuous drift rather
+      // than a snap every ~2s. Only flag this as a programmatic scroll when we
+      // actually call scrollTo() — flagging it unconditionally left
+      // programmaticScroll stuck true on dead-zone ticks (no scroll → no
+      // scrollend → the flag never clears), which silently disabled
+      // markUserNavigation() and defeated manual scroll-away detection.
+      const want = Math.max(0, el.offsetTop - transcriptEl.clientHeight * READ_ANCHOR);
+      const slack = transcriptEl.clientHeight * DEAD_ZONE;
+      if (Math.abs(transcriptEl.scrollTop - want) > slack) {
+        setProgrammaticScroll(transcriptEl);
+        transcriptEl.scrollTo({ top: want, behavior: "smooth" });
+      }
+      return;
+    }
+
+    setProgrammaticScroll(window);
     el.scrollIntoView({ behavior: "smooth", block: force ? "center" : "nearest" });
   }
 
@@ -427,6 +653,41 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  function toggleLoop(idx) {
+    loopIdx = (loopIdx === idx) ? -1 : idx;
+    document.querySelectorAll(".btn-loop.loop-active").forEach(b => b.classList.remove("loop-active"));
+    document.querySelectorAll(".segment.segment-looping, .modal-seg.modal-seg-looping")
+      .forEach(el => el.classList.remove("segment-looping", "modal-seg-looping"));
+    if (loopIdx >= 0) {
+      document.getElementById(`seg-${loopIdx}`)?.classList.add("segment-looping");
+      document.getElementById(`modal-seg-${loopIdx}`)?.classList.add("modal-seg-looping");
+      document.querySelectorAll(`#seg-${loopIdx} .btn-loop, #modal-seg-${loopIdx} .btn-loop`)
+        .forEach(b => b.classList.add("loop-active"));
+    }
+  }
+
+  function checkLoop(t) {
+    // Gated on currentIdx so navigating away from the looped line (clicking
+    // elsewhere, arrow keys) doesn't get yanked back — looping only resumes
+    // once playback re-enters that segment.
+    if (loopIdx < 0 || currentIdx !== loopIdx) return;
+    const seg = segments[loopIdx];
+    if (seg && t >= seg.end) seekTo(seg.start);
+  }
+
+  // Segment lookup starting from the last known index, walking forward/back
+  // as needed — playback is monotonic almost all the time, so this is O(1)
+  // amortized instead of rescanning all segments (up to ~1000) every tick.
+  function findSegmentIndex(t, hintIdx) {
+    let i = hintIdx >= 0 ? hintIdx : 0;
+    if (i >= segments.length) i = segments.length - 1;
+    if (i < 0) return segments.findIndex(s => t >= s.start && t < s.end);
+    while (i < segments.length - 1 && t >= segments[i].end) i++;
+    while (i > 0 && t < segments[i].start) i--;
+    const seg = segments[i];
+    return (seg && t >= seg.start && t < seg.end) ? i : segments.findIndex(s => t >= s.start && t < s.end);
+  }
+
   function seekTo(t) {
     if (useYoutube) {
       ytPlayer?.seekTo(t, true);
@@ -436,7 +697,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     autoFollow = true;
     jumpPill?.classList.add("hidden");
-    if (autoFollowTimer) clearTimeout(autoFollowTimer);
   }
 
   // ── YouTube IFrame API ────────────────────────────────────────────────────
@@ -481,6 +741,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // fetch it in parallel but don't block transcript rendering on it.
   const vocabPromise = fetch("/api/vocab").then(r => r.json()).catch(() => []);
 
+  // Cross-device resume position — fetched in parallel too; reconciled
+  // against the local copy once we know the episode duration (see
+  // maybeApplyResume / reconcileResume above).
+  const resumePromise = fetch(RESUME_API).then(r => r.ok ? r.json() : null).catch(() => null);
+
   let transcriptData = { segments: [] };
   let analysisData   = { highlights: [], vocab: [], grammar: [], expressions: [] };
   let savedWords     = new Set();  // words already in the global vocab bank
@@ -516,8 +781,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     analysisData = analysisResult.value;
   }
 
-  // Resolve vocab (likely already done, given transcript takes longer)
-  const vocabResult = await vocabPromise;
+  // Resolve vocab + resume (likely already done, given transcript takes longer)
+  const [vocabResult, serverResumeData] = await Promise.all([vocabPromise, resumePromise]);
+  applyCompletionData(serverResumeData);
+  if (completionBtn) {
+    completionBtn.disabled = false;
+    completionBtn.addEventListener("click", toggleCompletionManually);
+  }
+  keepEpisodeBtn?.addEventListener("click", toggleRetention);
   if (Array.isArray(vocabResult)) {
     vocabResult.forEach(item => { if (item.word) savedWords.add(item.word); });
   }
@@ -601,6 +872,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderContext([...ctxVocab, ...ctxGrammar],    savedWords);
   repositionTranscript();
   syncFuriganaUI();
+  syncTranslationUI();
 
   // Stats bar
   const vocabCount  = (analysisData.vocab || []).length + ctxVocab.length;
@@ -701,9 +973,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Auto-follow Logic ─────────────────────────────────────────────────────
 
-  const AUTO_FOLLOW_INACTIVITY_MS = 8_000;
   let autoFollow = true;
-  let autoFollowTimer = null;
   let programmaticScroll = false;
   let programmaticScrollTimer = null;
 
@@ -728,26 +998,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // Once the user scrolls away from the active line, auto-follow stays off
+  // until they explicitly tap "now playing" — it used to force-scroll back
+  // after 8s of inactivity, which yanked the view away mid-read.
   function markUserNavigation() {
     if (programmaticScroll) return;
     autoFollow = false;
     jumpPill?.classList.remove("hidden");
-    if (autoFollowTimer) clearTimeout(autoFollowTimer);
-    autoFollowTimer = setTimeout(() => {
-      autoFollow = true;
-      jumpPill?.classList.add("hidden");
-      if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
-    }, AUTO_FOLLOW_INACTIVITY_MS);
   }
 
   transcriptEl.addEventListener("scroll", () => { if (!programmaticScroll) markUserNavigation(); }, { passive: true });
-  window.addEventListener("scroll",    () => { if (!isDesktopLayout && !useYoutube) markUserNavigation(); }, { passive: true });
-  window.addEventListener("wheel",     () => { if (!useYoutube) markUserNavigation(); },            { passive: true });
+  window.addEventListener("scroll", () => { if (!isDesktopLayout && !useYoutube) markUserNavigation(); }, { passive: true });
+  transcriptEl.addEventListener("wheel", () => { if (!useYoutube) markUserNavigation(); }, { passive: true });
 
   jumpPill?.addEventListener("click", () => {
     autoFollow = true;
     jumpPill.classList.add("hidden");
-    if (autoFollowTimer) clearTimeout(autoFollowTimer);
     if (currentIdx >= 0) scrollActiveIntoView(currentIdx, true);
   });
 
@@ -800,11 +1066,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   transcriptEl.addEventListener("click", e => {
+    const loopBtn = e.target.closest(".btn-loop");
+    if (loopBtn) {
+      e.stopPropagation();
+      const seg = loopBtn.closest("[data-start]");
+      if (seg) toggleLoop(parseInt(seg.id.replace("seg-", ""), 10));
+      return;
+    }
     if (e.target.closest(".btn-explain")) {
       handleExplain(e);
       return;
     }
     if (e.target.closest("[data-hl]")) return;
+    if (window.getSelection().toString()) return; // don't hijack text selection
     const seg = e.target.closest("[data-start]");
     if (seg) seekTo(parseFloat(seg.dataset.start));
   });
@@ -814,23 +1088,25 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (audio) {
     audio.addEventListener("loadedmetadata", () => {
       if (useYoutube) return;  // video is the active initial mode — YT branch resumes instead
-      maybeApplyResume(audio.duration, t => { audio.currentTime = t; });
+      maybeApplyResume(audio.duration, t => { audio.currentTime = t; }, serverResumeData);
     });
     audio.addEventListener("timeupdate", () => {
       if (useYoutube) return;
       const t   = audio.currentTime;
-      const idx = segments.findIndex(s => t >= s.start && t < s.end);
+      const idx = findSegmentIndex(t, currentIdx);
       if (idx !== currentIdx) setActive(idx);
+      checkLoop(t);
+      maybeAutoComplete(t, audio.duration);
       saveResumeT(t);
     });
     audio.addEventListener("seeked", () => {
       if (useYoutube) return;
       const t   = audio.currentTime;
-      const idx = segments.findIndex(s => t >= s.start && t < s.end);
+      const idx = findSegmentIndex(t, currentIdx);
       if (idx >= 0) { setActive(idx); scrollActiveIntoView(idx, true); }
     });
     audio.addEventListener("pause", () => { if (!useYoutube) saveResumeT(audio.currentTime, true); });
-    audio.addEventListener("ended", () => { if (!useYoutube) clearResumeT(); });
+    audio.addEventListener("ended", () => { if (!useYoutube) markCompleted(audio.currentTime); });
   }
 
   if (isYoutube) {
@@ -838,7 +1114,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     ytInitPromise.then(player => {
       ytPlayer = player;
       if (speedIdx !== 2) ytPlayer?.setPlaybackRate(SPEEDS[speedIdx]);
-      if (useYoutube) maybeApplyResume(player.getDuration?.() || 0, t => player.seekTo(t, true));
+      if (useYoutube) maybeApplyResume(player.getDuration?.() || 0, t => player.seekTo(t, true), serverResumeData);
     }).catch(err => {
       console.error("YouTube Player failed:", err);
       const p = document.getElementById("yt-player");
@@ -848,8 +1124,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     setInterval(() => {
       if (!useYoutube || !ytPlayer || typeof ytPlayer.getCurrentTime !== "function") return;
       const t   = ytPlayer.getCurrentTime();
-      const idx = segments.findIndex(s => t >= s.start && t < s.end);
+      const idx = findSegmentIndex(t, currentIdx);
       if (idx !== currentIdx) setActive(idx);
+      checkLoop(t);
+      maybeAutoComplete(t, ytPlayer.getDuration?.() || 0);
       saveResumeT(t);
     }, 250);
   }
@@ -938,8 +1216,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  function setShowZh(v) {
+    showZh = v;
+    try { localStorage.setItem('mimichan.showZh', showZh); } catch {}
+    syncTranslationUI();
+  }
+
   document.getElementById("toggle-en")?.addEventListener("click", () => { showEn = !showEn; syncTranslationUI(); });
-  document.getElementById("toggle-zh")?.addEventListener("click", () => { showZh = !showZh; syncTranslationUI(); });
+  document.getElementById("toggle-zh")?.addEventListener("click", () => setShowZh(!showZh));
   document.getElementById("toggle-furigana")?.addEventListener("click", () => { showFurigana = !showFurigana; syncFuriganaUI(); });
 
   const fabMain       = document.getElementById("fab-main");
@@ -950,7 +1234,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   let fabOpen = false;
   fabMain?.addEventListener("click",       e => { e.stopPropagation(); fabOpen ? closeTray() : openTray(); });
   fabEnBtn?.addEventListener("click",      e => { e.stopPropagation(); showEn = !showEn; syncTranslationUI(); });
-  fabZhBtn?.addEventListener("click",      e => { e.stopPropagation(); showZh = !showZh; syncTranslationUI(); });
+  fabZhBtn?.addEventListener("click",      e => { e.stopPropagation(); setShowZh(!showZh); });
   fabFuriganaBtn?.addEventListener("click", e => { e.stopPropagation(); showFurigana = !showFurigana; syncFuriganaUI(); });
   function openTray()  { fabOpen = true;  fabTray?.classList.replace("fab-tray-hidden", "fab-tray-visible"); }
   function closeTray() { fabOpen = false; fabTray?.classList.replace("fab-tray-visible", "fab-tray-hidden"); }
@@ -970,10 +1254,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       case "ArrowUp":    if (currentIdx > 0) seekTo(segments[currentIdx - 1].start); break;
       case "ArrowDown":  if (currentIdx < segments.length - 1) seekTo(segments[currentIdx + 1].start); break;
       case "e": showEn = !showEn; syncTranslationUI(); break;
-      case "c": showZh = !showZh; syncTranslationUI(); break;
+      case "c": setShowZh(!showZh); break;
       case "f": showFurigana = !showFurigana; syncFuriganaUI(); break;
       case "[": if (speedIdx > 0) applySpeed(speedIdx - 1); break;
       case "]": if (speedIdx < SPEEDS.length - 1) applySpeed(speedIdx + 1); break;
+      case "l": if (currentIdx >= 0) toggleLoop(currentIdx); break;
     }
   });
 
@@ -1071,11 +1356,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   modalTranscriptEl?.addEventListener("scroll", () => { if (!modalProgrammaticScroll) modalJumpPill?.classList.remove("hidden"); }, { passive: true });
   modalJumpPill?.addEventListener("click", () => { modalJumpPill.classList.add("hidden"); scrollModalToActive(); });
   modalTranscriptEl?.addEventListener("click", e => {
+    const loopBtn = e.target.closest(".btn-loop");
+    if (loopBtn) {
+      e.stopPropagation();
+      const seg = loopBtn.closest("[data-start]");
+      if (seg) toggleLoop(parseInt(seg.id.replace("modal-seg-", ""), 10));
+      return;
+    }
     if (e.target.closest(".btn-explain")) {
       handleExplain(e);
       return;
     }
     if (e.target.closest("[data-hl]")) return;
+    if (window.getSelection().toString()) return; // don't hijack text selection
     const seg = e.target.closest("[data-start]");
     if (seg) { seekTo(parseFloat(seg.dataset.start)); transcriptModal.classList.add("hidden"); unlockBodyScroll(); }
   });

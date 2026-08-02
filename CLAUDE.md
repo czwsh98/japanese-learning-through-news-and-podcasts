@@ -4,7 +4,7 @@ This file provides guidance to Claude when working with code in this repository.
 
 ## What this project is
 
-A personal automation pipeline that downloads Japanese YouTube videos/podcasts, transcribes them with Whisper, translates segments with Gemini Flash, analyzes vocabulary/grammar for JLPT study with gpt-4o-mini, and serves the results through a Flask web UI with an audio player synced to the transcript. Users can save individual words and phrases to a persistent cross-episode Vocab Bank.
+A personal automation pipeline that downloads Japanese YouTube videos/podcasts, transcribes them with Whisper, translates segments with Gemini Flash, grades vocabulary against a real JLPT word bank and extracts grammar/expressions with an LLM, and serves the results through a Flask web UI with an audio player synced to the transcript. Users can save individual words and phrases to a persistent cross-episode Vocab Bank.
 
 ## Commands
 
@@ -21,7 +21,7 @@ python pipeline.py --dry-run   # generates stub files without API calls
 python web/app.py
 ```
 
-No build step. No test suite. Dependencies are in `requirements.txt`; install with `pip install -r requirements.txt`. Requires a `.env` file with `OPENAI_API_KEY` and `GEMINI_API_KEY` (see `.env.example`).
+No build step. Tests are in `tests/` (pytest). Dependencies are in `requirements.txt`; install with `pip install -r requirements.txt`. Requires a `.env` file with `OPENAI_API_KEY` and `GEMINI_API_KEY` (see `.env.example`).
 
 ## Architecture
 
@@ -32,7 +32,8 @@ Input (URL or sources.json)
   → lib/downloader.py   — yt-dlp / Apple Podcasts / RSS / direct audio
   → lib/transcriber.py  — Whisper API (auto-chunks files >23 MB via ffmpeg)
   → lib/translator.py   — Gemini Flash (50 segments/call, EN + ZH)
-  → lib/analyzer.py     — gpt-4o-mini function calling (JLPT vocab/grammar/expressions)
+  → lib/analyzer.py     — vocabulary graded via lib/jlpt_bank.py (real JLPT word list);
+                          LLM curates which graded words to keep + extracts grammar/expressions
   → lib/writer.py       — writes all output files to episodes/YYYY-MM-DD/
 ```
 
@@ -61,15 +62,17 @@ A single JSON file at the project root (configurable via `VOCAB_FILE` env var) t
 
 ### JLPT levels
 
-The `--level` flag (or `jlpt_level` in meta.json) controls what the analyzer targets:
+The `--level` flag (or `jlpt_level` in meta.json) controls what the analyzer targets. The `tiers` list for each level MUST match `LEVEL_TIERS` in `web/static/js/player.js` — the UI filters vocab/grammar to those tiers, so a mismatch makes a tier invisible even if the analyzer found it:
 - `beginner`: N5
-- `beginner-intermediate`: N4
+- `beginner-intermediate`: N4, N3
 - `intermediate`: N3
 - `intermediate-advanced`: N2
-- `advanced`: N1
+- `advanced`: N2, N1
 - Plus `context-specific` for domain/literary/specialized terms
 
 The web UI color-codes highlights: N5 green → N4 teal → N3 blue → N2 amber → N1 rose → context-specific violet.
+
+**Vocabulary levels come from `lib/jlpt_bank.py`** (a compiled JLPT word list, see `data/README.md`), not from LLM grading — the LLM was asked to grade vocabulary in two earlier attempts and never did it reliably (it graded almost everything at whichever tier was requested, regardless of true difficulty). The bank is a deterministic lookup; the LLM only curates which bank-graded candidates are worth a flashcard and writes their Chinese gloss. **Grammar pattern levels are still LLM-graded** — no equivalent open grammar-level dataset is vendored yet, so grammar levels carry the same reliability caveat future work should address.
 
 ### Web UI (`web/`)
 

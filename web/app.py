@@ -12,7 +12,7 @@ import time
 import traceback
 import urllib.parse
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -47,7 +47,9 @@ VOCAB_FILE = (Path(os.environ.get("VOCAB_FILE", "")) if os.environ.get("VOCAB_FI
 # Telegram bot's scheduled check via POST /api/subscriptions/recent; read on
 # the /subscriptions page. Regenerated on each bot run, so ephemeral loss on a
 # container rebuild is fine.
-RECENT_EPISODES_CACHE_FILE = _PROJECT_ROOT / "recent_episodes_cache.json"
+_recent_env = os.environ.get("RECENT_EPISODES_CACHE_FILE", "")
+RECENT_EPISODES_CACHE_FILE = (Path(_recent_env) if Path(_recent_env).is_absolute()
+                              else _PROJECT_ROOT / (_recent_env or "recent_episodes_cache.json"))
 
 UPLOAD_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus"}
 
@@ -70,7 +72,7 @@ from web.auth import (
     set_auth_cookie,
 )
 from web.db import Episode, TranscriptionUsage, VocabItem, db_available, get_db, init_db
-from sqlalchemy import func, select, text as sa_text
+from sqlalchemy import func, select, text as sa_text, update
 
 log = logging.getLogger(__name__)
 
@@ -714,6 +716,7 @@ def _pipeline_thread(
             _set_step(job_id, "Downloading audio…", 1)
             _ovr_title   = (meta or {}).get("title", "")
             _ovr_channel = (meta or {}).get("channel", "")
+            _ovr_duration = (meta or {}).get("duration", 0)
             audio_path, meta = download_latest([source_url], ep_dir)
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
@@ -724,6 +727,8 @@ def _pipeline_thread(
                 meta["title"] = _ovr_title
             if _ovr_channel:
                 meta["channel"] = _ovr_channel
+            if _ovr_duration:
+                meta["duration"] = _ovr_duration
 
             # Byte size check (catches files whose bitrate makes them cheap to
             # download but expensive for the chunked-transcription path).
@@ -970,6 +975,7 @@ def _find_source_clone(source_url: str, user_id) -> tuple[str | None, str | None
             select(Episode).where(
                 Episode.owner_user_id == user_id,
                 Episode.source_token  == source_token,
+                Episode.deleted_at.is_(None),
             )
         ).scalars().first()
         if own:
@@ -978,6 +984,7 @@ def _find_source_clone(source_url: str, user_id) -> tuple[str | None, str | None
             select(Episode).where(
                 Episode.source_token == source_token,
                 Episode.r2_prefix    != "",
+                Episode.deleted_at.is_(None),
             )
         ).scalars().first()
         if other:
@@ -1039,6 +1046,7 @@ def _grouped(episodes: list):
 @login_required
 def index():
     episodes = []
+    resume_episode = None
 
     # ── DB path ───────────────────────────────────────────────────────────────
     if db_available():
@@ -1047,10 +1055,19 @@ def index():
             with get_db() as db:
                 rows = db.execute(
                     select(Episode)
-                    .where(Episode.owner_user_id == user.id)
+                    .where(
+                        Episode.owner_user_id == user.id,
+                        Episode.deleted_at.is_(None),
+                    )
                     .order_by(Episode.date.desc(), Episode.created_at.desc())
                 ).scalars().all()
             for row in rows:
+                position = max(0.0, row.max_position or row.resume_position or 0.0)
+                if row.duration > 0:
+                    position = min(position, float(row.duration))
+                    progress = 100 if row.completed_at else min(100, round(position / row.duration * 100))
+                else:
+                    progress = 100 if row.completed_at else 0
                 episodes.append({
                     "date": row.slug,
                     "meta": {
@@ -1064,9 +1081,27 @@ def index():
                     },
                     "has_audio":      bool(row.r2_prefix),
                     "has_transcript": bool(row.r2_prefix),
+                    "position":        position,
+                    "progress":        progress,
+                    "completed":       row.completed_at is not None,
+                    "resume_updated_at": row.resume_updated_at,
                 })
-        groups, group_mode = _grouped(episodes)
-        return render_template("index.html", episodes=episodes, groups=groups, group_mode=group_mode)
+            resumable = [
+                ep for ep in episodes
+                if not ep["completed"] and ep["position"] > 5 and ep["progress"] < 90
+                and ep["resume_updated_at"] is not None
+            ]
+            if resumable:
+                resume_episode = max(resumable, key=lambda ep: ep["resume_updated_at"])
+        grouped_episodes = [ep for ep in episodes if ep is not resume_episode]
+        groups, group_mode = _grouped(grouped_episodes)
+        return render_template(
+            "index.html",
+            episodes=episodes,
+            groups=groups,
+            group_mode=group_mode,
+            resume_episode=resume_episode,
+        )
 
     # ── File fallback ─────────────────────────────────────────────────────────
     if EPISODES_DIR.exists():
@@ -1084,7 +1119,10 @@ def index():
                 "has_transcript": has_transcript,
             })
     groups, group_mode = _grouped(episodes)
-    return render_template("index.html", episodes=episodes, groups=groups, group_mode=group_mode)
+    return render_template(
+        "index.html", episodes=episodes, groups=groups,
+        group_mode=group_mode, resume_episode=None,
+    )
 
 
 @app.route("/episode/<date_str>")
@@ -1134,34 +1172,82 @@ def episode(date_str: str):
     return render_template("episode.html", date=date_str, meta=meta, r2_urls={})
 
 
+def _purge_episode(ep_row: Episode) -> None:
+    """Permanently remove one Episode row and unshared R2 objects."""
+    if ep_row.r2_prefix and _get_r2():
+        # Cross-user clones can share a prefix; keep objects until the final row
+        # referencing that prefix is purged.
+        with get_db() as db:
+            shared_count = db.execute(
+                select(func.count()).select_from(Episode).where(
+                    Episode.r2_prefix == ep_row.r2_prefix,
+                    Episode.id        != ep_row.id,
+                )
+            ).scalar_one()
+        if shared_count == 0:
+            paginator = _get_r2().get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
+                objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                if objects:
+                    _get_r2().delete_objects(
+                        Bucket=_r2_bucket(), Delete={"Objects": objects}
+                    )
+    with get_db() as db:
+        row = db.get(Episode, ep_row.id)
+        if row:
+            db.delete(row)
+
+
+@app.route("/trash")
+@login_required
+def trash_page():
+    if not db_available():
+        return render_template("trash.html", episodes=[])
+    user = get_current_user()
+    with get_db() as db:
+        rows = db.execute(
+            select(Episode).where(
+                Episode.owner_user_id == user.id,
+                Episode.deleted_at.is_not(None),
+            ).order_by(Episode.deleted_at.desc())
+        ).scalars().all()
+    now = datetime.now(timezone.utc)
+    episodes = []
+    for row in rows:
+        purge_at = row.deleted_at + timedelta(days=7)
+        episodes.append({
+            "slug": row.slug,
+            "title": row.title,
+            "channel": row.channel,
+            "deleted_at": row.deleted_at,
+            "purge_at": purge_at,
+            "days_remaining": max(0, (purge_at - now).days + 1),
+        })
+    return render_template("trash.html", episodes=episodes)
+
+
+@app.route("/episode/<date_str>/restore", methods=["POST"])
+@login_required
+def episode_restore(date_str: str):
+    ep_row = _lookup_episode(date_str)
+    if ep_row is not None:
+        with get_db() as db:
+            db.execute(
+                update(Episode)
+                .where(Episode.id == ep_row.id)
+                .values(completed_at=None, delete_after=None, deleted_at=None)
+            )
+        log.info("Restored episode %s from trash as unfinished", date_str)
+    return redirect(url_for("index"))
+
+
 @app.route("/episode/<date_str>/delete", methods=["POST"])
 @login_required
 def episode_delete(date_str: str):
     # ── DB path ───────────────────────────────────────────────────────────────
     ep_row = _lookup_episode(date_str)
     if ep_row is not None:
-        if ep_row.r2_prefix and _get_r2():
-            # Only delete R2 objects if no other Episode row shares this prefix
-            # (cross-user clones point at the same r2_prefix — deleting would break them).
-            with get_db() as db:
-                shared_count = db.execute(
-                    select(func.count()).select_from(Episode).where(
-                        Episode.r2_prefix == ep_row.r2_prefix,
-                        Episode.id        != ep_row.id,
-                    )
-                ).scalar_one()
-            if shared_count == 0:
-                paginator = _get_r2().get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=_r2_bucket(), Prefix=ep_row.r2_prefix):
-                    objects = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-                    if objects:
-                        _get_r2().delete_objects(
-                            Bucket=_r2_bucket(), Delete={"Objects": objects}
-                        )
-        with get_db() as db:
-            row = db.get(Episode, ep_row.id)
-            if row:
-                db.delete(row)
+        _purge_episode(ep_row)
         log.info(f"Deleted episode {date_str} from DB/R2")
         return redirect(url_for("index"))
 
@@ -1182,12 +1268,175 @@ def _load_recent_cache() -> dict:
     return {}
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON beside its destination, then atomically replace it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _load_sources() -> dict:
+    """Load sources with backward-compatible subscription settings."""
+    try:
+        data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+    except (OSError, json.JSONDecodeError):
+        data = {"sources": []}
+    raw_sources = data.get("sources", []) if isinstance(data, dict) else []
+    sources = []
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        normalized = dict(source)
+        normalized["enabled"] = source.get("enabled", True) is not False
+        normalized["digest_enabled"] = source.get("digest_enabled", True) is not False
+        sources.append(normalized)
+    return {**(data if isinstance(data, dict) else {}), "sources": sources}
+
+
+def _parse_cached_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_kind(source: dict) -> str:
+    target = f"{source.get('url', '')} {source.get('rss_url', '')}".lower()
+    return "youtube" if "youtube.com" in target or "youtu.be" in target else "podcast"
+
+
+def _source_initials(name: str) -> str:
+    words = re.findall(r"[\w\u3040-\u30ff\u3400-\u9fff]+", name or "")
+    if not words:
+        return "•"
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return (words[0][0] + words[1][0]).upper()
+
+
+def _build_subscription_view(sources: list[dict], recent_cache: dict, user) -> tuple[list[dict], list[dict], dict]:
+    """Join the feed cache to this user's live episode and job state."""
+    db_rows = []
+    if user is not None and db_available():
+        with get_db() as db:
+            db_rows = db.execute(
+                select(Episode).where(
+                    Episode.owner_user_id == user.id,
+                    Episode.deleted_at.is_(None),
+                ).order_by(Episode.created_at.desc())
+            ).scalars().all()
+
+    rows_by_url = {}
+    rows_by_token = {}
+    for row in db_rows:  # query is newest-first; retain the newest match
+        if row.url:
+            rows_by_url.setdefault(row.url, row)
+        if row.source_token:
+            rows_by_token.setdefault(row.source_token, row)
+    user_id = str(user.id) if user is not None else None
+    with _jobs_lock:
+        active_jobs = [dict(job) for job in _jobs.values()
+                       if job.get("status") == "processing" and job.get("user_id") == user_id]
+    active_slugs = {job.get("slug") for job in active_jobs}
+    active_tokens = {job.get("source_token") for job in active_jobs if job.get("source_token")}
+
+    source_views = []
+    inbox = []
+    latest_refresh = None
+    feed_order = 0
+    for source_order, source in enumerate(sources):
+        source_url = str(source.get("url", ""))
+        cache_entry = recent_cache.get(source_url, {}) if isinstance(recent_cache, dict) else {}
+        cached = cache_entry.get("episodes", []) if isinstance(cache_entry, dict) else []
+        fetched_at = _parse_cached_datetime(cache_entry.get("fetched_at") if isinstance(cache_entry, dict) else None)
+        if fetched_at and (latest_refresh is None or fetched_at > latest_refresh):
+            latest_refresh = fetched_at
+        view = {
+            **source,
+            "kind": _source_kind(source),
+            "initials": _source_initials(str(source.get("name", ""))),
+            "cached_count": len(cached) if isinstance(cached, list) else 0,
+            "last_refresh": fetched_at,
+        }
+        source_views.append(view)
+        if not source.get("enabled", True) or not isinstance(cached, list):
+            continue
+        for item_order, cached_ep in enumerate(cached):
+            if not isinstance(cached_ep, dict):
+                continue
+            ep_url = str(cached_ep.get("url", "")).strip()
+            token = _get_source_token(ep_url)
+            row = rows_by_url.get(ep_url) or (rows_by_token.get(token) if token else None)
+            active = bool((row and row.slug in active_slugs) or (token and token in active_tokens))
+            try:
+                duration = max(0, int(float(cached_ep.get("duration") or (row.duration if row else 0) or 0)))
+            except (TypeError, ValueError):
+                duration = max(0, int(row.duration or 0)) if row else 0
+            position = max(0.0, (row.max_position or row.resume_position or 0.0)) if row else 0.0
+            completed = bool(row and row.completed_at is not None)
+            progress = 100 if completed else (min(100, round(position / duration * 100)) if duration else 0)
+            published_at = _parse_cached_datetime(cached_ep.get("published_at"))
+            inbox.append({
+                **cached_ep,
+                "url": ep_url,
+                "duration": duration,
+                "published_at": published_at,
+                "source_name": source.get("name") or cached_ep.get("channel") or "Subscription",
+                "source_url": source_url,
+                "source_kind": view["kind"],
+                "source_initials": view["initials"],
+                "source_order": source_order,
+                "feed_order": feed_order,
+                "item_order": item_order,
+                "processed": bool(row and not active),
+                "active": active,
+                "slug": row.slug if row else None,
+                "progress": progress,
+                "completed": completed,
+                "digest_eligible": source.get("digest_enabled", True) is not False,
+            })
+            feed_order += 1
+
+    # Known publication times win; otherwise preserve source/feed ordering.
+    inbox.sort(key=lambda ep: (
+        ep["published_at"] is not None,
+        ep["published_at"].timestamp() if ep["published_at"] else -ep["feed_order"],
+    ), reverse=True)
+    needs = [ep for ep in inbox if not ep["processed"]]
+    eligible_sources = {ep["source_url"] for ep in needs if ep["digest_eligible"] and not ep["active"]}
+    now = datetime.now(timezone.utc)
+    freshness = "Missing"
+    if latest_refresh:
+        freshness = "Fresh" if now - latest_refresh <= timedelta(hours=26) else "Stale"
+    metrics = {
+        "active_sources": sum(1 for source in sources if source.get("enabled", True)),
+        "needs_processing": len(needs),
+        "daily_picks": min(2, len(eligible_sources)),
+        "last_refresh": latest_refresh,
+        "freshness": freshness,
+    }
+    return source_views, inbox, metrics
+
+
 @app.route("/subscriptions", methods=["GET"])
 @login_required
 def subscriptions_page():
-    sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
-    return render_template("subscriptions.html", sources=sources_data.get("sources", []),
-                           recent_cache=_load_recent_cache())
+    sources_data = _load_sources()
+    sources, inbox, metrics = _build_subscription_view(
+        sources_data.get("sources", []), _load_recent_cache(), get_current_user())
+    return render_template("subscriptions.html", sources=sources, inbox=inbox, metrics=metrics)
 
 
 @app.route("/api/subscriptions/recent", methods=["POST"])
@@ -1215,11 +1464,17 @@ def api_subscriptions_recent():
         for ep in entry["episodes"][:10]:
             if not isinstance(ep, dict):
                 continue
+            try:
+                duration = max(0, int(float(ep.get("duration", 0) or 0)))
+            except (TypeError, ValueError):
+                duration = 0
             episodes.append({
                 "title":       str(ep.get("title", ""))[:300],
                 "description": str(ep.get("description", ""))[:400],
                 "url":         str(ep.get("url", ""))[:1000],
                 "channel":     str(ep.get("channel", ""))[:200],
+                "published_at": str(ep.get("published_at", ""))[:40],
+                "duration":     duration,
             })
         clean[str(url)] = {
             "fetched_at": str(entry.get("fetched_at", ""))[:32],
@@ -1227,8 +1482,7 @@ def api_subscriptions_recent():
         }
 
     with _recent_lock:
-        RECENT_EPISODES_CACHE_FILE.write_text(
-            json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(RECENT_EPISODES_CACHE_FILE, clean)
     return jsonify({"ok": True, "sources": len(clean)})
 
 
@@ -1269,20 +1523,48 @@ def subscriptions_add():
     desc = request.form.get("description", "").strip()
 
     if not name or not url:
-        return render_template("subscriptions.html", error="Name and URL are required.",
-                               sources=json.loads(SOURCES_FILE.read_text(encoding="utf-8")).get("sources", []),
-                               recent_cache=_load_recent_cache())
+        return redirect(url_for("subscriptions_page", error="Name and URL are required."))
 
-    new_source = {"name": name, "url": url, "description": desc}
+    new_source = {"name": name, "url": url, "description": desc,
+                  "enabled": True, "digest_enabled": True}
     rss_url = _resolve_apple_podcast_rss(url)
     if rss_url:
         new_source["rss_url"] = rss_url
 
     with _sources_lock:
-        sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
+        sources_data = _load_sources()
         if "sources" not in sources_data: sources_data["sources"] = []
         sources_data["sources"].append(new_source)
-        SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(SOURCES_FILE, sources_data)
+    return redirect(url_for("subscriptions_page"))
+
+
+@app.route("/subscriptions/update", methods=["POST"])
+@login_required
+def subscriptions_update():
+    original_url = request.form.get("original_url", "").strip()
+    name = request.form.get("name", "").strip()
+    url = request.form.get("url", "").strip()
+    description = request.form.get("description", "").strip()
+    if not original_url or not name or not url:
+        abort(400)
+    enabled = request.form.get("enabled") in ("1", "true", "on")
+    digest_enabled = request.form.get("digest_enabled") in ("1", "true", "on")
+    with _sources_lock:
+        data = _load_sources()
+        match = next((source for source in data.get("sources", [])
+                      if source.get("url") == original_url), None)
+        if match is None:
+            abort(404)
+        url_changed = url != original_url
+        match.update(name=name, url=url, description=description,
+                     enabled=enabled, digest_enabled=digest_enabled)
+        if url_changed:
+            match.pop("rss_url", None)
+            rss_url = _resolve_apple_podcast_rss(url)
+            if rss_url:
+                match["rss_url"] = rss_url
+        _atomic_write_json(SOURCES_FILE, data)
     return redirect(url_for("subscriptions_page"))
 
 
@@ -1294,9 +1576,9 @@ def subscriptions_delete():
         abort(400)
 
     with _sources_lock:
-        sources_data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
-        sources_data["sources"] = [s for s in sources_data.get("sources", []) if s["url"] != url]
-        SOURCES_FILE.write_text(json.dumps(sources_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        sources_data = _load_sources()
+        sources_data["sources"] = [s for s in sources_data.get("sources", []) if s.get("url") != url]
+        _atomic_write_json(SOURCES_FILE, sources_data)
     return redirect(url_for("subscriptions_page"))
 
 
@@ -1707,6 +1989,7 @@ def upload_process():
             "total_steps": total_steps,
             "error":       "",
             "started_at":  time.time(),
+            "source_token": _get_source_token(source_url),
         }
 
     _prune_old_jobs()
@@ -1910,6 +2193,102 @@ def api_analysis(date_str: str):
     return _episode_json_response(date_str, "analysis.json")
 
 
+@app.route("/api/episode/<date_str>/resume", methods=["GET"])
+@login_required
+def api_resume_get(date_str: str):
+    """Cross-device playback resume position, keyed by owner + episode."""
+    ep_row = _lookup_episode(date_str)
+    if ep_row is None:
+        return jsonify({"t": None, "updated_at": None})
+    return jsonify({
+        "t": ep_row.resume_position,
+        "max_position": ep_row.max_position,
+        "completed": ep_row.completed_at is not None,
+        "retention_exempt": ep_row.retention_exempt,
+        "delete_after": ep_row.delete_after.isoformat() if ep_row.delete_after else None,
+        "deleted_at": ep_row.deleted_at.isoformat() if ep_row.deleted_at else None,
+        "updated_at": ep_row.resume_updated_at.isoformat() if ep_row.resume_updated_at else None,
+    })
+
+
+@app.route("/api/episode/<date_str>/resume", methods=["POST"])
+@login_required
+def api_resume_set(date_str: str):
+    data = request.get_json(silent=True) or {}
+    t = data.get("t")
+    if not isinstance(t, (int, float)) or t < 0:
+        abort(400)
+    ep_row = _lookup_episode(date_str)
+    if ep_row is None:
+        return jsonify({"status": "ok"})  # no DB configured — nothing to persist
+    now = datetime.now(timezone.utc)
+    values = {
+        "resume_position": float(t),
+        "resume_updated_at": now,
+        "max_position": func.greatest(func.coalesce(Episode.max_position, 0.0), float(t)),
+    }
+    completed = ep_row.completed_at is not None
+    delete_after = ep_row.delete_after
+    if data.get("manual_completion") is True and data.get("completed") is False:
+        values.update(completed_at=None, delete_after=None, deleted_at=None)
+        if data.get("reset_progress") is True:
+            values.update(resume_position=0.0, max_position=0.0)
+        completed = False
+        delete_after = None
+    elif data.get("completed") is True or (ep_row.duration > 0 and float(t) / ep_row.duration >= 0.9):
+        values["completed_at"] = ep_row.completed_at or now
+        if not ep_row.retention_exempt and ep_row.delete_after is None:
+            delete_after = now + timedelta(days=30)
+            values["delete_after"] = delete_after
+        completed = True
+    with get_db() as db:
+        db.execute(
+            update(Episode)
+            .where(Episode.id == ep_row.id)
+            .values(**values)
+        )
+    return jsonify({
+        "status": "ok",
+        "completed": completed,
+        "retention_exempt": ep_row.retention_exempt,
+        "delete_after": delete_after.isoformat() if delete_after else None,
+        "deleted_at": None,
+    })
+
+
+@app.route("/api/episode/<date_str>/retention", methods=["POST"])
+@login_required
+def api_episode_retention(date_str: str):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("keep"), bool):
+        abort(400)
+    ep_row = _lookup_episode(date_str)
+    if ep_row is None:
+        return jsonify({"status": "ok"})
+
+    keep = data["keep"]
+    delete_after = None
+    if not keep and ep_row.completed_at is not None:
+        delete_after = datetime.now(timezone.utc) + timedelta(days=30)
+    with get_db() as db:
+        db.execute(
+            update(Episode)
+            .where(Episode.id == ep_row.id)
+            .values(
+                retention_exempt=keep,
+                delete_after=delete_after,
+                deleted_at=None,
+            )
+        )
+    return jsonify({
+        "status": "ok",
+        "completed": ep_row.completed_at is not None,
+        "retention_exempt": keep,
+        "delete_after": delete_after.isoformat() if delete_after else None,
+        "deleted_at": None,
+    })
+
+
 @app.route("/api/upload", methods=["POST"])
 @login_required
 def api_upload():
@@ -1943,11 +2322,15 @@ def api_upload():
             return jsonify({"job_id": None, "slug": own_slug})
 
         title_override = request.form.get("title", "").strip()
+        try:
+            duration_override = max(0, int(float(request.form.get("duration", "0") or 0)))
+        except (TypeError, ValueError):
+            duration_override = 0
         meta = {
             "title":       title_override or source_url,
             "channel":     request.form.get("channel", "").strip(),
             "upload_date": date.today().strftime("%Y%m%d"),
-            "duration":    0,
+            "duration":    duration_override,
             "url":         source_url,
             "thumbnail":   "",
             "description": "",
@@ -2029,6 +2412,7 @@ def api_upload():
             "total_steps": total_steps,
             "error":       "",
             "started_at":  time.time(),
+            "source_token": _get_source_token(source_url),
         }
 
     _prune_old_jobs()
@@ -2104,7 +2488,10 @@ def api_episodes():
         with get_db() as db:
             rows = db.execute(
                 select(Episode)
-                .where(Episode.owner_user_id == user.id)
+                .where(
+                    Episode.owner_user_id == user.id,
+                    Episode.deleted_at.is_(None),
+                )
                 .order_by(Episode.date.desc(), Episode.created_at.desc())
             ).scalars().all()
         return jsonify([

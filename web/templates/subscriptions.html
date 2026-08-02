@@ -1,125 +1,220 @@
 {% extends "base.html" %}
-{% block title %}Subscriptions — 日本語 Pipeline{% endblock %}
+{% block title %}Listening inbox — Mimichan{% endblock %}
+{% block main_class %}max-w-6xl{% endblock %}
+
+{% block head %}
+<style>
+  .sub-metric { background: linear-gradient(145deg, rgba(17,24,39,.82), rgba(9,14,25,.72)); }
+  .sub-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:1.25rem; }
+  .sub-clamp { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+  .sub-action { min-width:7.4rem; }
+  .sub-switch input:checked + span { background:#2563eb; border-color:#3b82f6; }
+  .sub-switch input:checked + span:after { transform:translateX(1rem); background:white; }
+  .sub-switch span:after { content:""; position:absolute; width:.8rem; height:.8rem; top:.14rem; left:.16rem; border-radius:999px; background:#9ca3af; transition:.15s; }
+  @media (max-width:640px) {
+    .sub-row { grid-template-columns:1fr; gap:.9rem; }
+    .sub-action { width:100%; min-height:2.75rem; }
+  }
+</style>
+{% endblock %}
 
 {% block content %}
-<div class="max-w-4xl mx-auto">
-  <div class="mb-8 flex items-center justify-between">
+<section class="mb-9">
+  <div class="flex items-end justify-between gap-4 mb-5">
     <div>
-      <h1 class="text-2xl font-bold">Subscriptions</h1>
-      <p class="text-gray-500 mt-1">Manage YouTube channels and podcast feeds for automated daily processing.</p>
+      <p class="text-xs font-semibold uppercase tracking-[.18em] text-blue-400 mb-2">Subscriptions</p>
+      <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Listening inbox</h1>
+      <p class="text-sm text-gray-500 mt-2">The newest episodes from every active source, ready when you are.</p>
     </div>
-    <button onclick="document.getElementById('add-form').classList.toggle('hidden')" 
-            class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
-      + Add Source
-    </button>
   </div>
 
-  {% if error %}
-  <div class="bg-red-950 border border-red-900 text-red-400 px-4 py-3 rounded-lg mb-6 text-sm">
-    {{ error }}
+  {% set metric_items = [
+    ('Active sources', metrics.active_sources, 'Feeds checked daily'),
+    ('Needs processing', metrics.needs_processing, 'Not yet in your library'),
+    ('Daily picks', metrics.daily_picks, 'Eligible for the next digest')
+  ] %}
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 mb-7">
+    {% for label, value, note in metric_items %}
+    <div class="sub-metric rounded-xl border border-gray-800 px-4 py-3.5">
+      <div class="text-2xl font-semibold text-white">{{ value }}</div>
+      <div class="text-xs font-medium text-gray-300 mt-1">{{ label }}</div>
+      <div class="hidden sm:block text-[11px] text-gray-600 mt-1">{{ note }}</div>
+    </div>
+    {% endfor %}
+    <div class="sub-metric rounded-xl border border-gray-800 px-4 py-3.5">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if metrics.freshness == 'Fresh' else ('bg-amber-400' if metrics.freshness == 'Stale' else 'bg-gray-600') }}"></span>
+        <span class="text-sm font-semibold text-white">{{ metrics.freshness }}</span>
+      </div>
+      <div class="text-xs font-medium text-gray-300 mt-2">Last feed refresh</div>
+      <div class="text-[11px] text-gray-600 mt-1" {% if metrics.last_refresh %}data-local-date="{{ metrics.last_refresh.isoformat() }}"{% endif %}>
+        {{ metrics.last_refresh.strftime('%b %-d, %H:%M UTC') if metrics.last_refresh else 'No cache received yet' }}
+      </div>
+    </div>
+  </div>
+
+  {% if request.args.get('error') %}
+  <div class="mb-4 rounded-lg border border-red-900 bg-red-950/40 px-4 py-3 text-sm text-red-300">{{ request.args.get('error') }}</div>
+  {% endif %}
+
+  {% if sources %}
+  <div class="flex flex-col lg:flex-row lg:items-center gap-3 mb-3">
+    <div class="inline-flex self-start rounded-lg border border-gray-800 bg-gray-900/60 p-1" role="tablist">
+      <button class="sub-tab rounded-md px-3.5 py-2 text-xs font-medium transition-colors" data-filter="needs">Needs processing</button>
+      <button class="sub-tab rounded-md px-3.5 py-2 text-xs font-medium transition-colors" data-filter="all">All</button>
+      <button class="sub-tab rounded-md px-3.5 py-2 text-xs font-medium transition-colors" data-filter="processed">Processed</button>
+    </div>
+    <div class="flex flex-1 flex-col sm:flex-row gap-2 lg:justify-end">
+      <input id="sub-search" type="search" autocomplete="off" placeholder="Search episodes…"
+             class="w-full lg:max-w-xs rounded-lg border border-gray-800 bg-gray-900 px-3.5 py-2.5 text-sm placeholder-gray-600 focus:border-blue-500 focus:outline-none">
+      <select id="sub-source-filter" class="rounded-lg border border-gray-800 bg-gray-900 px-3.5 py-2.5 text-sm text-gray-300 focus:border-blue-500 focus:outline-none">
+        <option value="">All active sources</option>
+        {% for source in sources if source.enabled %}<option value="{{ source.url }}">{{ source.name }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div id="sub-inbox" class="overflow-hidden rounded-xl border border-gray-800 bg-gray-900/30">
+    {% for ep in inbox %}
+    <article class="sub-row border-b border-gray-800/80 p-4 sm:p-5 last:border-b-0 hover:bg-gray-900/70 transition-colors"
+             data-inbox-row data-state="{{ 'processed' if ep.processed else 'needs' }}"
+             data-source="{{ ep.source_url }}"
+             data-search="{{ (ep.title ~ ' ' ~ ep.description ~ ' ' ~ ep.source_name ~ ' ' ~ ep.channel)|lower }}">
+      <div class="flex min-w-0 gap-3.5">
+        <div class="shrink-0 w-10 h-10 rounded-lg border {{ 'border-red-900/70 bg-red-950/40 text-red-300' if ep.source_kind == 'youtube' else 'border-blue-900/70 bg-blue-950/40 text-blue-300' }} flex items-center justify-center text-[11px] font-bold tracking-wide" title="{{ ep.source_kind|capitalize }}">
+          {{ '▶' if ep.source_kind == 'youtube' else ep.source_initials }}
+        </div>
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 mb-1.5">
+            <span class="font-medium {{ 'text-red-400' if ep.source_kind == 'youtube' else 'text-blue-400' }}">{{ ep.source_name }}</span>
+            <span aria-hidden="true">·</span>
+            {% if ep.published_at %}<time data-local-date="{{ ep.published_at.isoformat() }}">{{ ep.published_at.strftime('%b %-d, %Y') }}</time>{% else %}<span>Publication date unavailable</span>{% endif %}
+            {% if ep.duration %}<span aria-hidden="true">·</span><span>{{ ep.duration // 60 }}:{{ '%02d'|format(ep.duration % 60) }}</span>{% endif %}
+          </div>
+          <h2 class="text-sm sm:text-[15px] font-semibold leading-snug text-gray-100">{{ ep.title or 'Untitled episode' }}</h2>
+          {% if ep.description %}<p class="sub-clamp mt-1.5 text-xs sm:text-sm leading-relaxed text-gray-500">{{ ep.description }}</p>{% endif %}
+          {% if ep.processed and not ep.completed %}
+          <div class="mt-3 h-1 max-w-sm overflow-hidden rounded-full bg-gray-800"><div class="h-full rounded-full bg-blue-500" style="width:{{ ep.progress }}%"></div></div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="flex items-center sm:justify-end">
+        {% if ep.active %}
+        <button disabled class="sub-action rounded-lg border border-blue-900 bg-blue-950/40 px-4 py-2.5 text-sm font-medium text-blue-300 cursor-wait">Processing…</button>
+        {% elif ep.processed %}
+        <a href="/episode/{{ ep.slug }}" class="sub-action inline-flex justify-center rounded-lg border {{ 'border-emerald-800 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50' if ep.completed else 'border-blue-800 bg-blue-950/40 text-blue-300 hover:bg-blue-900/50' }} px-4 py-2.5 text-sm font-medium transition-colors">
+          {{ '✓ Finished' if ep.completed else ('Open · ' ~ ep.progress ~ '%') }}
+        </a>
+        {% else %}
+        <button type="button" class="sub-action sub-process rounded-lg bg-blue-600 hover:bg-blue-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors"
+                data-url="{{ ep.url }}" data-title="{{ ep.title }}" data-channel="{{ ep.channel or ep.source_name }}" data-duration="{{ ep.duration }}">Process</button>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+
+  <div id="sub-empty-filter" class="hidden rounded-xl border border-dashed border-gray-800 py-14 text-center">
+    <div class="text-sm font-medium text-gray-300">Nothing here right now</div>
+    <p id="sub-empty-copy" class="text-xs text-gray-600 mt-1">Try another filter or search.</p>
+  </div>
+  {% if not inbox %}
+  <div class="rounded-xl border border-dashed border-gray-800 py-14 px-5 text-center">
+    {% if metrics.active_sources == 0 %}
+      <div class="text-sm font-medium text-gray-300">All sources are paused</div><p class="text-xs text-gray-600 mt-1">Resume a source below to include it in feed checks and this inbox.</p>
+    {% elif metrics.freshness == 'Missing' %}
+      <div class="text-sm font-medium text-gray-300">Waiting for the first feed cache</div><p class="text-xs text-gray-600 mt-1">The scheduled check runs daily at 10:00 UTC (3:00 AM Pacific during daylight time).</p>
+    {% else %}
+      <div class="text-sm font-medium text-gray-300">No episodes found</div><p class="text-xs text-gray-600 mt-1">Active feeds were checked, but they did not return cached episodes.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="rounded-xl border border-dashed border-gray-800 py-16 px-5 text-center">
+    <div class="text-base font-medium text-gray-200">Your listening inbox is empty</div>
+    <p class="text-sm text-gray-600 mt-2">Add a podcast or YouTube source below to begin.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="border-t border-gray-800 pt-8">
+  <div class="flex items-center justify-between gap-4 mb-4">
+    <div><h2 class="text-lg font-semibold">Your sources</h2><p class="text-xs text-gray-600 mt-1">Feed discovery and daily-pick settings are independent.</p></div>
+    <span class="text-xs text-gray-600">Daily check: 10:00 UTC</span>
+  </div>
+  {% if sources %}
+  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    {% for source in sources %}
+    <article class="rounded-xl border {{ 'border-gray-800 bg-gray-900/45' if source.enabled else 'border-gray-800/70 bg-gray-950 opacity-75' }} p-4">
+      <div class="flex items-start gap-3">
+        <div class="w-9 h-9 shrink-0 rounded-lg border {{ 'border-red-900 bg-red-950/40 text-red-300' if source.kind == 'youtube' else 'border-blue-900 bg-blue-950/40 text-blue-300' }} flex items-center justify-center text-[10px] font-bold">{{ '▶' if source.kind == 'youtube' else source.initials }}</div>
+        <div class="min-w-0 flex-1"><h3 class="truncate text-sm font-semibold text-gray-100">{{ source.name }}</h3><div class="mt-1 flex flex-wrap gap-1.5 text-[10px]"><span class="rounded border border-gray-700 px-1.5 py-.5 text-gray-400">{{ source.kind|capitalize }}</span><span class="rounded border {{ 'border-emerald-900 text-emerald-400' if source.enabled else 'border-amber-900 text-amber-400' }} px-1.5 py-.5">{{ 'Active' if source.enabled else 'Paused' }}</span></div></div>
+      </div>
+      {% if source.description %}<p class="sub-clamp mt-3 min-h-[2.5rem] text-xs leading-relaxed text-gray-500">{{ source.description }}</p>{% endif %}
+      <dl class="mt-3 grid grid-cols-2 gap-2 border-y border-gray-800/80 py-3 text-[11px]"><div><dt class="text-gray-600">Cached</dt><dd class="mt-1 text-gray-300">{{ source.cached_count }} episodes</dd></div><div><dt class="text-gray-600">Last success</dt><dd class="mt-1 text-gray-300" {% if source.last_refresh %}data-local-date="{{ source.last_refresh.isoformat() }}"{% endif %}>{{ source.last_refresh.strftime('%b %-d') if source.last_refresh else 'Not yet' }}</dd></div></dl>
+      <div class="mt-3 flex items-center justify-between gap-2">
+        <form method="post" action="/subscriptions/update">
+          <input type="hidden" name="original_url" value="{{ source.url }}"><input type="hidden" name="name" value="{{ source.name }}"><input type="hidden" name="url" value="{{ source.url }}"><input type="hidden" name="description" value="{{ source.description }}"><input type="hidden" name="enabled" value="{{ '0' if source.enabled else '1' }}"><input type="hidden" name="digest_enabled" value="{{ '1' if source.digest_enabled else '0' }}">
+          <button class="text-xs {{ 'text-amber-400 hover:text-amber-300' if source.enabled else 'text-emerald-400 hover:text-emerald-300' }}">{{ 'Pause' if source.enabled else 'Resume' }}</button>
+        </form>
+        <form method="post" action="/subscriptions/update" class="flex items-center gap-2">
+          <input type="hidden" name="original_url" value="{{ source.url }}"><input type="hidden" name="name" value="{{ source.name }}"><input type="hidden" name="url" value="{{ source.url }}"><input type="hidden" name="description" value="{{ source.description }}"><input type="hidden" name="enabled" value="{{ '1' if source.enabled else '0' }}"><input type="hidden" name="digest_enabled" value="{{ '0' if source.digest_enabled else '1' }}">
+          <button class="text-[11px] text-gray-500 hover:text-gray-300">{{ 'In daily picks' if source.digest_enabled else 'Not in daily picks' }}</button>
+        </form>
+        <details class="relative"><summary class="cursor-pointer list-none text-xs text-blue-400 hover:text-blue-300">Edit</summary><div class="absolute bottom-7 right-0 z-20 w-[min(21rem,calc(100vw-2rem))] rounded-xl border border-gray-700 bg-gray-900 p-4 shadow-2xl"><form method="post" action="/subscriptions/update" class="space-y-3"><input type="hidden" name="original_url" value="{{ source.url }}"><input type="hidden" name="enabled" value="{{ '1' if source.enabled else '0' }}"><input type="hidden" name="digest_enabled" value="{{ '1' if source.digest_enabled else '0' }}"><label class="block text-[11px] text-gray-500">Name<input name="name" required value="{{ source.name }}" class="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200"></label><label class="block text-[11px] text-gray-500">Source URL<input name="url" required value="{{ source.url }}" class="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200"></label><label class="block text-[11px] text-gray-500">Description<textarea name="description" rows="2" class="mt-1 w-full rounded border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-200">{{ source.description }}</textarea></label><div class="flex justify-end"><button class="rounded bg-blue-600 px-3 py-2 text-xs font-semibold text-white">Save changes</button></div></form></div></details>
+        <form method="post" action="/subscriptions/delete" onsubmit="return confirm('Remove this source? Cached episodes will leave the inbox, but processed episodes remain in your library.')"><input type="hidden" name="url" value="{{ source.url }}"><button class="text-xs text-gray-600 hover:text-red-400">Remove</button></form>
+      </div>
+    </article>
+    {% endfor %}
   </div>
   {% endif %}
 
-  <!-- Add Source Form -->
-  <div id="add-form" class="hidden bg-gray-900 border border-gray-800 rounded-xl p-6 mb-8">
-    <h2 class="text-lg font-semibold mb-4">Add New Subscription</h2>
-    <form action="/subscriptions/add" method="post" class="space-y-4">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div class="space-y-1">
-          <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</label>
-          <input type="text" name="name" required placeholder="e.g. NHK News Web Easy"
-                 class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
-        </div>
-        <div class="space-y-1">
-          <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">URL</label>
-          <input type="url" name="url" required placeholder="YouTube Channel or Podcast RSS URL"
-                 class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
-        </div>
-      </div>
-      <div class="space-y-1">
-        <label class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Description (Optional)</label>
-        <input type="text" name="description" placeholder="Brief notes about this source"
-               class="w-full bg-black border border-gray-800 rounded-lg px-4 py-2.5 text-sm focus:border-blue-500 outline-none transition-colors">
-      </div>
-      <div class="flex justify-end gap-3 pt-2">
-        <button type="button" onclick="document.getElementById('add-form').classList.add('hidden')"
-                class="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors">
-          Cancel
-        </button>
-        <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg text-sm font-semibold transition-colors">
-          Add Subscription
-        </button>
-      </div>
-    </form>
-  </div>
+  <details class="mt-4 rounded-xl border border-dashed border-gray-800 bg-gray-900/20"><summary class="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-300">＋ Add a source</summary><form method="post" action="/subscriptions/add" class="grid gap-3 border-t border-gray-800 p-4 sm:grid-cols-2"><input name="name" required placeholder="Source name" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none"><input name="url" type="url" required placeholder="Podcast or YouTube URL" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none"><textarea name="description" rows="2" placeholder="Description (optional)" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none sm:col-span-2"></textarea><div class="sm:col-span-2 flex justify-end"><button class="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500">Add source</button></div></form></details>
+  <p class="mt-4 text-[11px] text-gray-600">Paused sources are skipped by feed checks, the inbox, and daily picks. The feed cache refreshes after the daily 10:00 UTC check; {{ metrics.freshness|lower }} cache data is currently shown.</p>
+</section>
+{% endblock %}
 
-  <!-- Source List -->
-  <div class="space-y-4">
-    {% if sources %}
-      {% for source in sources %}
-      <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
-        <div class="flex items-center justify-between gap-4">
-          <div class="min-w-0">
-            <h3 class="font-semibold text-gray-100 truncate">{{ source.name }}</h3>
-            <p class="text-xs text-gray-500 mt-0.5 truncate">{{ source.url }}</p>
-            {% if source.description %}
-            <p class="text-xs text-gray-400 mt-2">{{ source.description }}</p>
-            {% endif %}
-          </div>
-          <form action="/subscriptions/delete" method="post" onsubmit="return confirm('Remove this subscription?')">
-            <input type="hidden" name="url" value="{{ source.url }}">
-            <button type="submit" class="p-2 text-gray-600 hover:text-red-400 transition-colors">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="3 6 5 6 21 6"></polyline>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-              </svg>
-            </button>
-          </form>
-        </div>
-        {% set recent = recent_cache.get(source.url) if recent_cache else None %}
-        {% if recent and recent.episodes %}
-        <div class="mt-3 pt-3 border-t border-gray-800 space-y-2.5">
-          <p class="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Recent episodes</p>
-          {% for item in recent.episodes %}
-          <div class="text-xs flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <span class="text-gray-300">{{ item.title }}</span>
-              {% if item.description %}
-              <span class="text-gray-600"> — {{ item.description }}</span>
-              {% endif %}
-            </div>
-            {% if item.url %}
-            <form action="/upload" method="post" class="shrink-0"
-                  onsubmit="return confirm('Process this episode through the full pipeline (download → transcribe → translate → analyse)?');">
-              <input type="hidden" name="source_url" value="{{ item.url }}">
-              <input type="hidden" name="title" value="{{ item.title }}">
-              <input type="hidden" name="channel" value="{{ item.channel }}">
-              <input type="hidden" name="level" value="advanced">
-              <button type="submit"
-                      class="text-[11px] font-semibold text-blue-400 hover:text-blue-300 border border-blue-900/60 hover:border-blue-600 rounded px-2 py-0.5 transition-colors whitespace-nowrap">
-                Process
-              </button>
-            </form>
-            {% endif %}
-          </div>
-          {% endfor %}
-        </div>
-        {% endif %}
-      </div>
-      {% endfor %}
-    {% else %}
-      <div class="text-center py-20 bg-gray-900 border border-gray-800 border-dashed rounded-xl">
-        <div class="text-gray-600 mb-2">No active subscriptions.</div>
-        <button onclick="document.getElementById('add-form').classList.remove('hidden')" 
-                class="text-blue-500 text-sm hover:underline">Add your first source</button>
-      </div>
-    {% endif %}
-  </div>
+{% block scripts %}
+<script>
+(function () {
+  var state = 'needs';
+  var tabs = Array.from(document.querySelectorAll('.sub-tab'));
+  var rows = Array.from(document.querySelectorAll('[data-inbox-row]'));
+  var search = document.getElementById('sub-search');
+  var source = document.getElementById('sub-source-filter');
+  var empty = document.getElementById('sub-empty-filter');
+  function render() {
+    var query = (search && search.value || '').trim().toLowerCase();
+    var selected = source && source.value || '';
+    var visible = 0;
+    rows.forEach(function (row) {
+      var matchesState = state === 'all' || row.dataset.state === state;
+      var matchesSearch = !query || row.dataset.search.indexOf(query) !== -1;
+      var matchesSource = !selected || row.dataset.source === selected;
+      var show = matchesState && matchesSearch && matchesSource;
+      row.classList.toggle('hidden', !show); if (show) visible++;
+    });
+    tabs.forEach(function (tab) { var on = tab.dataset.filter === state; tab.classList.toggle('bg-gray-700', on); tab.classList.toggle('text-white', on); tab.classList.toggle('text-gray-500', !on); });
+    if (empty) empty.classList.toggle('hidden', visible !== 0 || rows.length === 0);
+  }
+  tabs.forEach(function (tab) { tab.addEventListener('click', function () { state = tab.dataset.filter; render(); }); });
+  if (search) search.addEventListener('input', render); if (source) source.addEventListener('change', render); render();
 
-  <div class="mt-8 text-center">
-    <p class="text-xs text-gray-600">
-      Note: These sources are checked by the <code>pipeline.py</code> script when run via cron or launchd.
-    </p>
-  </div>
-</div>
+  document.querySelectorAll('[data-local-date]').forEach(function (el) { var d = new Date(el.dataset.localDate); if (!isNaN(d)) el.textContent = d.toLocaleString([], {month:'short', day:'numeric', year: el.tagName === 'TIME' ? 'numeric' : undefined, hour: el.tagName === 'TIME' ? undefined : 'numeric', minute: el.tagName === 'TIME' ? undefined : '2-digit'}); });
+  document.querySelectorAll('.sub-process').forEach(function (button) {
+    button.addEventListener('click', async function () {
+      if (!confirm('Process “' + button.dataset.title + '”?\n\nThis starts the paid transcription and analysis pipeline.')) return;
+      button.disabled = true; button.textContent = 'Starting…';
+      var body = new URLSearchParams({source_url:button.dataset.url, title:button.dataset.title, channel:button.dataset.channel, duration:button.dataset.duration || '0', level:'advanced'});
+      try {
+        var response = await fetch('/api/upload', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body});
+        var result = await response.json(); if (!response.ok) throw new Error(result.error || 'Could not start processing');
+        if (!result.job_id && result.slug) { window.location.href = '/episode/' + result.slug; return; }
+        button.textContent = 'Processing…'; button.classList.add('cursor-wait');
+        var timer = setInterval(async function () { try { var r = await fetch('/api/job/' + result.job_id + '/status'); var job = await r.json(); if (job.status === 'done') { clearInterval(timer); window.location.href = '/episode/' + (job.slug || result.slug); } else if (job.status === 'error') { clearInterval(timer); button.disabled = false; button.textContent = 'Try again'; alert(job.error || 'Processing failed'); } } catch (_) {} }, 4000);
+      } catch (error) { button.disabled = false; button.textContent = 'Process'; alert(error.message); }
+    });
+  });
+}());
+</script>
 {% endblock %}

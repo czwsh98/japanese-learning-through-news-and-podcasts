@@ -28,6 +28,8 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +38,8 @@ CONFIG_FILE  = "/root/mimichan/bot_config.json"
 LOG_FILE     = "/root/mimichan/mimichan_bot.log"
 PID_FILE     = "/tmp/mimichan_bot.pid"
 TOKEN_FILE   = "/root/mimichan/.web_token"
+DIGEST_STATE_FILE = "/root/mimichan/digest_state.json"
+PENDING_FILE = "/root/mimichan/pending_episodes.json"
 
 DB_CONTAINER  = "mimichan-db-1"
 WEB_CONTAINER = "mimichan-web-1"
@@ -57,6 +61,7 @@ STEP_LABELS = {
 # md5-key → url  (for the 64-byte callback_data limit)
 _PENDING      = {}
 _PENDING_LOCK = threading.Lock()
+_DIGEST_LOCK  = threading.Lock()
 
 # job_id → {url, title, slug, step, step_num, total_steps, status, chat_id, started_at}
 _JOBS      = {}
@@ -130,12 +135,42 @@ def answer_callback(token, callback_query_id, text=""):
 
 # ── Pending URL store ─────────────────────────────────────────────────────────
 
-def store_ep(url, title="", channel=""):
+def store_ep(url, title="", channel="", duration=0):
     import hashlib
     key = hashlib.md5(url.encode()).hexdigest()[:8]
     with _PENDING_LOCK:
-        _PENDING[key] = {"url": url, "title": title, "channel": channel}
+        try:
+            with open(PENDING_FILE) as f:
+                persisted = json.load(f)
+            if not isinstance(persisted, dict):
+                persisted = {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            persisted = {}
+        episode = {"url": url, "title": title, "channel": channel,
+                   "duration": duration}
+        _PENDING[key] = episode
+        persisted[key] = episode
+        persisted = dict(list(persisted.items())[-200:])
+        tmp = f"{PENDING_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(persisted, f, ensure_ascii=False)
+        os.replace(tmp, PENDING_FILE)
     return key
+
+
+def get_pending_ep(key):
+    with _PENDING_LOCK:
+        if key in _PENDING:
+            return _PENDING[key]
+        try:
+            with open(PENDING_FILE) as f:
+                persisted = json.load(f)
+            ep = persisted.get(key) if isinstance(persisted, dict) else None
+            if ep:
+                _PENDING[key] = ep
+            return ep
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -235,8 +270,59 @@ def web_api(owner_email, method, path, form=None, timeout=60):
 
 # ── Subscription checking ─────────────────────────────────────────────────────
 
+_ITUNES_DURATION = "{http://www.itunes.com/dtds/podcast-1.0.dtd}duration"
+
+
+def _parse_duration(value):
+    """Parse iTunes duration as raw seconds, MM:SS, or HH:MM:SS."""
+    if value is None:
+        return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        parts = [float(part) for part in text.split(":")]
+    except ValueError:
+        return 0
+    if len(parts) == 1:
+        seconds = parts[0]
+    elif len(parts) in (2, 3):
+        seconds = 0
+        for part in parts:
+            seconds = seconds * 60 + part
+    else:
+        return 0
+    return max(0, int(round(seconds)))
+
+
+def _item_duration(item):
+    return _parse_duration(item.findtext(_ITUNES_DURATION))
+
+
+def _normalized_published_at(value):
+    """Return an ISO-8601 UTC timestamp, or an empty string when unavailable."""
+    if value in (None, ""):
+        return ""
+    try:
+        text = str(value).strip()
+        if isinstance(value, str) and re.fullmatch(r"\d{8}", text):
+            parsed = datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc)
+        elif isinstance(value, (int, float)) or text.isdigit():
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
 def fetch_latest(source):
-    """Return (ep_url, title, channel) or None."""
+    """Return (ep_url, title, channel, duration_seconds) or None."""
     rss_url = source.get("rss_url")
     url     = source["url"]
     name    = source.get("name", url)
@@ -254,7 +340,7 @@ def fetch_latest(source):
             ep_url  = (enc.get("url") if enc is not None else None) or item.findtext("link") or url
             title   = item.findtext("title") or "(unknown)"
             channel = root.findtext("./channel/title") or name
-            return ep_url, title, channel
+            return ep_url, title, channel, _item_duration(item)
         except Exception as e:
             log(f"RSS fetch failed for {name}: {e}")
             return None
@@ -272,7 +358,7 @@ def fetch_latest(source):
             ep_url  = info.get("webpage_url") or info.get("url") or url
             title   = info.get("title", "(unknown)")
             channel = info.get("channel") or info.get("uploader") or name
-            return ep_url, title, channel
+            return ep_url, title, channel, _parse_duration(info.get("duration"))
         except Exception as e:
             log(f"yt-dlp failed for {name}: {e}")
             return None
@@ -288,18 +374,21 @@ def do_check(token, chat_id):
     known = get_known_urls()
     found = []
     for source in sources:
+        if source.get("enabled", True) is False:
+            continue
         result = fetch_latest(source)
         if result is None:
             continue
-        ep_url, title, channel = result
+        ep_url, title, channel, duration = result
         if ep_url not in known:
-            found.append({"url": ep_url, "title": title, "channel": channel})
+            found.append({"url": ep_url, "title": title, "channel": channel,
+                          "duration": duration})
 
     if not found:
         return "No new episodes."
 
     for ep in found:
-        key      = store_ep(ep["url"], ep["title"], ep["channel"])
+        key      = store_ep(ep["url"], ep["title"], ep["channel"], ep["duration"])
         keyboard = {"inline_keyboard": [[
             {"text": "📖 Process", "callback_data": f"mc:process:{key}"},
         ]]}
@@ -371,6 +460,9 @@ def fetch_recent(source, limit=5):
                     "description": _one_line(item.findtext("description")),
                     "url":         (ep_url or "").strip(),
                     "channel":     channel,
+                    "duration":    _item_duration(item),
+                    "published_at": _normalized_published_at(
+                        item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date")),
                 })
             return out
         except Exception as e:
@@ -399,6 +491,9 @@ def fetch_recent(source, limit=5):
                     "description": _one_line(e.get("description")),
                     "url":         ep_url,
                     "channel":     channel,
+                    "duration":    _parse_duration(e.get("duration")),
+                    "published_at": _normalized_published_at(
+                        e.get("timestamp") or e.get("release_timestamp") or e.get("upload_date")),
                 })
             return out
         except Exception as e:
@@ -406,19 +501,33 @@ def fetch_recent(source, limit=5):
             return []
 
 
-def refresh_recent_cache(owner_email):
-    """Fetch recent episodes for every source and push them to the web app so
-    the /subscriptions page can display them. Called by the daily cron check."""
+def fetch_all_recent(limit=5):
+    """Fetch every source once and return (sources, items_by_source_url)."""
     try:
         with open(SOURCES_FILE) as f:
             sources = json.load(f).get("sources", [])
     except Exception as e:
         log(f"recent cache: cannot read sources: {e}")
-        return
+        return [], {}
+
+    recent_by_source = {}
+    for source in sources:
+        if source.get("enabled", True) is False:
+            continue
+        items = fetch_recent(source, limit=limit)
+        if items:
+            recent_by_source[source["url"]] = items
+    return sources, recent_by_source
+
+
+def refresh_recent_cache(owner_email, sources=None, recent_by_source=None):
+    """Push recent items to the web app, fetching only when not supplied."""
+    if sources is None or recent_by_source is None:
+        sources, recent_by_source = fetch_all_recent()
 
     cache = {}
     for source in sources:
-        items = fetch_recent(source, limit=5)
+        items = recent_by_source.get(source["url"], [])
         if items:
             cache[source["url"]] = {
                 "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -437,8 +546,183 @@ def refresh_recent_cache(owner_email):
         log(f"recent cache pushed: {resp.get('sources', len(cache))} sources")
 
 
+def _load_digest_state(path=DIGEST_STATE_FILE):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_digest_state(state, path=DIGEST_STATE_FILE):
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _rank_candidates(candidates, state, limit=2):
+    """Choose fresh episodes from least-recently-recommended sources."""
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            state.get(item["source_url"], ""),
+            item.get("source_order", 0),
+            item.get("item_order", 0),
+        ),
+    )
+    picks = []
+    used_sources = set()
+    for item in ranked:
+        if item["source_url"] in used_sources:
+            continue
+        picks.append(item)
+        used_sources.add(item["source_url"])
+        if len(picks) >= limit:
+            break
+    return picks
+
+
+def _unfinished_episodes(owner_email, limit=3):
+    email = owner_email.replace("'", "''")
+    sql = f"""
+        SELECT replace(replace(replace(e.title, chr(9), ' '), chr(10), ' '), chr(13), ' ')
+               || chr(9) || e.slug || chr(9) ||
+               coalesce(e.max_position, e.resume_position, 0)::text || chr(9) ||
+               e.duration::text
+        FROM episodes e
+        JOIN users u ON u.id = e.owner_user_id
+        WHERE lower(u.email) = lower('{email}')
+          AND e.resume_position IS NOT NULL
+          AND e.completed_at IS NULL
+          AND e.duration > 0
+          AND coalesce(e.max_position, e.resume_position, 0) / e.duration < 0.9
+        ORDER BY e.resume_updated_at DESC NULLS LAST
+        LIMIT {int(limit)}
+    """
+    rows = db_query(sql)
+    unfinished = []
+    for row in rows.splitlines():
+        parts = row.split("\t")
+        if len(parts) != 4:
+            continue
+        try:
+            position, duration = float(parts[2]), int(parts[3])
+        except ValueError:
+            continue
+        unfinished.append({"title": parts[0], "slug": parts[1],
+                           "position": position, "duration": duration})
+    return unfinished
+
+
+def _expiring_episodes(owner_email, limit=3):
+    email = owner_email.replace("'", "''")
+    sql = f"""
+        SELECT replace(replace(replace(e.title, chr(9), ' '), chr(10), ' '), chr(13), ' ')
+               || chr(9) || e.slug || chr(9) ||
+               greatest(0, ceil(extract(epoch FROM (e.delete_after - now())) / 86400))::int::text
+        FROM episodes e
+        JOIN users u ON u.id = e.owner_user_id
+        WHERE lower(u.email) = lower('{email}')
+          AND e.completed_at IS NOT NULL
+          AND e.retention_exempt = FALSE
+          AND e.deleted_at IS NULL
+          AND e.delete_after > now()
+          AND e.delete_after <= now() + interval '7 days'
+        ORDER BY e.delete_after
+        LIMIT {int(limit)}
+    """
+    rows = db_query(sql)
+    expiring = []
+    for row in rows.splitlines():
+        parts = row.split("\t")
+        if len(parts) != 3:
+            continue
+        try:
+            days = int(parts[2])
+        except ValueError:
+            continue
+        expiring.append({"title": parts[0], "slug": parts[1], "days": days})
+    return expiring
+
+
+def do_digest(token, chat_id, owner_email, sources=None, recent_by_source=None):
+    """Send up to two new picks, rotated across sources, plus unfinished nudges."""
+    if sources is None or recent_by_source is None:
+        sources, recent_by_source = fetch_all_recent()
+
+    known = get_known_urls()
+    candidates = []
+    for source_order, source in enumerate(sources):
+        if source.get("enabled", True) is False or source.get("digest_enabled", True) is False:
+            continue
+        source_url = source["url"]
+        for item_order, item in enumerate(recent_by_source.get(source_url, [])):
+            if not item.get("url") or item["url"] in known:
+                continue
+            candidates.append({**item, "source_url": source_url,
+                               "source_order": source_order, "item_order": item_order})
+
+    unfinished = _unfinished_episodes(owner_email)
+    expiring = _expiring_episodes(owner_email)
+    with _DIGEST_LOCK:
+        state = _load_digest_state()
+        picks = _rank_candidates(candidates, state)
+
+    if not picks and not unfinished and not expiring:
+        return "No new picks, unfinished episodes, or deletion warnings."
+
+    lines = ["🎙 Today's picks"]
+    keyboard = []
+    if picks:
+        for index, pick in enumerate(picks, 1):
+            lines.append(f"{index}. 《{pick['title']}》— {pick['channel']}")
+            if pick.get("description"):
+                lines.append(f"   {pick['description']}")
+            key = store_ep(pick["url"], pick["title"], pick["channel"],
+                           pick.get("duration", 0))
+            keyboard.append([{"text": f"📖 Process #{index}",
+                              "callback_data": f"mc:process:{key}"}])
+    else:
+        lines.append("No new episodes today.")
+
+    if unfinished:
+        lines.extend(["", "⏸ Unfinished"])
+        for item in unfinished:
+            pos_min = max(0, round(item["position"] / 60))
+            duration_min = max(1, round(item["duration"] / 60))
+            lines.append(f"   • 《{item['title']}》— {pos_min} min in, {duration_min} min")
+            lines.append(f"     {SITE_BASE}/episode/{item['slug']}")
+
+    if expiring:
+        lines.extend(["", "🗑 Deletes soon"])
+        for item in expiring:
+            days = item["days"]
+            lines.append(f"   • 《{item['title']}》— {days} day{'s' if days != 1 else ''}")
+            lines.append(f"     {SITE_BASE}/episode/{item['slug']}")
+
+    kwargs = {}
+    if keyboard:
+        kwargs["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+    result = tg(token, "sendMessage", chat_id=chat_id, text="\n".join(lines), **kwargs)
+    if result.get("ok") and picks:
+        with _DIGEST_LOCK:
+            state = _load_digest_state()
+            recommended_at = datetime.now(timezone.utc).isoformat()
+            for pick in picks:
+                state[pick["source_url"]] = recommended_at
+            _save_digest_state(state)
+    return (f"Sent {len(picks)} pick(s), {len(unfinished)} unfinished reminder(s), "
+            f"and {len(expiring)} deletion warning(s).")
+
+
 def do_episodes(limit=10):
-    rows = db_query(f"SELECT title, slug FROM episodes ORDER BY created_at DESC LIMIT {limit}")
+    rows = db_query(
+        f"SELECT title, slug FROM episodes WHERE deleted_at IS NULL "
+        f"ORDER BY created_at DESC LIMIT {limit}"
+    )
     if not rows:
         return "No processed episodes yet."
     lines = ["🎙 Recent episodes:"]
@@ -458,7 +742,8 @@ def _progress_text(title, step_num, total_steps, label):
             f"{label}\n{filled}  {step_num}/{total_steps}")
 
 
-def do_process(bot_token, owner_email, chat_id, url, title="(episode)", channel="", msg_id=None):
+def do_process(bot_token, owner_email, chat_id, url, title="(episode)", channel="",
+               duration=0, msg_id=None):
     """Kick off processing through the web API and stream live status."""
     form = {"source_url": url, "level": "advanced"}
     # Pass the RSS-derived title/channel so podcast episodes get real titles
@@ -467,6 +752,8 @@ def do_process(bot_token, owner_email, chat_id, url, title="(episode)", channel=
         form["title"] = title
     if channel:
         form["channel"] = channel
+    if duration:
+        form["duration"] = str(duration)
     resp, err = web_api(owner_email, "POST", "/api/upload", form=form)
     if err or resp is None:
         if msg_id:
@@ -587,6 +874,9 @@ def handle_message(bot_token, owner_email, chat_id, text, authorized_id):
     if low in ("/check", "/check@mimichanjp_bot"):
         send(bot_token, chat_id, "🔍 Checking subscriptions…")
         send(bot_token, chat_id, do_check(bot_token, chat_id))
+    elif low in ("/digest", "/digest@mimichanjp_bot"):
+        send(bot_token, chat_id, "🔍 Building today's digest…")
+        send(bot_token, chat_id, do_digest(bot_token, chat_id, owner_email))
     elif low in ("/status", "/status@mimichanjp_bot"):
         send(bot_token, chat_id, do_status(), parse_mode="Markdown")
     elif low in ("/ep", "/episodes"):
@@ -595,6 +885,7 @@ def handle_message(bot_token, owner_email, chat_id, text, authorized_id):
         send(bot_token, chat_id,
              "🎙 *mimichan bot*\n\n"
              "/check — scan subscriptions for new episodes\n"
+             "/digest — two daily picks plus unfinished episodes\n"
              "/status — show what's processing now\n"
              "/ep — recent processed episodes (with links)\n\n"
              "Tap 📖 Process on any notification to run the pipeline; "
@@ -614,8 +905,7 @@ def handle_callback(bot_token, owner_email, callback_query, authorized_id):
 
     if data.startswith("mc:process:"):
         key = data.split(":", 2)[2]
-        with _PENDING_LOCK:
-            ep = _PENDING.get(key)
+        ep = get_pending_ep(key)
         if not ep:
             edit(bot_token, chat_id, msg_id, "⚠️ Button expired — run /check again.")
             return
@@ -626,7 +916,8 @@ def handle_callback(bot_token, owner_email, callback_query, authorized_id):
             parts = orig.split("\n") if orig else []
             title = parts[1].strip("*_ ") if len(parts) >= 2 else "(episode)"
         do_process(bot_token, owner_email, chat_id, ep["url"],
-                   title=title or "(episode)", channel=ep.get("channel", ""), msg_id=msg_id)
+                   title=title or "(episode)", channel=ep.get("channel", ""),
+                   duration=ep.get("duration", 0), msg_id=msg_id)
 
 
 # ── Long-polling loop ─────────────────────────────────────────────────────────

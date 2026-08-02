@@ -1,0 +1,46 @@
+{
+  "sources": [
+    {
+      "name": "ニュースの現場から",
+      "url": "https://podcasts.apple.com/us/podcast/id1526773927",
+      "rss_url": "https://www.omnycontent.com/d/playlist/1e3bd144-9b57-451a-93cf-ac0e00e74446/50382bb4-3af3-4250-8ddc-ac0f0033ceb5/684015f9-2396-4ac4-bc1f-ac0f0033d08c/podcast.rss",
+      "enabled": true,
+      "digest_enabled": true
+    },
+    {
+      "name": "安住紳一郎の日曜天国",
+      "url": "https://podcasts.apple.com/us/podcast/id1647482386",
+      "rss_url": "https://feeds.megaphone.fm/TBS2679398439",
+      "enabled": true,
+      "digest_enabled": true
+    },
+    {
+      "name": "PIVOT 公式チャンネル",
+      "url": "https://www.youtube.com/@pivot00",
+      "enabled": true,
+      "digest_enabled": true
+    },
+    {
+      "name": "荻上チキ・Session",
+      "url": "https://podcasts.apple.com/jp/podcast/id1532201544",
+      "rss_url": "https://feeds.megaphone.fm/TBS7072964704",
+      "enabled": true,
+      "digest_enabled": true
+    },
+    {
+      "name": "コテンラジオ",
+      "url": "https://podcasts.apple.com/jp/podcast/id1450522865",
+      "rss_url": "https://anchor.fm/s/8c2088c/podcast/rss",
+      "enabled": true,
+      "digest_enabled": true
+    },
+    {
+      "name": "速水健朗のこれはニュースではない",
+      "url": "https://podcasts.apple.com/jp/podcast/%E9%80%9F%E6%B0%B4%E5%81%A5%E6%9C%97%E3%81%AE%E3%81%93%E3%82%8C%E3%81%AF%E3%83%8B%E3%83%A5%E3%83%BC%E3%82%B9%E3%81%A7%E3%81%AF%E3%81%AA%E3%81%84/id1602026408",
+      "description": "",
+      "rss_url": "https://feeds.megaphone.fm/TBS1624729971",
+      "enabled": true,
+      "digest_enabled": true
+    }
+  ]
+}
