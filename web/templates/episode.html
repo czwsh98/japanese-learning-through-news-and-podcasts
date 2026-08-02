@@ -44,20 +44,33 @@
       {% endif %}
     </div>
   </div>
-  <form method="post" action="/episode/{{ date }}/delete" class="shrink-0 mt-1"
-        onsubmit="return confirm('Delete this episode?\n\nThis removes all files including the audio.')">
-    <button type="submit"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500
-                   hover:text-red-400 hover:bg-red-950 border border-transparent
-                   hover:border-red-900 transition-all">
-      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"
-           fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
-        <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
-      </svg>
-      Delete episode
-    </button>
-  </form>
+  <div class="shrink-0 mt-1 flex flex-col items-end gap-1">
+    <div class="flex items-center gap-1">
+      <button id="btn-completion" type="button" class="completion-marker" aria-pressed="false" disabled
+              title="Mark this episode as finished">
+        <span class="completion-marker-icon" aria-hidden="true">○</span>
+        <span class="completion-marker-label">Mark finished</span>
+      </button>
+      <form method="post" action="/episode/{{ date }}/delete"
+            onsubmit="return confirm('Delete this episode?\n\nThis removes all files including the audio.')">
+        <button type="submit"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-gray-500
+                       hover:text-red-400 hover:bg-red-950 border border-transparent
+                       hover:border-red-900 transition-all">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>
+          <span class="hidden sm:inline">Delete episode</span>
+        </button>
+      </form>
+    </div>
+    <div id="completion-retention" class="hidden text-[10px] text-gray-500 items-center gap-1.5">
+      <span id="completion-retention-label"></span>
+      <button id="btn-keep-episode" type="button" class="text-emerald-500 hover:text-emerald-300 transition-colors"></button>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════

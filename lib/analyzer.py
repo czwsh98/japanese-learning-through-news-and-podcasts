@@ -1,4 +1,19 @@
-"""Identify JLPT vocabulary and grammar patterns via OpenAI gpt-4o-mini function calling."""
+"""
+Extract JLPT vocabulary, grammar, and expressions from a Japanese transcript.
+
+Vocabulary and its JLPT level come from lib/jlpt_bank.py — a real JLPT word
+list — not from LLM grading. Asking the LLM to grade vocabulary was tried
+twice (see git history) and never worked: it invented non-words, stamped
+words with whatever level was asked for regardless of their true difficulty,
+and mislabelled easy words as advanced. The bank only answers "is this word
+JLPT-graded, and at what level" — a lookup, not a guess.
+
+The LLM keeps two jobs it's actually suited for:
+  - curating which bank-graded candidates are worth a flashcard, and writing
+    the Chinese gloss + register for them (Pass B)
+  - extracting grammar patterns and expressions, which have no equivalent
+    open dataset here (Pass C, same spirit as before)
+"""
 import json
 import logging
 import os
@@ -9,12 +24,25 @@ from typing import Any
 
 from openai import OpenAI
 
+from lib import jlpt_bank
+
 log = logging.getLogger(__name__)
 
-_MODEL = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
-_MAX_WORKERS = 4  # concurrent OpenAI requests
+_PROVIDER = os.environ.get("ANALYSIS_PROVIDER", "deepseek")
+_MODEL = (
+    os.environ.get("DEEPSEEK_MODEL", "deepseek-chat") if _PROVIDER == "deepseek"
+    else os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
+)
+_MAX_WORKERS = 4  # concurrent LLM requests
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
+
+
+def _get_client() -> OpenAI:
+    if _PROVIDER == "deepseek":
+        return OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
 
 # level key → (display label, ordered JLPT tiers to find)
 # NOTE: the `tiers` here MUST match LEVEL_TIERS in web/static/js/player.js — the UI
@@ -29,14 +57,160 @@ LEVELS: dict[str, tuple[str, list[str]]] = {
 }
 DEFAULT_LEVEL = "advanced"
 
+# ── Pass B: LLM curates bank-graded candidates (cannot invent words/levels) ──
+
+_CURATE_MAX = 80  # cap curated JLPT-tier vocab per episode
+_CTX_MAX    = 30  # cap curated context-specific vocab per episode
+
+def _curate_schema(is_context: bool) -> dict:
+    # Two distinct schemas rather than one schema with a conditional field:
+    # tested with a real 40-candidate context-specific batch, a single schema
+    # phrased as "fill 'en' only if it's empty" made the model pattern-match
+    # to the majority case in the batch (every context-specific candidate's
+    # bank 'en' IS empty) and leave its own 'en' blank too, even though it
+    # filled it correctly on a small hand-picked example. Splitting into two
+    # unconditional schemas — "always write en" for context-specific batches,
+    # "never touch en, it's already correct" for JLPT-tier batches — removes
+    # the ambiguity instead of fighting it with more prompt engineering.
+    props = {
+        "word":     {"type": "string", "description": "Copied EXACTLY from the candidate list — do not alter or re-conjugate it"},
+        "zh":       {"type": "string", "description": "Concise Chinese gloss (简体)"},
+        "register": {"type": "string", "description": "e.g. formal, casual, written, literary, spoken"},
+    }
+    required = ["word", "zh", "register"]
+    if is_context:
+        props["en"] = {"type": "string", "description": "Concise English gloss"}
+        required.append("en")
+    return {
+        "type": "object",
+        "properties": {
+            "picked": {
+                "type": "array",
+                "description": "The candidates most useful for a learner to study.",
+                "items": {"type": "object", "properties": props, "required": required},
+            },
+        },
+        "required": ["picked"],
+    }
+
+
+def _build_curate_system(jlpt_tiers: list[str], is_context: bool) -> str:
+    band = "domain-specific, technical, or literary" if is_context else " and ".join(jlpt_tiers)
+    gloss_instructions = (
+        "write a concise English gloss, a concise Chinese gloss, and its register "
+        "(formal/casual/written/literary/spoken)."
+        if is_context else
+        "write a concise, natural Chinese gloss plus its register "
+        "(formal/casual/written/literary/spoken). Do not write an English gloss — "
+        "these candidates already have a correct one."
+    )
+    return (
+        f"You are curating a Japanese study deck. Below is a JSON list of {band} vocabulary "
+        "candidates already found and graded from a real transcript — 'count' is how many times "
+        "each appeared. Select the ones most useful and interesting for a learner to study: favor "
+        "words that recur, that carry real meaning in context, and that the learner is likely to "
+        "encounter again. Skip candidates that are redundant with each other or too obscure to be "
+        "worth a flashcard.\n\n"
+        f"For each word you select, copy its 'word' field EXACTLY as given — do not alter, "
+        f"translate, re-conjugate, or invent a variant of it — and {gloss_instructions}"
+    )
+
+
+def _curate_vocab(
+    client: OpenAI, candidates: list[dict], jlpt_tiers: list[str],
+    is_context: bool = False, cap: int = _CURATE_MAX,
+) -> list[dict]:
+    """Ask the LLM to pick the most useful candidates and gloss them.
+
+    The LLM can only select from `candidates` — any returned 'word' not
+    found there (a hallucination) is dropped, never trusted. Level, English
+    gloss, reading, example, and surface forms all come from the bank scan,
+    never from the model.
+    """
+    if not candidates:
+        return []
+
+    system = _build_curate_system(jlpt_tiers, is_context)
+    schema = _curate_schema(is_context)
+    # JLPT-tier candidates always have a bank 'en' already — don't even show
+    # the model an 'en' field there, so there's nothing to (mis)copy or omit.
+    payload = [
+        {"word": c["word"], "reading": c["reading"], "level": c["level"], "count": c["count"],
+         **({} if is_context else {"en": c["en"]})}
+        for c in candidates
+    ]
+
+    picked: list[dict] = []
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=4096,
+                tools=[{
+                    "type": "function",
+                    "function": {
+                        "name": "pick_vocab",
+                        "description": "Select the most useful vocabulary candidates to study.",
+                        "parameters": schema,
+                    },
+                }],
+                tool_choice={"type": "function", "function": {"name": "pick_vocab"}},
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+            )
+            for tc in (response.choices[0].message.tool_calls or []):
+                if tc.function.name == "pick_vocab":
+                    picked = _coerce_list_of_dicts(json.loads(tc.function.arguments).get("picked", []))
+                    break
+            break
+        except Exception as exc:
+            if attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
+                log.warning(f"Vocab curation attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
+                time.sleep(delay)
+            else:
+                log.error(f"Vocab curation failed after {_MAX_RETRIES} attempts: {exc}")
+
+    by_word = {c["word"]: c for c in candidates}
+    out, seen = [], set()
+    for item in picked:
+        word = item.get("word", "")
+        cand = by_word.get(word)
+        if cand is None or word in seen:
+            continue  # not in the candidate list — a hallucination, drop it
+        seen.add(word)
+        # Bank's own gloss (JLPT-tier words) wins when present; context-specific
+        # words aren't in the bank (empty "en"), so fall back to the LLM's gloss.
+        out.append({
+            "word":     cand["word"],
+            "reading":  cand["reading"],
+            "en":       cand["en"] or item.get("en", ""),
+            "zh":       item.get("zh", ""),
+            "level":    cand["level"],
+            "example":  cand["example"],
+            "register": item.get("register", ""),
+            "surfaces": cand["surfaces"],
+        })
+    return out[:cap]
+
+
+# ── Pass C: chunked LLM call for grammar patterns + expressions only ────────
+# Vocabulary highlights are no longer requested here — they come from the
+# bank-graded Pass A/B above. This schema only covers what has no equivalent
+# open dataset: grammar patterns (still LLM-graded, unchanged) and set
+# expressions/idioms.
+
 _SCHEMA: dict = {
     "type": "object",
     "properties": {
         "highlights": {
             "type": "array",
             "description": (
-                "Every target-level vocabulary item and grammar pattern found in the transcript. "
-                "'word' must be the exact surface form as it appears in the text."
+                "Every occurrence of a GRAMMAR PATTERN found in the transcript, so the UI can "
+                "underline it inline. Do not include vocabulary words here — those are handled "
+                "separately. 'word' must be the exact surface form as it appears in the text."
             ),
             "items": {
                 "type": "object",
@@ -45,28 +219,11 @@ _SCHEMA: dict = {
                     "reading":  {"type": "string", "description": "Hiragana reading"},
                     "en":       {"type": "string", "description": "English gloss (concise)"},
                     "zh":       {"type": "string", "description": "Chinese gloss (concise)"},
-                    "type":     {"type": "string", "enum": ["vocab", "grammar"]},
+                    "type":     {"type": "string", "enum": ["grammar"]},
                     "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5", "context-specific"]},
                     "register": {"type": "string", "description": "e.g. formal, casual, written, literary, spoken"},
                 },
                 "required": ["word", "reading", "en", "zh", "type", "level", "register"],
-            },
-        },
-        "vocab": {
-            "type": "array",
-            "description": "Expanded flashcard entries for every vocab item in highlights.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "word":     {"type": "string"},
-                    "reading":  {"type": "string"},
-                    "en":       {"type": "string"},
-                    "zh":       {"type": "string"},
-                    "level":    {"type": "string", "enum": ["N1", "N2", "N3", "N4", "N5", "context-specific"]},
-                    "example":  {"type": "string", "description": "Example sentence from the transcript"},
-                    "register": {"type": "string"},
-                },
-                "required": ["word", "reading", "en", "zh", "level", "example", "register"],
             },
         },
         "grammar": {
@@ -102,10 +259,10 @@ _SCHEMA: dict = {
             },
         },
     },
-    "required": ["highlights", "vocab", "grammar", "expressions"],
+    "required": ["highlights", "grammar", "expressions"],
 }
 
-_EMPTY = {"highlights": [], "vocab": [], "grammar": [], "expressions": []}
+_EMPTY = {"highlights": [], "grammar": [], "expressions": []}
 
 def _seg_time(seg: dict) -> str:
     if "time" in seg:
@@ -116,7 +273,7 @@ def _seg_time(seg: dict) -> str:
 _CHUNK_CHARS  = 1500   # target Japanese chars per analysis chunk
 # Hard ceiling on analysis API calls per job.  A 60-min transcript at typical
 # speaking pace (~300 chars/min) ≈ 12 chunks; 40 gives generous headroom while
-# bounding worst-case spend to ~40 × $0.003 ≈ $0.12 of gpt-4o-mini per job.
+# bounding worst-case spend per job.
 _MAX_CHUNKS   = 40
 
 
@@ -124,35 +281,26 @@ def _build_system(jlpt_tiers: list[str]) -> str:
     tiers_str = " and ".join(jlpt_tiers)
     return (
         f"You are a Japanese language expert and JLPT examiner. Analyse the transcript below and "
-        f"extract noteworthy vocabulary, grammar patterns, set phrases, and idioms in the {tiers_str} "
-        "difficulty band.\n\n"
+        f"extract grammar patterns, set phrases, and idioms in the {tiers_str} difficulty band. "
+        "Vocabulary words are handled separately — do not extract individual vocabulary here.\n\n"
 
-        "MOST IMPORTANT — grade each item's TRUE JLPT level:\n"
-        "Assign every item the JLPT level at which it is actually taught, following the standard "
-        "JLPT vocabulary and grammar lists. The scale runs N5 (easiest, most common) → N1 (hardest, "
-        "rarest). Grade each word on its own merit — do NOT stamp everything with the target level. "
-        "Most words in ordinary conversation are N5–N3; only genuinely difficult, formal, literary, "
-        "abstract, or low-frequency items reach N2 or N1. When unsure between two adjacent levels, "
-        "choose the LOWER (more common) one.\n\n"
+        "For 'highlights': mark every occurrence of a GRAMMAR PATTERN in the text (never a plain "
+        "vocabulary word). Copy the exact surface form from the text so the UI can underline it "
+        "inline.\n\n"
 
-        "Calibration — these common words have been seen mislabelled too high; they are all N3 or "
-        "easier and must never be labelled N1 or N2: 強い, 国, 問題, 正しい, 高い, 使う, 気をつけて, "
-        "意味, 驚く, 得意, 経験, 成功, 期待, 冗談, 結局, 能力, 尊敬, 不思議, 相手, 注目, 選択肢. "
-        "Common English-derived katakana loanwords (メッセージ, レベル, メディア, リスペクト, コンディション, "
-        "エビデンス) are not JLPT target vocabulary — treat them as 'context-specific' or skip them.\n\n"
+        "For 'grammar': one flashcard entry per distinct pattern found, with construction notes and "
+        "an example from the transcript. Grade each pattern's TRUE JLPT level following the standard "
+        "JLPT grammar lists — do not stamp every pattern with the target level; when unsure between "
+        "two adjacent levels, choose the LOWER (more common) one. Only include patterns whose true "
+        f"level falls in the {tiers_str} band; skip patterns clearly below it.\n\n"
 
-        f"What to extract: items whose true level falls in the {tiers_str} band. Skip words that are "
-        "clearly below the band (elementary everyday vocabulary) — it is better to return fewer, "
-        "correctly-graded items than to pad the list. If you do include a borderline item, label it "
-        "with its TRUE level, never the target level: the app filters cards by level, so an accurate "
-        "label matters more than inclusion. For 'highlights', copy the exact surface form from the "
-        "text so the UI can underline it inline.\n\n"
+        "For 'expressions': set phrases, idioms, and notable collocations worth studying, regardless "
+        "of level.\n\n"
 
-        "Additionally, use level 'context-specific' for words and expressions beyond N1 that are "
-        "important for understanding this specific content — for example: domain-specific "
-        "terminology (political, legal, medical, technical), advanced literary or formal expressions, "
-        "topical jargon, or culturally significant terms a learner should know to follow the topic. "
-        "These appear separately from JLPT levels in the UI."
+        "Additionally, use level 'context-specific' for grammar patterns beyond N1 that are "
+        "important for understanding this specific content — domain-specific constructions, "
+        "advanced literary or formal patterns, or topical jargon. These appear separately from "
+        "JLPT levels in the UI."
     )
 
 
@@ -183,10 +331,10 @@ def _chunk_segments(segments: list[dict]) -> list[list[dict]]:
 def _merge_analyses(results: list[dict]) -> dict:
     """Merge chunk results, deduplicating by surface form / pattern."""
     seen: dict[str, set] = {
-        "highlights": set(), "vocab": set(), "grammar": set(), "expressions": set()
+        "highlights": set(), "grammar": set(), "expressions": set()
     }
     merged: dict[str, list] = {k: [] for k in seen}
-    keys = {"highlights": "word", "vocab": "word", "grammar": "pattern", "expressions": "expression"}
+    keys = {"highlights": "word", "grammar": "pattern", "expressions": "expression"}
 
     for result in results:
         for section, key in keys.items():
@@ -212,8 +360,8 @@ def _analyze_chunk(
                     "function": {
                         "name":        "write_analysis",
                         "description": (
-                            "Output JLPT vocabulary and grammar analysis for a Japanese transcript, "
-                            "including highlight markers, flashcards, and expressions."
+                            "Output grammar pattern analysis for a Japanese transcript, including "
+                            "highlight markers, flashcards, and expressions."
                         ),
                         "parameters":  _SCHEMA,
                     },
@@ -224,7 +372,7 @@ def _analyze_chunk(
                     {
                         "role": "user",
                         "content": (
-                            f"Analyse this Japanese transcript for {' and '.join(jlpt_tiers)} content "
+                            f"Analyse this Japanese transcript for {' and '.join(jlpt_tiers)} grammar "
                             f"(chunk {chunk_idx + 1}/{total}):\n\n" + transcript
                         ),
                     },
@@ -244,7 +392,6 @@ def _analyze_chunk(
                         return _EMPTY
                     return {
                         "highlights":  _coerce_list_of_dicts(raw.get("highlights", [])),
-                        "vocab":       _coerce_list_of_dicts(raw.get("vocab", [])),
                         "grammar":     _coerce_list_of_dicts(raw.get("grammar", [])),
                         "expressions": _coerce_list_of_dicts(raw.get("expressions", [])),
                     }
@@ -261,11 +408,41 @@ def _analyze_chunk(
 
 
 def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict:
-    """Return analysis dict: highlights, vocab, grammar, expressions."""
-    _, jlpt_tiers = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
-    system = _build_system(jlpt_tiers)
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    """Return analysis dict: highlights, vocab, grammar, expressions.
 
+    Pass A (deterministic): grade every content word against the JLPT bank.
+    Pass B (1 LLM call):    curate the bank-graded candidates down to the
+                            most useful ones; the model can't invent a word
+                            or a level, only pick from what the bank found
+                            and write glosses.
+    Pass C (chunked LLM):   extract grammar patterns + expressions, same
+                            spirit as before — no open grammar-level dataset
+                            exists yet, so grammar levels stay LLM-graded.
+    """
+    _, jlpt_tiers = LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
+    client = _get_client()
+
+    # ── Pass A ───────────────────────────────────────────────────────────
+    candidates, ctx_candidates = jlpt_bank.scan(segments, jlpt_tiers)
+    log.info(
+        f"Bank scan ({' / '.join(jlpt_tiers)}): {len(candidates)} candidates, "
+        f"{len(ctx_candidates)} context-specific candidates"
+    )
+
+    # ── Pass B ───────────────────────────────────────────────────────────
+    vocab = _curate_vocab(client, candidates, jlpt_tiers, is_context=False, cap=_CURATE_MAX)
+    vocab += _curate_vocab(client, ctx_candidates, jlpt_tiers, is_context=True, cap=_CTX_MAX)
+
+    highlights = [
+        {
+            "word": surface, "reading": v["reading"], "en": v["en"], "zh": v["zh"],
+            "type": "vocab", "level": v["level"], "register": v.get("register", ""),
+        }
+        for v in vocab for surface in v["surfaces"]
+    ]
+
+    # ── Pass C ───────────────────────────────────────────────────────────
+    system = _build_system(jlpt_tiers)
     chunks = _chunk_segments(segments)
     if len(chunks) > _MAX_CHUNKS:
         log.warning(
@@ -273,7 +450,7 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
             len(chunks), _MAX_CHUNKS,
         )
         chunks = chunks[:_MAX_CHUNKS]
-    log.info(f"Analyzing {len(segments)} segments in {len(chunks)} chunk(s) via {_MODEL}")
+    log.info(f"Extracting grammar/expressions from {len(segments)} segments in {len(chunks)} chunk(s) via {_MODEL}")
 
     if len(chunks) <= 1:
         # Single chunk — no threading overhead
@@ -298,19 +475,31 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
                     log.error(f"Analysis chunk {idx + 1} failed: {exc}")
 
     merged = _merge_analyses(results)
+    highlights += merged["highlights"]
+
     log.info(
         f"Analysis ({' / '.join(jlpt_tiers)}): "
-        f"{len(merged['highlights'])} highlights, "
-        f"{len(merged['vocab'])} vocab, "
+        f"{len(highlights)} highlights, "
+        f"{len(vocab)} vocab, "
         f"{len(merged['grammar'])} grammar, "
         f"{len(merged['expressions'])} expressions"
     )
-    return merged
+    return {
+        "highlights": highlights,
+        "vocab": vocab,
+        "grammar": merged["grammar"],
+        "expressions": merged["expressions"],
+    }
 
 
 # Hard caps for explain_sentence to prevent runaway token usage.
 _EXPLAIN_MAX_INPUT_CHARS = 500   # ~1-3 Japanese sentences; reject anything longer
 _EXPLAIN_MAX_TOKENS      = 600   # ~400 words — enough for a thorough breakdown
+# Unrelated to _PROVIDER/_MODEL above: this always uses the OpenAI client
+# directly (unchanged from before this file's Pass A/B/C rewrite), so it
+# needs its own OpenAI-appropriate model name rather than following
+# ANALYSIS_PROVIDER, which may point _MODEL at a DeepSeek model name.
+_EXPLAIN_MODEL = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
 
 
 def explain_sentence(text: str) -> str:
@@ -334,7 +523,7 @@ def explain_sentence(text: str) -> str:
     )
     try:
         response = client.chat.completions.create(
-            model=_MODEL,
+            model=_EXPLAIN_MODEL,
             max_tokens=_EXPLAIN_MAX_TOKENS,
             messages=[
                 {"role": "system", "content": system},

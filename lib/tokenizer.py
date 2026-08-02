@@ -58,3 +58,33 @@ def tokenize_segments(segments: list[dict]) -> list[dict]:
         if "ja" in seg:
             seg["tokens"] = tokenize_japanese_text(seg["ja"])
     return segments
+
+
+def analyze_tokens(text: str) -> list[dict]:
+    """
+    Tokenize Japanese text for lexical analysis (JLPT bank lookups etc).
+    Each token: surface, base_form (dictionary/lemma form, "*" if unknown),
+    reading (hiragana), pos (raw janome part-of-speech string, comma-joined).
+
+    Separate from tokenize_japanese_text(): that function's {w, r, kanji}
+    shape is persisted in transcript.json and consumed by player.js — it
+    must not change. This one is for lib/jlpt_bank.py only.
+    """
+    if not text:
+        return []
+
+    t = _get_tokenizer()
+    tokens = []
+    try:
+        for token in t.tokenize(text):
+            raw_reading = token.reading
+            reading = katakana_to_hiragana(raw_reading) if raw_reading and raw_reading != "*" else token.surface
+            tokens.append({
+                "surface": token.surface,
+                "base_form": token.base_form,
+                "reading": reading,
+                "pos": token.part_of_speech,
+            })
+    except Exception as e:
+        log.warning(f"Error analyzing Japanese text: {e}")
+    return tokens

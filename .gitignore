@@ -35,3 +35,13 @@ railway.dump
 # Telegram bot secrets — never commit
 bot_config.json
 .web_token
+
+# Live subscription/digest state (bind-mounted into the container; not source)
+state/
+digest_state.json
+pending_episodes.json
+*.pre-state-*
+
+# Codex CLI internal backup/staging scratch dirs
+.codex-backups/
+.codex-stage/
