@@ -265,14 +265,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (completed) {
       try { localStorage.removeItem(RESUME_KEY); } catch {}
     } else {
+      // Reset progress to 0 rather than keeping the current (often near-end)
+      // playhead: leaving resume_position near the end meant the very next
+      // load's maybeApplyResume() saw t within RESUME_END_MARGIN of the end
+      // and immediately re-called markCompleted(), silently undoing this.
       autoCompletionSuppressed = true;
-      saveLocalResume(t);
+      try { localStorage.removeItem(RESUME_KEY); } catch {}
     }
     try {
       const response = await fetch(RESUME_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ t, completed, manual_completion: true }),
+        body: JSON.stringify({
+          t: completed ? t : 0,
+          completed,
+          manual_completion: true,
+          reset_progress: !completed,
+        }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const result = await response.json();
@@ -590,9 +599,9 @@ document.addEventListener("DOMContentLoaded", async () => {
                                    transcriptEl.scrollHeight > transcriptEl.clientHeight + 1;
 
     if (isContainerScrollable) {
-      setProgrammaticScroll(transcriptEl);
       if (force) {
         // Explicit jump (seek, "now playing" pill): always land on the anchor.
+        setProgrammaticScroll(transcriptEl);
         transcriptEl.scrollTo({
           top: Math.max(0, el.offsetTop - transcriptEl.clientHeight * READ_ANCHOR),
           behavior: "smooth",
@@ -601,10 +610,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
       // Steady playback: only move once the line drifts outside a dead zone
       // around the anchor, so scrolling is a slow continuous drift rather
-      // than a snap every ~2s.
+      // than a snap every ~2s. Only flag this as a programmatic scroll when we
+      // actually call scrollTo() — flagging it unconditionally left
+      // programmaticScroll stuck true on dead-zone ticks (no scroll → no
+      // scrollend → the flag never clears), which silently disabled
+      // markUserNavigation() and defeated manual scroll-away detection.
       const want = Math.max(0, el.offsetTop - transcriptEl.clientHeight * READ_ANCHOR);
       const slack = transcriptEl.clientHeight * DEAD_ZONE;
       if (Math.abs(transcriptEl.scrollTop - want) > slack) {
+        setProgrammaticScroll(transcriptEl);
         transcriptEl.scrollTo({ top: want, behavior: "smooth" });
       }
       return;

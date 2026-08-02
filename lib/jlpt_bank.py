@@ -24,8 +24,11 @@ _bank: Optional[dict] = None
 # Potential-form endings to retry against the dictionary form on a miss.
 # janome's base_form usually already gives the dictionary form, but
 # occasionally leaves potential-form conjugations untransformed
-# (e.g. 買える stays 買える instead of reducing to 買う).
-_POTENTIAL_SUFFIXES = ("える", "られる", "れる")
+# (e.g. 買える stays 買える instead of reducing to 買う). Godan potential
+# (-える, e.g. 買う→買える) and ichidan potential (-られる/-れる, e.g.
+# 食べる→食べられる/食べれる) reduce to different dictionary-form endings,
+# so each suffix maps to its own replacement rather than a shared "る".
+_POTENTIAL_SUFFIXES = (("える", "う"), ("られる", "る"), ("れる", "る"))
 
 # Frequent function-word forms janome tags as content words (adverbs,
 # conjunctions) but that are not JLPT-gradable vocabulary in their own right.
@@ -99,9 +102,9 @@ def is_real_word(form: str) -> bool:
 
 
 def _strip_potential(form: str) -> Optional[str]:
-    for suf in _POTENTIAL_SUFFIXES:
+    for suf, replacement in _POTENTIAL_SUFFIXES:
         if form.endswith(suf) and len(form) > len(suf):
-            return form[: -len(suf)] + "る"
+            return form[: -len(suf)] + replacement
     return None
 
 
