@@ -271,6 +271,19 @@ nav {
 }
 .btn-loop.loop-active { color: #d97706 !important; }
 
+body.shadow-listening-hide .segment-active .segment-ja,
+body.shadow-listening-hide .modal-seg-active .modal-seg-ja {
+  visibility: hidden;
+}
+body.shadow-mode .segment-active {
+  border-left-color: #8b5cf6;
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.25);
+}
+
+@media (min-width: 768px) {
+  #shadow-bar { bottom: 1.25rem !important; }
+}
+
 .segment-time {
   font-size: 10px;
   color: #4b5563;

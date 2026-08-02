@@ -104,14 +104,21 @@ def _transcribe_api_single(client, audio_path: Path) -> dict:
             file=fh,
             language="ja",
             response_format="verbose_json",
-            timestamp_granularities=["segment"],
+            timestamp_granularities=["segment", "word"],
         )
+    words = [
+        {"start": round(float(word.start), 3), "end": round(float(word.end), 3),
+         "word": word.word}
+        for word in (getattr(response, "words", []) or [])
+    ]
     raw = [
         {
             "index": seg.id,
             "start": round(float(seg.start), 3),
             "end":   round(float(seg.end),   3),
             "ja":    seg.text.strip(),
+            "words": [word for word in words
+                      if word["end"] > float(seg.start) and word["start"] < float(seg.end)],
         }
         for seg in response.segments
     ]
@@ -253,12 +260,17 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
                     file=fh,
                     language="ja",
                     response_format="verbose_json",
-                    timestamp_granularities=["segment"],
+                    timestamp_granularities=["segment", "word"],
                 )
 
             language = response.language
             full_text_parts.append(response.text)
             chunk_duration = float(response.duration)
+            chunk_words = [
+                {"start": round(float(word.start) + offset, 3),
+                 "end": round(float(word.end) + offset, 3), "word": word.word}
+                for word in (getattr(response, "words", []) or [])
+            ]
 
             for seg in response.segments:
                 all_raw.append({
@@ -266,6 +278,9 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
                     "start": round(float(seg.start) + offset, 3),
                     "end":   round(float(seg.end)   + offset, 3),
                     "ja":    seg.text.strip(),
+                    "words": [word for word in chunk_words
+                              if word["end"] > float(seg.start) + offset
+                              and word["start"] < float(seg.end) + offset],
                 })
 
             offset += chunk_duration
@@ -328,7 +343,7 @@ def _transcribe_local(audio_path: Path) -> dict:
         str(audio_path),
         path_or_hf_repo=_MLX_MODEL,
         language="ja",
-        word_timestamps=False,
+        word_timestamps=True,
         no_speech_threshold=0.5,
         hallucination_silence_threshold=2.0,
         condition_on_previous_text=False,
@@ -341,6 +356,12 @@ def _transcribe_local(audio_path: Path) -> dict:
             "start": round(float(seg["start"]), 3),
             "end":   round(float(seg["end"]),   3),
             "ja":    seg["text"].strip(),
+            "words": [
+                {"start": round(float(word["start"]), 3),
+                 "end": round(float(word["end"]), 3), "word": word.get("word", "")}
+                for word in seg.get("words", [])
+                if word.get("start") is not None and word.get("end") is not None
+            ],
         }
         for i, seg in enumerate(result.get("segments", []))
     ]

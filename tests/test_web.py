@@ -48,6 +48,21 @@ def test_episode_page_exposes_shortcut_help(client, tmp_path):
     assert 'id="btn-shortcuts"' in body
     assert 'id="shortcuts-modal"' in body
     assert 'aria-modal="true"' in body
+    assert 'id="btn-shadow-mobile"' in body
+    assert 'id="shadow-sheet"' in body
+    assert 'id="shadow-bar"' in body
+    assert "No microphone or recording" in body
+
+
+def test_today_and_library_have_distinct_navigation(client):
+    today = client.get("/").get_data(as_text=True)
+    library = client.get("/episodes").get_data(as_text=True)
+
+    assert "Today — Mimichan" in today
+    assert "Your learning queue" in today
+    assert "Library — Mimichan" in library
+    assert ">Library</h1>" in library
+    assert 'id="tab-home"' in today
 
 
 def test_review_page_has_mobile_safe_rating_controls(client):

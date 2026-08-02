@@ -42,6 +42,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   let autoCompletionSuppressed = false;
   let retentionExempt = false;
   let deleteAfter = null;
+  const shadow = {
+    active: false, idx: -1, playsDone: 0, repeats: 2, pause: "auto",
+    hideJapanese: false, autoAdvance: true, phase: "idle", timer: null, units: [],
+  };
 
   const isTouch = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
   let isDesktopLayout = window.innerWidth >= 1024 || (!isTouch && window.innerWidth >= 768);
@@ -723,6 +727,96 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (seg && t >= seg.end) seekTo(seg.start);
   }
 
+  function shadowPauseMs(seg) {
+    if (shadow.pause !== "auto") return Number(shadow.pause) * 1000;
+    return Math.max(1500, Math.min(8000, (Number(seg?.end) - Number(seg?.start)) * 1000));
+  }
+
+  function buildShadowUnits() {
+    const units = [];
+    segments.forEach((seg, segmentIndex) => {
+      const words = Array.isArray(seg.words) ? seg.words.filter(word =>
+        Number.isFinite(Number(word.start)) && Number.isFinite(Number(word.end))) : [];
+      if (!words.length) {
+        units.push({start: Number(seg.start), end: Number(seg.end), segmentIndex});
+        return;
+      }
+      let group = [];
+      words.forEach((word, wordIndex) => {
+        group.push(word);
+        const duration = Number(word.end) - Number(group[0].start);
+        const sentenceEnd = /[。！？!?]\s*$/.test(String(word.word || ""));
+        if (sentenceEnd || duration >= 8 || wordIndex === words.length - 1) {
+          units.push({start: Number(group[0].start), end: Number(word.end), segmentIndex});
+          group = [];
+        }
+      });
+    });
+    return units;
+  }
+
+  function clearShadowTimer() {
+    if (shadow.timer) clearTimeout(shadow.timer);
+    shadow.timer = null;
+  }
+
+  function syncShadowUI(message) {
+    const status = document.getElementById("shadow-status");
+    const counter = document.getElementById("shadow-counter");
+    const pause = document.getElementById("shadow-pause-toggle");
+    if (status) status.textContent = message || `Shadow · ${SPEEDS[speedIdx]}×`;
+    if (counter) counter.textContent = shadow.idx >= 0
+      ? `${shadow.idx + 1}/${shadow.units.length} · play ${Math.min(shadow.playsDone + 1, shadow.repeats)}/${shadow.repeats}` : "";
+    if (pause) pause.textContent = shadow.phase === "playing" ? "Pause" :
+      (shadow.phase === "pause" ? "Speak now" : "Continue");
+    document.body.classList.toggle("shadow-listening-hide",
+      shadow.active && shadow.hideJapanese && shadow.phase === "playing");
+  }
+
+  function playShadowUnit(idx, resetPlays = true) {
+    if (!shadow.active || !shadow.units.length || !audio) return;
+    clearShadowTimer();
+    shadow.idx = Math.max(0, Math.min(shadow.units.length - 1, idx));
+    if (resetPlays) shadow.playsDone = 0;
+    shadow.phase = "playing";
+    const seg = shadow.units[shadow.idx];
+    loopIdx = -1;
+    audio.currentTime = Math.max(0, Number(seg.start) || 0);
+    setActive(seg.segmentIndex);
+    scrollActiveIntoView(seg.segmentIndex, true);
+    syncShadowUI("Listen · then repeat aloud");
+    audio.play().catch(() => syncShadowUI("Tap Continue to play"));
+  }
+
+  function finishShadowUnit() {
+    if (!shadow.active || shadow.phase !== "playing" || !audio) return;
+    const seg = shadow.units[shadow.idx];
+    audio.pause();
+    shadow.playsDone += 1;
+    shadow.phase = "pause";
+    syncShadowUI("Your turn · speak aloud");
+    shadow.timer = setTimeout(() => {
+      shadow.timer = null;
+      if (!shadow.active) return;
+      if (shadow.playsDone < shadow.repeats) playShadowUnit(shadow.idx, false);
+      else if (shadow.autoAdvance && shadow.idx < shadow.units.length - 1) playShadowUnit(shadow.idx + 1, true);
+      else {
+        shadow.phase = "ready";
+        syncShadowUI(shadow.idx >= shadow.units.length - 1 ? "Session complete" : "Line complete · continue when ready");
+      }
+    }, shadowPauseMs(seg));
+  }
+
+  function handleShadowTick(t) {
+    if (!shadow.active || shadow.phase !== "playing" || shadow.idx < 0) return false;
+    const seg = shadow.units[shadow.idx];
+    if (seg && t >= Number(seg.end) - 0.04) {
+      finishShadowUnit();
+      return true;
+    }
+    return false;
+  }
+
   // Segment lookup starting from the last known index, walking forward/back
   // as needed — playback is monotonic almost all the time, so this is O(1)
   // amortized instead of rescanning all segments (up to ~1000) every tick.
@@ -1141,6 +1235,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     audio.addEventListener("timeupdate", () => {
       if (useYoutube) return;
       const t   = audio.currentTime;
+      if (handleShadowTick(t)) {
+        saveResumeT(t);
+        reportPlayback(t, audio.duration, false, false);
+        return;
+      }
       const idx = findSegmentIndex(t, currentIdx);
       if (idx !== currentIdx) setActive(idx);
       checkLoop(t);
@@ -1158,7 +1257,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!useYoutube) { saveResumeT(audio.currentTime, true); reportPlayback(audio.currentTime, audio.duration, false, true); }
     });
     audio.addEventListener("ended", () => {
-      if (!useYoutube) { markCompleted(audio.currentTime); reportPlayback(audio.duration, audio.duration, true, true); }
+      if (!useYoutube && !shadow.active) { markCompleted(audio.currentTime); reportPlayback(audio.duration, audio.duration, true, true); }
     });
   }
 
@@ -1226,6 +1325,86 @@ document.addEventListener("DOMContentLoaded", async () => {
     repositionTranscript();
     updatePillPosition();
     if (!useYoutube && currentIdx >= 0) setTimeout(() => scrollActiveIntoView(currentIdx, true), 50);
+  });
+
+  // ── Shadowing / listen-and-repeat ──────────────────────────────────────────
+
+  const shadowSheet = document.getElementById("shadow-sheet");
+  const shadowBar = document.getElementById("shadow-bar");
+  const drawerTrigger = document.getElementById("drawer-trigger-bar");
+  const translationFab = document.getElementById("fab-translate");
+
+  function setShadowSheet(open) {
+    shadowSheet?.classList.toggle("hidden", !open);
+    shadowSheet?.classList.toggle("flex", open);
+  }
+
+  function openShadowSetup() {
+    if (!segments.length) {
+      showToast("The transcript is still loading.", "error");
+      return;
+    }
+    setShadowSheet(true);
+  }
+
+  function endShadow() {
+    clearShadowTimer();
+    shadow.active = false;
+    shadow.phase = "idle";
+    audio?.pause();
+    document.body.classList.remove("shadow-mode", "shadow-listening-hide");
+    shadowBar?.classList.add("hidden");
+    drawerTrigger?.classList.remove("hidden");
+    translationFab?.classList.remove("hidden");
+    document.getElementById("btn-shadow")?.classList.remove("active");
+    document.getElementById("btn-shadow-mobile")?.classList.remove("active");
+  }
+
+  document.getElementById("btn-shadow")?.addEventListener("click", openShadowSetup);
+  document.getElementById("btn-shadow-mobile")?.addEventListener("click", openShadowSetup);
+  document.getElementById("shadow-close")?.addEventListener("click", () => setShadowSheet(false));
+  document.getElementById("shadow-backdrop")?.addEventListener("click", () => setShadowSheet(false));
+  document.getElementById("shadow-start")?.addEventListener("click", () => {
+    shadow.repeats = Math.max(1, Number(document.getElementById("shadow-repeats")?.value) || 2);
+    shadow.pause = document.getElementById("shadow-pause")?.value || "auto";
+    shadow.hideJapanese = !!document.getElementById("shadow-hide-ja")?.checked;
+    shadow.autoAdvance = !!document.getElementById("shadow-auto")?.checked;
+    shadow.units = buildShadowUnits();
+    if (useYoutube) btnTogglePlayer?.click();
+    shadow.active = true;
+    document.body.classList.add("shadow-mode");
+    setShadowSheet(false);
+    shadowBar?.classList.remove("hidden");
+    drawerTrigger?.classList.add("hidden");
+    translationFab?.classList.add("hidden");
+    document.getElementById("btn-shadow")?.classList.add("active");
+    document.getElementById("btn-shadow-mobile")?.classList.add("active");
+    const startIdx = currentIdx >= 0
+      ? Math.max(0, shadow.units.findIndex(unit => unit.segmentIndex >= currentIdx)) : 0;
+    if (audio?.readyState) playShadowUnit(startIdx, true);
+    else audio?.addEventListener("loadedmetadata", () => playShadowUnit(startIdx, true), {once: true});
+  });
+  document.getElementById("shadow-prev")?.addEventListener("click", () => playShadowUnit(shadow.idx - 1, true));
+  document.getElementById("shadow-next")?.addEventListener("click", () => playShadowUnit(shadow.idx + 1, true));
+  document.getElementById("shadow-end")?.addEventListener("click", endShadow);
+  document.getElementById("shadow-pause-toggle")?.addEventListener("click", () => {
+    if (!shadow.active || !audio) return;
+    if (shadow.phase === "playing") {
+      audio.pause();
+      shadow.phase = "manual";
+      syncShadowUI("Paused");
+      return;
+    }
+    if (shadow.phase === "manual") {
+      shadow.phase = "playing";
+      syncShadowUI("Listen · then repeat aloud");
+      audio.play().catch(() => {});
+      return;
+    }
+    clearShadowTimer();
+    if (shadow.playsDone < shadow.repeats) playShadowUnit(shadow.idx, false);
+    else if (shadow.idx < shadow.units.length - 1) playShadowUnit(shadow.idx + 1, true);
+    else playShadowUnit(shadow.idx, true);
   });
 
   // ── Sidebar collapse toggle (desktop only) ────────────────────────────────────
@@ -1327,6 +1506,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       setShortcutsOpen(false);
       return;
     }
+    if (e.key === "Escape" && shadowSheet && !shadowSheet.classList.contains("hidden")) {
+      e.preventDefault();
+      setShadowSheet(false);
+      return;
+    }
     if (e.key === "?") {
       e.preventDefault();
       setShortcutsOpen(true);
@@ -1335,6 +1519,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (shortcutsModal && !shortcutsModal.classList.contains("hidden")) return;
     switch (e.key) {
       case " ": e.preventDefault();
+        if (shadow.active) { document.getElementById("shadow-pause-toggle")?.click(); break; }
         if (useYoutube) { if (ytPlayer?.getPlayerState() === 1) ytPlayer.pauseVideo(); else ytPlayer?.playVideo(); }
         else if (audio) { if (audio.paused) audio.play().catch(()=>{}); else audio.pause(); }
         break;
@@ -1347,7 +1532,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       case "f": showFurigana = !showFurigana; syncFuriganaUI(); break;
       case "[": if (speedIdx > 0) applySpeed(speedIdx - 1); break;
       case "]": if (speedIdx < SPEEDS.length - 1) applySpeed(speedIdx + 1); break;
-      case "l": if (currentIdx >= 0) toggleLoop(currentIdx); break;
+      case "l": if (!shadow.active && currentIdx >= 0) toggleLoop(currentIdx); break;
+      case "s": openShadowSetup(); break;
     }
   });
 
