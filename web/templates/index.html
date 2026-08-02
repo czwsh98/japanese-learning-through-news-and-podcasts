@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Episodes — 日本語 Pipeline{% endblock %}
+{% block title %}Episodes — Mimichan{% endblock %}
 
 {% block head %}
 <style>
@@ -174,7 +174,7 @@
     <form method="post" action="/episode/{{ ep.date }}/delete" class="absolute top-3 right-3"
           onsubmit="return confirm('Delete episode \'{{ ep.meta.get('title', ep.date) | replace("'", "\\'") }}\'?\n\nThis removes all files including the audio.')">
       <button type="submit"
-              class="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-md text-gray-600 hover:text-red-400 hover:bg-red-950"
+              class="ep-delete-action transition-opacity p-2 rounded-md text-gray-500 hover:text-red-400 hover:bg-red-950 focus-visible:text-red-400 focus-visible:bg-red-950"
               title="Delete episode">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
              fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

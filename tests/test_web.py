@@ -23,6 +23,32 @@ def test_subscriptions_page(client, tmp_path):
         assert b"Test" in rv.data
         assert b"http://test.com" in rv.data
 
+
+def test_inbox_navigation_is_active_and_mobile_friendly(client, tmp_path):
+    mock_sources = tmp_path / "sources.json"
+    mock_sources.write_text(json.dumps({"sources": []}))
+
+    with patch("web.app.SOURCES_FILE", mock_sources):
+        body = client.get("/subscriptions").get_data(as_text=True)
+
+    assert '<title>Listening inbox — Mimichan</title>' in body
+    assert '>Inbox</a>' in body
+    assert 'id="tab-subs"' in body
+    assert 'mobile-nav-active' in body
+    assert 'aria-current="page"' in body
+    assert 'Learning Japanese through Listening Practices' not in body
+
+
+def test_episode_page_exposes_shortcut_help(client, tmp_path):
+    (tmp_path / "2026-01-01").mkdir()
+    with patch("web.app.EPISODES_DIR", tmp_path):
+        body = client.get("/episode/2026-01-01").get_data(as_text=True)
+
+    assert '<title>2026-01-01 — Mimichan</title>' in body
+    assert 'id="btn-shortcuts"' in body
+    assert 'id="shortcuts-modal"' in body
+    assert 'aria-modal="true"' in body
+
 def test_subscriptions_add(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": []}))

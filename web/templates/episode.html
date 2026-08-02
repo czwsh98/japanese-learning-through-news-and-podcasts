@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ meta.get('title', date) }} — 日本語 Pipeline{% endblock %}
+{% block title %}{{ meta.get('title', date) }} — Mimichan{% endblock %}
 
 {% set ep_url = meta.get('url', '') %}
 {% set is_youtube = meta.get('video_id') and ('youtube.com' in ep_url or 'youtu.be' in ep_url) %}
@@ -130,6 +130,7 @@
         <button id="speed-up" class="speed-btn px-2">+</button>
       </div>
       <div class="ml-auto hidden md:flex items-center gap-3">
+        <button id="btn-shortcuts" class="toggle-btn" title="Show keyboard shortcuts (?)" aria-haspopup="dialog">Shortcuts</button>
         <button id="btn-toggle-sidebar" class="toggle-btn flex items-center gap-1.5" title="Toggle study panel">
           <svg id="sidebar-btn-icon" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
           <span id="sidebar-btn-label">Hide panel</span>
@@ -219,6 +220,30 @@
 </div>
 
 </div><!-- /ep-page -->
+
+<!-- Keyboard shortcuts (desktop player aid; hidden until requested) -->
+<div id="shortcuts-modal" class="hidden fixed inset-0 z-[70] items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+  <button id="shortcuts-backdrop" class="absolute inset-0 bg-black/70" aria-label="Close keyboard shortcuts"></button>
+  <div class="relative w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 p-5 shadow-2xl">
+    <div class="flex items-center justify-between gap-4 mb-4">
+      <div>
+        <h2 id="shortcuts-title" class="font-semibold text-gray-100">Keyboard shortcuts</h2>
+        <p class="text-xs text-gray-500 mt-1">Control listening without leaving the transcript.</p>
+      </div>
+      <button id="shortcuts-close" class="rounded-lg p-2 text-gray-500 hover:bg-gray-800 hover:text-white focus-visible:bg-gray-800" aria-label="Close keyboard shortcuts">×</button>
+    </div>
+    <dl class="shortcut-grid text-sm">
+      <dt><kbd>Space</kbd></dt><dd>Play or pause</dd>
+      <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Skip 5 seconds</dd>
+      <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Previous or next line</dd>
+      <dt><kbd>L</kbd></dt><dd>Loop current line</dd>
+      <dt><kbd>E</kbd> / <kbd>C</kbd></dt><dd>English / Chinese</dd>
+      <dt><kbd>F</kbd></dt><dd>Toggle furigana</dd>
+      <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Change speed</dd>
+      <dt><kbd>?</kbd></dt><dd>Open this guide</dd>
+    </dl>
+  </div>
+</div>
 
 <!-- Mobile drawer overlay -->
 <div id="drawer-overlay" class="hidden fixed inset-0 bg-black/60 z-40 md:hidden"></div>

@@ -1266,8 +1266,43 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // ── Keyboard ──────────────────────────────────────────────────────────────
 
+  const shortcutsModal = document.getElementById("shortcuts-modal");
+  const shortcutsButton = document.getElementById("btn-shortcuts");
+  const shortcutsClose = document.getElementById("shortcuts-close");
+  const shortcutsBackdrop = document.getElementById("shortcuts-backdrop");
+  let shortcutsReturnFocus = null;
+
+  function setShortcutsOpen(open) {
+    if (!shortcutsModal) return;
+    if (open) {
+      shortcutsReturnFocus = document.activeElement;
+      shortcutsModal.classList.remove("hidden");
+      shortcutsModal.classList.add("flex");
+      shortcutsClose?.focus();
+    } else {
+      shortcutsModal.classList.add("hidden");
+      shortcutsModal.classList.remove("flex");
+      shortcutsReturnFocus?.focus?.();
+    }
+  }
+
+  shortcutsButton?.addEventListener("click", () => setShortcutsOpen(true));
+  shortcutsClose?.addEventListener("click", () => setShortcutsOpen(false));
+  shortcutsBackdrop?.addEventListener("click", () => setShortcutsOpen(false));
+
   document.addEventListener("keydown", e => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
+    if (e.key === "Escape" && shortcutsModal && !shortcutsModal.classList.contains("hidden")) {
+      e.preventDefault();
+      setShortcutsOpen(false);
+      return;
+    }
+    if (e.key === "?") {
+      e.preventDefault();
+      setShortcutsOpen(true);
+      return;
+    }
+    if (shortcutsModal && !shortcutsModal.classList.contains("hidden")) return;
     switch (e.key) {
       case " ": e.preventDefault();
         if (useYoutube) { if (ytPlayer?.getPlayerState() === 1) ytPlayer.pauseVideo(); else ytPlayer?.playVideo(); }

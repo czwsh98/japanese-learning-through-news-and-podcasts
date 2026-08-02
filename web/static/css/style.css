@@ -15,6 +15,67 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── Navigation and keyboard focus ─────────────────────────────────────── */
+.desktop-nav-link {
+  color: #9ca3af;
+  font-size: 0.875rem;
+  transition: color 0.15s, background-color 0.15s;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.375rem;
+}
+.desktop-nav-link:hover { color: #fff; }
+.desktop-nav-link.desktop-nav-active { color: #93c5fd; background: rgba(30, 58, 95, 0.45); }
+.desktop-nav-admin { color: #a78bfa; }
+.desktop-nav-admin:hover, .desktop-nav-admin.desktop-nav-active { color: #ddd6fe; }
+
+.mobile-nav-link {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.125rem;
+  padding: 0.625rem 0;
+  color: #6b7280;
+  transition: color 0.15s, background-color 0.15s;
+}
+.mobile-nav-link:hover { color: #d1d5db; }
+.mobile-nav-link.mobile-nav-active { color: #60a5fa; background: rgba(30, 58, 95, 0.18); }
+
+:where(a, button, input, select, textarea, summary):focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+/* Episode actions remain visible on touch screens. Fine-pointer devices can
+   reveal the delete action on hover while keyboard focus always exposes it. */
+.ep-delete-action { opacity: 1; }
+@media (hover: hover) and (pointer: fine) and (min-width: 640px) {
+  .ep-delete-action { opacity: 0; }
+  .group:hover .ep-delete-action,
+  .group:focus-within .ep-delete-action { opacity: 1; }
+}
+
+.shortcut-grid {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) 1fr;
+  gap: 0.75rem 1rem;
+  align-items: center;
+}
+.shortcut-grid dd { color: #9ca3af; }
+.shortcut-grid kbd {
+  display: inline-block;
+  min-width: 1.75rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid #4b5563;
+  border-bottom-width: 2px;
+  border-radius: 0.35rem;
+  background: #030712;
+  color: #e5e7eb;
+  font: 0.72rem ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+}
+
 /* Japanese text: use Noto Sans JP for consistent kana/kanji on all platforms */
 .segment-ja, ruby, .modal-seg-ja {
   font-family: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', 'Meiryo', sans-serif;
