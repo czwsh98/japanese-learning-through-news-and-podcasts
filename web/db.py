@@ -164,6 +164,12 @@ class VocabItem(Base):
     level          = Column(Text, nullable=False, server_default="")
     type           = Column(Text, nullable=False, server_default="vocab")  # vocab|grammar|expression|context-specific
     source_episode = Column(Text, nullable=False, server_default="")
+    due_at         = Column(DateTime(timezone=True), nullable=True)
+    interval_days  = Column(Float, nullable=False, server_default="0")
+    repetitions    = Column(Integer, nullable=False, server_default="0")
+    lapses         = Column(Integer, nullable=False, server_default="0")
+    suspended      = Column(Boolean, nullable=False, default=False, server_default="false")
+    last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
     saved_at       = Column(
         DateTime(timezone=True), nullable=False,
         default=lambda: datetime.now(timezone.utc),
@@ -180,6 +186,7 @@ class VocabItem(Base):
         cascade="all, delete-orphan",
         order_by="VocabOccurrence.saved_at.desc()",
     )
+    review_logs = relationship("ReviewLog", cascade="all, delete-orphan")
 
 
 class VocabOccurrence(Base):
@@ -216,6 +223,25 @@ class VocabOccurrence(Base):
 
     vocab_item = relationship("VocabItem", back_populates="occurrences")
     episode    = relationship("Episode", back_populates="vocab_occurrences")
+
+
+class ReviewLog(Base):
+    """One reversible review answer with the item's previous schedule."""
+    __tablename__ = "review_logs"
+
+    id                      = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    vocab_item_id           = Column(UUID(as_uuid=True), ForeignKey("vocab.id", ondelete="CASCADE"), nullable=False)
+    user_id                 = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    rating                  = Column(String(16), nullable=False)
+    previous_due_at         = Column(DateTime(timezone=True), nullable=True)
+    previous_interval_days  = Column(Float, nullable=False, server_default="0")
+    previous_repetitions    = Column(Integer, nullable=False, server_default="0")
+    previous_lapses         = Column(Integer, nullable=False, server_default="0")
+    previous_last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_at             = Column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 
 class TranscriptionUsage(Base):
@@ -321,6 +347,12 @@ def init_db() -> bool:
             conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS retention_exempt BOOLEAN NOT NULL DEFAULT FALSE;"))
             conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS delete_after TIMESTAMPTZ;"))
             conn.execute(sa_text("ALTER TABLE episodes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS interval_days DOUBLE PRECISION NOT NULL DEFAULT 0;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS repetitions INTEGER NOT NULL DEFAULT 0;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS lapses INTEGER NOT NULL DEFAULT 0;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE;"))
+            conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS last_reviewed_at TIMESTAMPTZ;"))
             conn.execute(sa_text(
                 "UPDATE episodes SET delete_after = completed_at + INTERVAL '30 days' "
                 "WHERE completed_at IS NOT NULL AND delete_after IS NULL "

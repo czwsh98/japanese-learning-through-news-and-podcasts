@@ -49,6 +49,18 @@ def test_episode_page_exposes_shortcut_help(client, tmp_path):
     assert 'id="shortcuts-modal"' in body
     assert 'aria-modal="true"' in body
 
+
+def test_review_page_has_mobile_safe_rating_controls(client):
+    body = client.get("/review").get_data(as_text=True)
+
+    assert '<title>Daily Review — Mimichan</title>' in body
+    assert 'class="review-actions' in body
+    assert 'data-rating="again"' in body
+    assert 'data-rating="hard"' in body
+    assert 'data-rating="good"' in body
+    assert 'id="tab-vocab"' in body
+    assert 'mobile-nav-active' in body
+
 def test_subscriptions_add(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": []}))

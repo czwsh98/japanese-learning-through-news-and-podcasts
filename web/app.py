@@ -73,10 +73,10 @@ from web.auth import (
 )
 from web.db import (
     Episode, PlaybackProgress, RecommendationDismissal, TranscriptionUsage,
-    VocabItem, VocabOccurrence, db_available, get_db, init_db,
+    ReviewLog, VocabItem, VocabOccurrence, db_available, get_db, init_db,
 )
 from web.recommendations import load_catalog, normalize_url, rank_recommendations
-from sqlalchemy import func, select, text as sa_text, update
+from sqlalchemy import func, or_, select, text as sa_text, update
 
 log = logging.getLogger(__name__)
 
@@ -1724,6 +1724,14 @@ def _vocab_item_to_dict(row: VocabItem, occurrences: list[VocabOccurrence] | Non
         "source_episode": row.source_episode,
         "saved_at":       row.saved_at.strftime("%Y-%m-%dT%H:%M:%SZ") if row.saved_at else "",
         "occurrences":     [_vocab_occurrence_to_dict(o) for o in (occurrences or [])],
+        "review": {
+            "due_at": row.due_at.isoformat() if row.due_at else None,
+            "interval_days": row.interval_days or 0,
+            "repetitions": row.repetitions or 0,
+            "lapses": row.lapses or 0,
+            "suspended": bool(row.suspended),
+            "last_reviewed_at": row.last_reviewed_at.isoformat() if row.last_reviewed_at else None,
+        },
     }
 
 
@@ -1741,6 +1749,19 @@ def _context_number(value, *, integer: bool = False):
 
 def _context_text(value, limit: int = 4000) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _occurrences_for_rows(db, rows: list[VocabItem]) -> dict:
+    occurrences_by_item: dict[uuid.UUID, list[VocabOccurrence]] = {}
+    if rows:
+        occurrences = db.execute(
+            select(VocabOccurrence)
+            .where(VocabOccurrence.vocab_item_id.in_([r.id for r in rows]))
+            .order_by(VocabOccurrence.saved_at.desc())
+        ).scalars().all()
+        for occurrence in occurrences:
+            occurrences_by_item.setdefault(occurrence.vocab_item_id, []).append(occurrence)
+    return occurrences_by_item
 
 
 @app.route("/api/vocab", methods=["GET"])
@@ -1762,15 +1783,7 @@ def api_vocab_get():
             if vtype and vtype != "all":
                 stmt = stmt.where(VocabItem.type == vtype)
             rows = db.execute(stmt).scalars().all()
-            occurrences_by_item: dict[uuid.UUID, list[VocabOccurrence]] = {}
-            if rows:
-                occurrences = db.execute(
-                    select(VocabOccurrence)
-                    .where(VocabOccurrence.vocab_item_id.in_([r.id for r in rows]))
-                    .order_by(VocabOccurrence.saved_at.desc())
-                ).scalars().all()
-                for occurrence in occurrences:
-                    occurrences_by_item.setdefault(occurrence.vocab_item_id, []).append(occurrence)
+            occurrences_by_item = _occurrences_for_rows(db, rows)
         items = [_vocab_item_to_dict(r, occurrences_by_item.get(r.id, [])) for r in rows]
         if q:
             items = [i for i in items if
@@ -1789,6 +1802,156 @@ def api_vocab_get():
     if vtype and vtype != "all":
         items = [i for i in items if i.get("type", "").lower() == vtype]
     return jsonify(items)
+
+
+@app.route("/review")
+@login_required
+def review_page():
+    return render_template("review.html")
+
+
+@app.route("/api/review/due")
+@login_required
+def api_review_due():
+    if not db_available():
+        return jsonify({"items": [], "total_due": 0})
+    user = get_current_user()
+    if user is None:
+        return jsonify({"items": [], "total_due": 0})
+    try:
+        limit = min(50, max(1, int(request.args.get("limit", "10"))))
+    except ValueError:
+        limit = 10
+    now = datetime.now(timezone.utc)
+    due_filter = (
+        VocabItem.user_id == user.id,
+        VocabItem.suspended.is_(False),
+        or_(VocabItem.due_at.is_(None), VocabItem.due_at <= now),
+    )
+    with get_db() as db:
+        total_due = db.execute(
+            select(func.count()).select_from(VocabItem).where(*due_filter)
+        ).scalar_one()
+        rows = db.execute(
+            select(VocabItem)
+            .where(*due_filter)
+            .order_by(VocabItem.due_at.asc().nullsfirst(), VocabItem.saved_at.asc())
+            .limit(limit)
+        ).scalars().all()
+        occurrences_by_item = _occurrences_for_rows(db, rows)
+    return jsonify({
+        "items": [_vocab_item_to_dict(row, occurrences_by_item.get(row.id, [])) for row in rows],
+        "total_due": total_due,
+    })
+
+
+@app.route("/api/review/<item_id>/answer", methods=["POST"])
+@login_required
+def api_review_answer(item_id: str):
+    if not db_available():
+        return jsonify({"error": "Review scheduling requires the database"}), 503
+    user = get_current_user()
+    if user is None:
+        return jsonify({"error": "Not authenticated"}), 401
+    rating = _context_text((request.json or {}).get("rating"), 16).lower()
+    if rating not in {"again", "hard", "good"}:
+        return jsonify({"error": "Rating must be again, hard, or good"}), 400
+    try:
+        item_uuid = uuid.UUID(item_id)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Not found"}), 404
+
+    now = datetime.now(timezone.utc)
+    with get_db() as db:
+        row = db.execute(select(VocabItem).where(
+            VocabItem.id == item_uuid,
+            VocabItem.user_id == user.id,
+        )).scalar_one_or_none()
+        if row is None:
+            return jsonify({"error": "Not found"}), 404
+
+        log_row = ReviewLog(
+            vocab_item_id=row.id,
+            user_id=user.id,
+            rating=rating,
+            previous_due_at=row.due_at,
+            previous_interval_days=row.interval_days or 0,
+            previous_repetitions=row.repetitions or 0,
+            previous_lapses=row.lapses or 0,
+            previous_last_reviewed_at=row.last_reviewed_at,
+        )
+        db.add(log_row)
+
+        old_interval = row.interval_days or 0
+        old_repetitions = row.repetitions or 0
+        if rating == "again":
+            row.interval_days = 0
+            row.repetitions = 0
+            row.lapses = (row.lapses or 0) + 1
+            row.due_at = now + timedelta(minutes=10)
+        elif rating == "hard":
+            row.interval_days = max(1.0, round(old_interval * 1.5, 2))
+            row.due_at = now + timedelta(days=row.interval_days)
+        else:
+            row.interval_days = 3.0 if old_repetitions == 0 else max(
+                old_interval + 1.0, round(old_interval * 2.3, 2)
+            )
+            row.repetitions = old_repetitions + 1
+            row.due_at = now + timedelta(days=row.interval_days)
+        row.last_reviewed_at = now
+        db.flush()
+        log_id = str(log_row.id)
+        due_at = row.due_at.isoformat()
+
+    return jsonify({
+        "status": "scheduled",
+        "rating": rating,
+        "due_at": due_at,
+        "undo_id": log_id,
+    })
+
+
+@app.route("/api/review/undo", methods=["POST"])
+@login_required
+def api_review_undo():
+    if not db_available():
+        return jsonify({"error": "Review scheduling requires the database"}), 503
+    user = get_current_user()
+    if user is None:
+        return jsonify({"error": "Not authenticated"}), 401
+    undo_id = _context_text((request.json or {}).get("undo_id"), 64)
+    try:
+        undo_uuid = uuid.UUID(undo_id)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Undo is no longer available"}), 404
+    with get_db() as db:
+        log_row = db.execute(select(ReviewLog).where(
+            ReviewLog.id == undo_uuid,
+            ReviewLog.user_id == user.id,
+        )).scalar_one_or_none()
+        if log_row is None:
+            return jsonify({"error": "Undo is no longer available"}), 404
+        latest_id = db.execute(
+            select(ReviewLog.id)
+            .where(
+                ReviewLog.vocab_item_id == log_row.vocab_item_id,
+                ReviewLog.user_id == user.id,
+            )
+            .order_by(ReviewLog.reviewed_at.desc(), ReviewLog.id.desc())
+            .limit(1)
+        ).scalar_one()
+        if latest_id != log_row.id:
+            return jsonify({"error": "Only the latest answer can be undone"}), 409
+        item = db.get(VocabItem, log_row.vocab_item_id)
+        if item is None:
+            return jsonify({"error": "Review item no longer exists"}), 404
+        item.due_at = log_row.previous_due_at
+        item.interval_days = log_row.previous_interval_days
+        item.repetitions = log_row.previous_repetitions
+        item.lapses = log_row.previous_lapses
+        item.last_reviewed_at = log_row.previous_last_reviewed_at
+        db.delete(log_row)
+    return jsonify({"status": "restored"})
 
 
 @app.route("/api/vocab", methods=["POST"])

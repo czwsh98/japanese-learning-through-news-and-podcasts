@@ -19,7 +19,7 @@
   {% set mobile_home_active = episodes_active or current_path.startswith('/trash') %}
   {% set inbox_active = current_path.startswith('/subscriptions') %}
   {% set upload_active = current_path.startswith('/upload') or current_path.startswith('/job') %}
-  {% set vocab_active = current_path.startswith('/vocab') %}
+  {% set vocab_active = current_path.startswith('/vocab') or current_path.startswith('/review') %}
   {% set admin_active = current_path.startswith('/admin') %}
 
   <nav class="border-b border-gray-800/60 px-4 sm:px-6 flex items-center gap-3 sm:gap-4 sticky top-0 bg-gray-950/80 backdrop-blur-xl z-40 min-w-0" style="padding-top: calc(env(safe-area-inset-top) + 12px); padding-bottom: 12px;">

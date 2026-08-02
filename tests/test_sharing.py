@@ -196,6 +196,51 @@ def test_vocab_keeps_multiple_exact_source_occurrences(mock_auth_user, mock_app_
         assert len(db.execute(select(VocabItem)).scalars().all()) == 1
         assert len(db.execute(select(VocabOccurrence)).scalars().all()) == 2
 
+
+@patch("web.app.get_current_user")
+@patch("web.auth.get_current_user")
+def test_daily_review_schedules_and_undoes_latest_answer(mock_auth_user, mock_app_user,
+                                                         client, test_users):
+    user_a_id, _ = test_users
+    with get_db() as db:
+        user = db.get(User, user_a_id)
+        item = VocabItem(
+            user_id=user_a_id,
+            word="〜わけではない",
+            en="it does not mean that",
+            type="grammar",
+        )
+        db.add(item)
+        db.flush()
+        item_id = str(item.id)
+    mock_auth_user.return_value = user
+    mock_app_user.return_value = user
+
+    with get_db() as db:
+        stored = db.execute(select(VocabItem).where(VocabItem.user_id == user_a_id)).scalars().all()
+        assert len(stored) == 1
+        assert stored[0].suspended is False
+        assert stored[0].due_at is None
+
+    due = client.get("/api/review/due?limit=10")
+    assert due.status_code == 200
+    assert due.get_json()["total_due"] == 1
+    assert due.get_json()["items"][0]["type"] == "grammar"
+
+    answer = client.post(f"/api/review/{item_id}/answer", json={"rating": "good"})
+    assert answer.status_code == 200
+    answer_data = answer.get_json()
+    assert answer_data["status"] == "scheduled"
+    assert client.get("/api/review/due").get_json()["total_due"] == 0
+
+    undo = client.post("/api/review/undo", json={"undo_id": answer_data["undo_id"]})
+    assert undo.status_code == 200
+    assert client.get("/api/review/due").get_json()["total_due"] == 1
+    with get_db() as db:
+        restored = db.get(VocabItem, uuid.UUID(item_id))
+        assert restored.due_at is None
+        assert restored.repetitions == 0
+
 @patch("web.app.get_current_user")
 @patch("web.auth.get_current_user")
 @patch("web.app._get_r2")

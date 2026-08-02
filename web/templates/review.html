@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Daily Review — Mimichan{% endblock %}
+{% block main_class %}max-w-2xl{% endblock %}
+
+{% block head %}
+<style>
+  .review-card { min-height: min(31rem, calc(100vh - 16rem)); }
+  .review-answer { min-height: 3rem; }
+  @media (max-width: 767px) {
+    .review-card { min-height: calc(100vh - 15.5rem - env(safe-area-inset-bottom, 0px)); }
+    .review-actions { position: sticky; bottom: calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px)); background: linear-gradient(to top, #030712 78%, transparent); padding-top: 1rem; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mx-auto">
+  <div class="mb-5 flex items-start justify-between gap-4">
+    <div>
+      <a href="/vocab" class="text-xs text-gray-600 hover:text-gray-400">← Vocab Bank</a>
+      <h1 class="mt-1 text-2xl font-bold">Daily review</h1>
+      <p id="review-subtitle" class="mt-1 text-sm text-gray-500">Loading your due cards…</p>
+    </div>
+    <button id="review-undo" type="button" class="hidden rounded-lg border border-gray-700 px-3 py-2 text-xs text-gray-400 hover:text-white">Undo</button>
+  </div>
+
+  <div id="review-loading" class="rounded-2xl border border-gray-800 bg-gray-900/50 py-24 text-center text-gray-500">
+    <span class="animate-pulse">Preparing review…</span>
+  </div>
+
+  <div id="review-empty" class="hidden rounded-2xl border border-dashed border-gray-800 py-20 px-5 text-center">
+    <div class="text-4xl mb-3">✓</div>
+    <h2 class="text-lg font-semibold text-emerald-300">You’re caught up</h2>
+    <p id="review-empty-copy" class="mt-2 text-sm text-gray-500">No cards are due right now.</p>
+    <a href="/vocab" class="mt-5 inline-flex rounded-lg bg-gray-800 px-4 py-2 text-sm text-gray-200 hover:bg-gray-700">Back to Vocab Bank</a>
+  </div>
+
+  <div id="review-session" class="hidden">
+    <div class="mb-3 flex items-center justify-between text-xs text-gray-500">
+      <span id="review-progress-label">Card 1 of 10</span>
+      <span id="review-due-label"></span>
+    </div>
+    <div class="mb-5 h-1 overflow-hidden rounded-full bg-gray-800"><div id="review-progress" class="h-full rounded-full bg-emerald-500 transition-all" style="width:0%"></div></div>
+
+    <article class="review-card flex flex-col rounded-2xl border border-gray-800 bg-gray-900 p-5 sm:p-7">
+      <div class="flex items-center justify-between gap-3">
+        <span id="review-type" class="rounded-full border border-gray-700 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400"></span>
+        <span id="review-level" class="text-xs text-gray-500"></span>
+      </div>
+      <div class="flex flex-1 flex-col items-center justify-center py-8 text-center">
+        <p id="review-prompt" class="mb-4 text-xs uppercase tracking-widest text-gray-600"></p>
+        <div id="review-word" class="font-jp text-4xl font-bold leading-tight text-white"></div>
+        <div id="review-reading" class="mt-3 text-lg text-gray-500"></div>
+      </div>
+
+      <div id="review-back" class="hidden border-t border-gray-800 pt-5">
+        <div id="review-en" class="text-lg font-medium text-blue-300"></div>
+        <div id="review-zh" class="mt-1 text-emerald-300/80"></div>
+        <div id="review-example" class="mt-4 rounded-xl bg-gray-950/60 p-4 text-sm leading-relaxed text-gray-300"></div>
+        <div id="review-source" class="mt-3 flex flex-wrap items-center gap-3 text-xs"></div>
+      </div>
+    </article>
+
+    <div class="review-actions mt-4">
+      <button id="review-reveal" type="button" class="w-full rounded-xl bg-blue-600 py-3.5 text-sm font-semibold text-white hover:bg-blue-500">Reveal answer</button>
+      <div id="review-ratings" class="hidden grid grid-cols-3 gap-2">
+        <button data-rating="again" class="review-answer rounded-xl border border-rose-900 bg-rose-950/40 text-sm font-semibold text-rose-300 hover:bg-rose-900/50">Again<small class="block text-[10px] font-normal opacity-60">10 min</small></button>
+        <button data-rating="hard" class="review-answer rounded-xl border border-amber-900 bg-amber-950/40 text-sm font-semibold text-amber-300 hover:bg-amber-900/50">Hard<small class="block text-[10px] font-normal opacity-60">1+ day</small></button>
+        <button data-rating="good" class="review-answer rounded-xl border border-emerald-900 bg-emerald-950/40 text-sm font-semibold text-emerald-300 hover:bg-emerald-900/50">Good<small class="block text-[10px] font-normal opacity-60">3+ days</small></button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var items = [];
+  var index = 0;
+  var reviewed = 0;
+  var totalDue = 0;
+  var lastUndo = null;
+  var clipAudio = null;
+  var clipStop = null;
+  var loading = document.getElementById('review-loading');
+  var empty = document.getElementById('review-empty');
+  var session = document.getElementById('review-session');
+  var reveal = document.getElementById('review-reveal');
+  var ratings = document.getElementById('review-ratings');
+  var undo = document.getElementById('review-undo');
+
+  function esc(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function promptFor(type) {
+    if (type === 'grammar') return 'What does this pattern express?';
+    if (type === 'expression') return 'Recall the meaning and register';
+    if (type === 'context-specific') return 'What does this mean in context?';
+    return 'Recall the meaning';
+  }
+  function formatTime(value) {
+    var seconds = Math.max(0, Math.floor(Number(value) || 0));
+    return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+  }
+  function stopClip() {
+    if (clipStop) clearInterval(clipStop);
+    clipStop = null;
+    if (clipAudio) clipAudio.pause();
+  }
+  function playOccurrence(source) {
+    stopClip();
+    clipAudio = new Audio('/episode/' + encodeURIComponent(source.episode_slug) + '/audio');
+    clipAudio.addEventListener('loadedmetadata', function () {
+      clipAudio.currentTime = Math.max(0, Number(source.start_time || 0) - 0.5);
+      clipAudio.play().catch(function () {});
+      var stopAt = Number(source.end_time || source.start_time + 10) + 0.5;
+      clipStop = setInterval(function () {
+        if (clipAudio.currentTime >= stopAt) stopClip();
+      }, 100);
+    }, {once:true});
+  }
+  function finish() {
+    stopClip();
+    session.classList.add('hidden');
+    empty.classList.remove('hidden');
+    document.getElementById('review-empty-copy').textContent = reviewed
+      ? 'Reviewed ' + reviewed + ' card' + (reviewed === 1 ? '' : 's') + ' today.'
+      : 'No cards are due right now.';
+    document.getElementById('review-subtitle').textContent = 'Session complete';
+  }
+  function render() {
+    stopClip();
+    if (index >= items.length) { finish(); return; }
+    var item = items[index];
+    var source = item.occurrences && item.occurrences[0];
+    document.getElementById('review-progress-label').textContent = 'Card ' + (index + 1) + ' of ' + items.length;
+    document.getElementById('review-due-label').textContent = totalDue + ' due at start';
+    document.getElementById('review-progress').style.width = (index / items.length * 100) + '%';
+    document.getElementById('review-type').textContent = item.type === 'context-specific' ? 'context' : item.type;
+    document.getElementById('review-level').textContent = item.level || '';
+    document.getElementById('review-prompt').textContent = promptFor(item.type);
+    document.getElementById('review-word').textContent = item.word;
+    document.getElementById('review-reading').textContent = item.reading ? '【' + item.reading + '】' : '';
+    document.getElementById('review-en').textContent = item.en || '';
+    document.getElementById('review-zh').textContent = item.zh || '';
+    var example = source && source.source_text || item.example || '';
+    var exampleEl = document.getElementById('review-example');
+    exampleEl.textContent = example;
+    exampleEl.classList.toggle('hidden', !example);
+    var sourceEl = document.getElementById('review-source');
+    sourceEl.innerHTML = '';
+    if (source) {
+      if (source.source_episode_available && source.episode_slug) {
+        var play = document.createElement('button');
+        play.type = 'button'; play.className = 'rounded-lg border border-blue-900 px-3 py-2 text-blue-300 hover:bg-blue-950';
+        play.textContent = '▶ Hear sentence'; play.addEventListener('click', function () { playOccurrence(source); });
+        sourceEl.appendChild(play);
+        var link = document.createElement('a');
+        link.className = 'text-gray-500 hover:text-gray-300';
+        link.href = '/episode/' + encodeURIComponent(source.episode_slug) + '?t=' + encodeURIComponent(source.start_time || 0);
+        link.textContent = (source.episode_title || 'Source') + ' · ' + formatTime(source.start_time) + ' →';
+        sourceEl.appendChild(link);
+      } else {
+        sourceEl.innerHTML = '<span class="text-gray-600">Source expired · saved context retained</span>';
+      }
+    }
+    document.getElementById('review-back').classList.add('hidden');
+    ratings.classList.add('hidden');
+    reveal.classList.remove('hidden');
+  }
+  async function answer(rating, button) {
+    var item = items[index];
+    document.querySelectorAll('[data-rating]').forEach(function (b) { b.disabled = true; });
+    try {
+      var response = await fetch('/api/review/' + encodeURIComponent(item.id) + '/answer', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({rating:rating})
+      });
+      var result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not save review');
+      lastUndo = {undoId:result.undo_id, index:index};
+      undo.classList.remove('hidden');
+      reviewed += 1; index += 1; render();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      document.querySelectorAll('[data-rating]').forEach(function (b) { b.disabled = false; });
+    }
+  }
+  reveal.addEventListener('click', function () {
+    document.getElementById('review-back').classList.remove('hidden');
+    reveal.classList.add('hidden'); ratings.classList.remove('hidden');
+  });
+  ratings.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-rating]');
+    if (button) answer(button.dataset.rating, button);
+  });
+  undo.addEventListener('click', async function () {
+    if (!lastUndo) return;
+    undo.disabled = true;
+    try {
+      var response = await fetch('/api/review/undo', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({undo_id:lastUndo.undoId})
+      });
+      var result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not undo');
+      index = lastUndo.index; reviewed = Math.max(0, reviewed - 1); lastUndo = null;
+      undo.classList.add('hidden'); empty.classList.add('hidden'); session.classList.remove('hidden'); render();
+    } catch (error) { alert(error.message); }
+    finally { undo.disabled = false; }
+  });
+
+  fetch('/api/review/due?limit=10').then(function (response) { return response.json(); }).then(function (data) {
+    items = data.items || []; totalDue = data.total_due || 0;
+    loading.classList.add('hidden');
+    document.getElementById('review-subtitle').textContent = totalDue + ' card' + (totalDue === 1 ? '' : 's') + ' due';
+    if (!items.length) { empty.classList.remove('hidden'); return; }
+    session.classList.remove('hidden'); render();
+  }).catch(function () {
+    loading.innerHTML = '<span class="text-red-400">Could not load review cards.</span>';
+  });
+}());
+</script>
+{% endblock %}
