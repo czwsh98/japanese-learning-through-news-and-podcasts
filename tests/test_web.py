@@ -135,17 +135,20 @@ def test_recommendation_subscribe_rejects_duplicate_and_unknown(client, tmp_path
     assert unknown.status_code == 404
 
 
-def test_recommendation_cards_render_before_source_grid(client, tmp_path):
+def test_inbox_and_source_management_have_distinct_routes(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": [{"name": "Test", "url": "http://test.com"}]}))
     with patch("web.app.SOURCES_FILE", mock_sources):
-        body = client.get("/subscriptions").get_data(as_text=True)
-    # "http://test.com" also appears earlier, as the value of the inbox's
-    # source-filter <option> — that's the listening-inbox UI (merged in from
-    # dmit-hk's production redesign), not the source grid this test targets,
-    # so only the recommendations-before-source-grid ordering is asserted here.
-    assert body.index("Recommended for you") < body.rindex("Your sources") < body.rindex("http://test.com")
-    assert 'class="recommendation-rail"' in body
+        inbox = client.get("/subscriptions").get_data(as_text=True)
+        sources = client.get("/sources").get_data(as_text=True)
+    assert "Recommended for you" in inbox
+    assert "Your sources" not in inbox
+    assert "Manage sources" in inbox
+    assert "Manage listening sources" in sources
+    assert "Your sources" in sources
+    assert "http://test.com" in sources
+    assert "Recommended for you" not in sources
+    assert 'class="recommendation-rail"' in inbox
 
 @patch("lib.analyzer.explain_sentence")
 def test_api_explain(mock_explain, client):

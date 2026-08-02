@@ -1326,9 +1326,76 @@ def _grouped(episodes: list):
     return _group_by_channel(episodes), "channel"
 
 
+def _episode_summary(row: Episode) -> dict:
+    position = max(0.0, row.max_position or row.resume_position or 0.0)
+    if row.duration > 0:
+        position = min(position, float(row.duration))
+        progress = 100 if row.completed_at else min(100, round(position / row.duration * 100))
+    else:
+        progress = 100 if row.completed_at else 0
+    return {
+        "date": row.slug,
+        "meta": {
+            "title": row.title, "channel": row.channel, "url": row.url,
+            "thumbnail": row.thumbnail, "duration": row.duration,
+            "level": row.level, "source": row.source,
+        },
+        "has_audio": bool(row.r2_prefix), "has_transcript": bool(row.r2_prefix),
+        "position": position, "progress": progress,
+        "completed": row.completed_at is not None,
+        "resume_updated_at": row.resume_updated_at,
+    }
+
+
 @app.route("/")
 @login_required
 def index():
+    user = get_current_user()
+    resume_episode = None
+    recent_episodes = []
+    due_count = 0
+    jobs = []
+    inbox = []
+    if db_available() and user:
+        with get_db() as db:
+            rows = db.execute(
+                select(Episode).where(
+                    Episode.owner_user_id == user.id,
+                    Episode.deleted_at.is_(None),
+                ).order_by(Episode.created_at.desc())
+            ).scalars().all()
+            summaries = [_episode_summary(row) for row in rows]
+            resumable = [item for item in summaries if
+                         not item["completed"] and item["position"] > 5 and
+                         item["progress"] < 90 and item["resume_updated_at"] is not None]
+            if resumable:
+                resume_episode = max(resumable, key=lambda item: item["resume_updated_at"])
+            recent_episodes = [item for item in summaries if item is not resume_episode][:3]
+            due_count = db.execute(select(func.count()).select_from(VocabItem).where(
+                VocabItem.user_id == user.id,
+                VocabItem.suspended.is_(False),
+                or_(VocabItem.due_at.is_(None), VocabItem.due_at <= datetime.now(timezone.utc)),
+            )).scalar_one()
+            job_rows = db.execute(
+                select(ProcessingJob).where(
+                    ProcessingJob.user_id == user.id,
+                    ProcessingJob.status.in_(["queued", "running", "retrying", "failed"]),
+                ).order_by(ProcessingJob.updated_at.desc()).limit(3)
+            ).scalars().all()
+            jobs = [_job_to_dict(row) for row in job_rows]
+        sources_data = _load_sources()
+        _, subscription_inbox, _ = _build_subscription_view(
+            sources_data.get("sources", []), _load_recent_cache(), user)
+        inbox = [item for item in subscription_inbox if not item["processed"] and not item["active"]][:3]
+    return render_template(
+        "today.html", resume_episode=resume_episode, recent_episodes=recent_episodes,
+        due_count=due_count, jobs=jobs, inbox=inbox,
+    )
+
+
+@app.route("/episodes")
+@login_required
+def library():
     episodes = []
     resume_episode = None
 
@@ -1345,31 +1412,7 @@ def index():
                     )
                     .order_by(Episode.date.desc(), Episode.created_at.desc())
                 ).scalars().all()
-            for row in rows:
-                position = max(0.0, row.max_position or row.resume_position or 0.0)
-                if row.duration > 0:
-                    position = min(position, float(row.duration))
-                    progress = 100 if row.completed_at else min(100, round(position / row.duration * 100))
-                else:
-                    progress = 100 if row.completed_at else 0
-                episodes.append({
-                    "date": row.slug,
-                    "meta": {
-                        "title":     row.title,
-                        "channel":   row.channel,
-                        "url":       row.url,
-                        "thumbnail": row.thumbnail,
-                        "duration":  row.duration,
-                        "level":     row.level,
-                        "source":    row.source,
-                    },
-                    "has_audio":      bool(row.r2_prefix),
-                    "has_transcript": bool(row.r2_prefix),
-                    "position":        position,
-                    "progress":        progress,
-                    "completed":       row.completed_at is not None,
-                    "resume_updated_at": row.resume_updated_at,
-                })
+            episodes = [_episode_summary(row) for row in rows]
             resumable = [
                 ep for ep in episodes
                 if not ep["completed"] and ep["position"] > 5 and ep["progress"] < 90
@@ -1522,7 +1565,7 @@ def episode_restore(date_str: str):
                 .values(completed_at=None, delete_after=None, deleted_at=None)
             )
         log.info("Restored episode %s from trash as unfinished", date_str)
-    return redirect(url_for("index"))
+    return redirect(url_for("library"))
 
 
 @app.route("/episode/<date_str>/delete", methods=["POST"])
@@ -1533,13 +1576,13 @@ def episode_delete(date_str: str):
     if ep_row is not None:
         _purge_episode(ep_row)
         log.info(f"Deleted episode {date_str} from DB/R2")
-        return redirect(url_for("index"))
+        return redirect(url_for("library"))
 
     # ── File fallback ─────────────────────────────────────────────────────────
     ep = _ep_dir(date_str)
     shutil.rmtree(ep)
     log.info(f"Deleted episode {date_str} from filesystem")
-    return redirect(url_for("index"))
+    return redirect(url_for("library"))
 
 
 def _load_recent_cache() -> dict:
@@ -1633,6 +1676,18 @@ def _build_subscription_view(sources: list[dict], recent_cache: dict, user) -> t
     with _jobs_lock:
         active_jobs = [dict(job) for job in _jobs.values()
                        if job.get("status") == "processing" and job.get("user_id") == user_id]
+    if user is not None and db_available():
+        with get_db() as db:
+            durable_jobs = db.execute(
+                select(ProcessingJob).where(
+                    ProcessingJob.user_id == user.id,
+                    ProcessingJob.status.in_(("queued", "running", "retrying")),
+                )
+            ).scalars().all()
+        active_jobs.extend({
+            "slug": job.slug,
+            "source_token": job.source_token,
+        } for job in durable_jobs)
     active_slugs = {job.get("slug") for job in active_jobs}
     active_tokens = {job.get("source_token") for job in active_jobs if job.get("source_token")}
 
@@ -1748,6 +1803,19 @@ def subscriptions_page():
     return render_template(
         "subscriptions.html", sources=sources, inbox=inbox, metrics=metrics,
         recommendations=recommendations, catalog_available=catalog_available,
+        show_source_manager=False,
+    )
+
+
+@app.route("/sources", methods=["GET"])
+@login_required
+def sources_page():
+    sources_data = _load_sources()
+    sources, _, metrics = _build_subscription_view(
+        sources_data.get("sources", []), _load_recent_cache(), get_current_user())
+    return render_template(
+        "subscriptions.html", sources=sources, inbox=[], metrics=metrics,
+        recommendations=[], catalog_available=True, show_source_manager=True,
     )
 
 
@@ -1835,7 +1903,7 @@ def subscriptions_add():
     desc = request.form.get("description", "").strip()
 
     if not name or not url:
-        return redirect(url_for("subscriptions_page", error="Name and URL are required."))
+        return redirect(url_for("sources_page", error="Name and URL are required."))
 
     new_source = {"name": name, "url": url, "description": desc,
                   "enabled": True, "digest_enabled": True}
@@ -1856,7 +1924,7 @@ def subscriptions_add():
             return jsonify({"error": "That source is already subscribed."}), 409
         sources_data["sources"].append(new_source)
         _atomic_write_json(SOURCES_FILE, sources_data)
-    return redirect(url_for("subscriptions_page"))
+    return redirect(url_for("sources_page"))
 
 
 @app.route("/subscriptions/update", methods=["POST"])
@@ -1885,7 +1953,7 @@ def subscriptions_update():
             if rss_url:
                 match["rss_url"] = rss_url
         _atomic_write_json(SOURCES_FILE, data)
-    return redirect(url_for("subscriptions_page"))
+    return redirect(url_for("sources_page"))
 
 
 def _catalog_candidate_from_request() -> dict:
@@ -1964,7 +2032,7 @@ def subscriptions_delete():
         sources_data = _load_sources()
         sources_data["sources"] = [s for s in sources_data.get("sources", []) if s.get("url") != url]
         _atomic_write_json(SOURCES_FILE, sources_data)
-    return redirect(url_for("subscriptions_page"))
+    return redirect(url_for("sources_page"))
 
 
 @app.route("/vocab")

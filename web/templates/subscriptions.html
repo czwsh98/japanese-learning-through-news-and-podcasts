@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Listening inbox — Mimichan{% endblock %}
+{% block title %}{{ 'Sources' if show_source_manager else 'Listening inbox' }} — Mimichan{% endblock %}
 {% block main_class %}max-w-6xl{% endblock %}
 
 {% block head %}
@@ -19,6 +19,7 @@
 {% endblock %}
 
 {% block content %}
+{% if not show_source_manager %}
 <section class="mb-9">
   <div class="flex items-end justify-between gap-4 mb-5">
     <div>
@@ -26,6 +27,7 @@
       <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Listening inbox</h1>
       <p class="text-sm text-gray-500 mt-2">The newest episodes from every active source, ready when you are.</p>
     </div>
+    <a href="/sources" class="shrink-0 rounded-lg border border-gray-700 px-3 py-2 text-xs font-medium text-gray-300 hover:border-gray-500 hover:text-white">Manage sources</a>
   </div>
 
   {% set metric_items = [
@@ -192,7 +194,15 @@
   {% endif %}
 </section>
 
+{% endif %}
+
+{% if show_source_manager %}
 <section class="border-t border-gray-800 pt-8">
+  <div class="mb-6">
+    <p class="text-xs font-semibold uppercase tracking-[.18em] text-blue-400 mb-2">Sources</p>
+    <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Manage listening sources</h1>
+    <p class="text-sm text-gray-500 mt-2">Control which feeds appear in Inbox and qualify for daily picks.</p>
+  </div>
   <div class="flex items-center justify-between gap-4 mb-4">
     <div><h2 class="text-lg font-semibold">Your sources</h2><p class="text-xs text-gray-600 mt-1">Feed discovery and daily-pick settings are independent.</p></div>
     <span class="text-xs text-gray-600">Daily check: 10:00 UTC</span>
@@ -227,6 +237,7 @@
   <details class="mt-4 rounded-xl border border-dashed border-gray-800 bg-gray-900/20"><summary class="cursor-pointer list-none px-4 py-3 text-sm font-medium text-gray-300">＋ Add a source</summary><form method="post" action="/subscriptions/add" class="grid gap-3 border-t border-gray-800 p-4 sm:grid-cols-2"><input name="name" required placeholder="Source name" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none"><input name="url" type="url" required placeholder="Podcast or YouTube URL" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none"><textarea name="description" rows="2" placeholder="Description (optional)" class="rounded-lg border border-gray-800 bg-gray-950 px-3 py-2.5 text-sm focus:border-blue-500 focus:outline-none sm:col-span-2"></textarea><div class="sm:col-span-2 flex justify-end"><button class="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-500">Add source</button></div></form></details>
   <p class="mt-4 text-[11px] text-gray-600">Paused sources are skipped by feed checks, the inbox, and daily picks. The feed cache refreshes after the daily 10:00 UTC check; {{ metrics.freshness|lower }} cache data is currently shown.</p>
 </section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

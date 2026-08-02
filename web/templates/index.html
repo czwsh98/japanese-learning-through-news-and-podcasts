@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Episodes — Mimichan{% endblock %}
+{% block title %}Library — Mimichan{% endblock %}
 
 {% block head %}
 <style>
@@ -80,7 +80,7 @@
 {% block content %}
 <div class="max-w-3xl">
   <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-    <h1 class="text-2xl font-bold">Episodes</h1>
+    <h1 class="text-2xl font-bold">Library</h1>
     <div class="flex items-center gap-3">
       <a href="/trash" class="text-xs text-gray-500 hover:text-gray-300 transition-colors">Trash</a>
       {% set gm = group_mode | default('channel') %}

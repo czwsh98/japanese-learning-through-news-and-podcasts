@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Today — Mimichan{% endblock %}
+{% block main_class %}max-w-5xl{% endblock %}
+
+{% macro episode_row(ep, action='Open') %}
+<a href="/episode/{{ ep.date }}" class="flex items-center gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-4 hover:border-gray-600 hover:bg-gray-900">
+  <div class="min-w-0 flex-1"><div class="truncate font-medium text-gray-100">{{ ep.meta.title or ep.date }}</div><div class="mt-1 text-xs text-gray-500">{{ ep.meta.channel }}{% if ep.meta.duration %} · {{ '%d:%02d'|format(ep.meta.duration // 60, ep.meta.duration % 60) }}{% endif %}</div>{% if ep.progress %}<div class="mt-3 h-1 overflow-hidden rounded-full bg-gray-800"><div class="h-full rounded-full bg-blue-500" style="width:{{ ep.progress }}%"></div></div>{% endif %}</div>
+  <span class="shrink-0 text-xs font-medium text-blue-300">{{ action }} →</span>
+</a>
+{% endmacro %}
+
+{% block content %}
+<header class="mb-7"><p class="text-xs font-semibold uppercase tracking-[.2em] text-blue-400">Your learning queue</p><h1 class="mt-2 text-3xl font-bold tracking-tight">Today</h1><p class="mt-2 text-sm text-gray-500">Continue, review, or pick one new listening task.</p></header>
+
+<div class="grid gap-5 lg:grid-cols-2">
+  <section aria-labelledby="continue-title">
+    <div class="mb-3 flex items-center justify-between"><h2 id="continue-title" class="font-semibold text-gray-200">Continue listening</h2><a href="/episodes" class="text-xs text-gray-500 hover:text-white">Library →</a></div>
+    {% if resume_episode %}{{ episode_row(resume_episode, 'Resume · ' ~ resume_episode.progress ~ '%') }}
+    {% else %}<div class="rounded-xl border border-dashed border-gray-800 p-5 text-sm text-gray-500">Nothing in progress. Choose something new from your Inbox.</div>{% endif %}
+  </section>
+
+  <section aria-labelledby="review-title">
+    <div class="mb-3 flex items-center justify-between"><h2 id="review-title" class="font-semibold text-gray-200">Review</h2><a href="/vocab" class="text-xs text-gray-500 hover:text-white">Vocab Bank →</a></div>
+    <a href="/review" class="flex min-h-[6.25rem] items-center justify-between rounded-xl border {{ 'border-emerald-900 bg-emerald-950/30' if due_count else 'border-gray-800 bg-gray-900/40' }} p-5 hover:border-emerald-700">
+      <div><div class="text-3xl font-bold {{ 'text-emerald-300' if due_count else 'text-gray-500' }}">{{ due_count }}</div><div class="mt-1 text-sm text-gray-400">card{{ 's' if due_count != 1 }} due</div></div>
+      <span class="text-sm font-semibold {{ 'text-emerald-300' if due_count else 'text-gray-500' }}">{{ 'Start review →' if due_count else 'Caught up ✓' }}</span>
+    </a>
+  </section>
+</div>
+
+{% if jobs %}
+<section class="mt-8" aria-labelledby="activity-title"><div class="mb-3 flex items-center justify-between"><h2 id="activity-title" class="font-semibold text-gray-200">Processing activity</h2><a href="/activity" class="text-xs text-gray-500 hover:text-white">All activity →</a></div><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{% for job in jobs %}<a href="/job/{{ job.job_id }}" class="rounded-xl border {{ 'border-rose-900/70 bg-rose-950/20' if job.status == 'error' else 'border-gray-800 bg-gray-900/50' }} p-4 hover:border-gray-600"><div class="truncate text-sm font-medium text-gray-200">{{ job.title }}</div><div class="mt-2 text-xs {{ 'text-rose-300' if job.status == 'error' else 'text-blue-300' }}">{{ ('Failed · ' ~ job.retry_from) if job.status == 'error' else job.step }}</div></a>{% endfor %}</div></section>
+{% endif %}
+
+<section class="mt-8" aria-labelledby="new-title"><div class="mb-3 flex items-center justify-between"><h2 id="new-title" class="font-semibold text-gray-200">New in your Inbox</h2><a href="/subscriptions" class="text-xs text-gray-500 hover:text-white">Open Inbox →</a></div>
+  {% if inbox %}<div class="space-y-2">{% for ep in inbox %}<article class="flex flex-col gap-3 rounded-xl border border-gray-800 bg-gray-900/40 p-4 sm:flex-row sm:items-center"><div class="min-w-0 flex-1"><div class="text-[11px] font-medium text-blue-400">{{ ep.source_name }}</div><h3 class="mt-1 line-clamp-2 text-sm font-semibold text-gray-100">{{ ep.title or 'Untitled episode' }}</h3>{% if ep.duration %}<div class="mt-1 text-xs text-gray-600">{{ ep.duration // 60 }}:{{ '%02d'|format(ep.duration % 60) }}</div>{% endif %}</div><button type="button" class="today-process min-h-11 shrink-0 rounded-lg bg-blue-600 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-500" data-url="{{ ep.url }}" data-title="{{ ep.title }}" data-channel="{{ ep.channel or ep.source_name }}" data-duration="{{ ep.duration }}">Process</button></article>{% endfor %}</div>
+  {% else %}<div class="rounded-xl border border-dashed border-gray-800 p-5 text-sm text-gray-500">No unprocessed episodes are waiting right now.</div>{% endif %}
+</section>
+
+{% if recent_episodes %}
+<section class="mt-8" aria-labelledby="recent-title"><div class="mb-3 flex items-center justify-between"><h2 id="recent-title" class="font-semibold text-gray-200">Recent library</h2><a href="/episodes" class="text-xs text-gray-500 hover:text-white">View all →</a></div><div class="space-y-2">{% for ep in recent_episodes %}{{ episode_row(ep) }}{% endfor %}</div></section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.today-process').forEach(function (button) { button.addEventListener('click', async function () { button.disabled = true; button.textContent = 'Starting…'; var form = new FormData(); form.append('source_url', button.dataset.url); form.append('title', button.dataset.title); form.append('channel', button.dataset.channel); form.append('duration', button.dataset.duration || '0'); form.append('level', 'advanced'); try { var response = await fetch('/api/upload', {method:'POST', body:form}); var data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not start'); window.location.href = data.job_id ? '/job/' + data.job_id : '/episode/' + data.slug; } catch (error) { alert(error.message); button.disabled = false; button.textContent = 'Process'; } }); });
+</script>
+{% endblock %}

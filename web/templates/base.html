@@ -15,9 +15,12 @@
 <body class="bg-gray-950 text-gray-100 min-h-screen">
 
   {% set current_path = request.path %}
-  {% set episodes_active = current_path == '/' or current_path.startswith('/episode') %}
-  {% set mobile_home_active = episodes_active or current_path.startswith('/trash') %}
+  {% set today_active = current_path == '/' %}
+  {% set library_active = current_path.startswith('/episodes') or current_path.startswith('/episode') or current_path.startswith('/trash') %}
+  {% set mobile_home_active = today_active or library_active %}
   {% set inbox_active = current_path.startswith('/subscriptions') %}
+  {% set sources_active = current_path.startswith('/sources') %}
+  {% set mobile_inbox_active = inbox_active or sources_active %}
   {% set upload_active = current_path.startswith('/upload') or current_path.startswith('/job') %}
   {% set mobile_upload_active = upload_active or current_path.startswith('/activity') %}
   {% set vocab_active = current_path.startswith('/vocab') or current_path.startswith('/review') %}
@@ -29,8 +32,10 @@
       <span class="text-gray-500 text-xs font-normal hidden sm:block">Learn Japanese through listening</span>
     </a>
     <span class="text-gray-700 hidden sm:inline">|</span>
-    <a href="/" class="desktop-nav-link {{ 'desktop-nav-active' if episodes_active }} hidden sm:inline"{% if episodes_active %} aria-current="page"{% endif %}>Episodes</a>
+    <a href="/" class="desktop-nav-link {{ 'desktop-nav-active' if today_active }} hidden sm:inline"{% if today_active %} aria-current="page"{% endif %}>Today</a>
+    <a href="/episodes" class="desktop-nav-link {{ 'desktop-nav-active' if library_active }} hidden sm:inline"{% if library_active %} aria-current="page"{% endif %}>Library</a>
     <a href="/subscriptions" class="desktop-nav-link {{ 'desktop-nav-active' if inbox_active }} hidden sm:inline"{% if inbox_active %} aria-current="page"{% endif %}>Inbox</a>
+    <a href="/sources" class="desktop-nav-link {{ 'desktop-nav-active' if sources_active }} hidden lg:inline"{% if sources_active %} aria-current="page"{% endif %}>Sources</a>
     <a href="/vocab" class="desktop-nav-link {{ 'desktop-nav-active' if vocab_active }} hidden sm:inline"{% if vocab_active %} aria-current="page"{% endif %}>Vocab</a>
     <a href="/trash" class="desktop-nav-link {{ 'desktop-nav-active' if current_path.startswith('/trash') }} hidden lg:inline"{% if current_path.startswith('/trash') %} aria-current="page"{% endif %}>Trash</a>
     <a href="/upload" class="desktop-nav-link {{ 'desktop-nav-active' if upload_active }} hidden sm:inline"{% if upload_active %} aria-current="page"{% endif %}>Upload</a>
@@ -84,10 +89,10 @@
       <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
       </svg>
-      <span class="text-[9px] font-medium tracking-wide uppercase">Episodes</span>
+      <span class="text-[9px] font-medium tracking-wide uppercase">Today</span>
     </a>
     <a href="/subscriptions" id="tab-subs"
-       class="mobile-nav-link {{ 'mobile-nav-active' if inbox_active }}"{% if inbox_active %} aria-current="page"{% endif %}>
+       class="mobile-nav-link {{ 'mobile-nav-active' if mobile_inbox_active }}"{% if mobile_inbox_active %} aria-current="page"{% endif %}>
       <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="5" cy="19" r="1"/><path d="M4 4a16 16 0 0 1 16 16"/><path d="M4 11a9 9 0 0 1 9 9"/>
       </svg>
