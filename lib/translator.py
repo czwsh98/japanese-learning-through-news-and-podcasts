@@ -86,16 +86,21 @@ def _extract_items(data):
 
 
 def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
-    """Translate one batch with exponential backoff; populate tr_map."""
-    payload = [{"index": s["index"], "ja": s["ja"]} for s in batch]
-    prompt = (
-        f"Translate ALL {len(batch)} Japanese segments into English (en) and "
-        f"Simplified Chinese (zh). Return exactly {len(batch)} items preserving the original index.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-    )
+    """Translate one batch, retrying only indices omitted by the model."""
+    pending = {s["index"]: s for s in batch}
 
     for attempt in range(_MAX_RETRIES):
         try:
+            payload = [
+                {"index": segment["index"], "ja": segment["ja"]}
+                for segment in pending.values()
+            ]
+            prompt = (
+                f"Translate ALL {len(payload)} Japanese segments into English (en) and "
+                f"Simplified Chinese (zh). Return exactly {len(payload)} items preserving "
+                "the original index.\n\n"
+                + json.dumps(payload, ensure_ascii=False, indent=2)
+            )
             response = client.chat.completions.create(
                 model=_MODEL,
                 max_tokens=8192,
@@ -109,16 +114,30 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
             items = _extract_items(data)
             got = 0
             for item in items:
-                if isinstance(item, dict) and "index" in item:
-                    with _TR_LOCK:
-                        tr_map[item["index"]] = {
-                            "en": item.get("en", ""),
-                            "zh": item.get("zh", ""),
-                        }
-                    got += 1
+                if not isinstance(item, dict) or "index" not in item:
+                    continue
+                try:
+                    index = int(item["index"])
+                except (TypeError, ValueError):
+                    continue
+                if index not in pending:
+                    continue
+                en = str(item.get("en", "")).strip()
+                zh = str(item.get("zh", "")).strip()
+                if not en or not zh:
+                    continue
+                with _TR_LOCK:
+                    tr_map[index] = {"en": en, "zh": zh}
+                pending.pop(index)
+                got += 1
+
+            if not pending:
+                return
             if got == 0:
                 raise ValueError("no translations parsed from model response")
-            return
+            raise ValueError(
+                f"model omitted {len(pending)} translation(s): {sorted(pending)}"
+            )
 
         except Exception as exc:
             if attempt < _MAX_RETRIES - 1:
@@ -126,8 +145,11 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
                 log.warning(f"DeepSeek batch attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
                 time.sleep(delay)
             else:
-                log.error(f"DeepSeek batch attempt {attempt + 1} failed: {exc} — padding with blanks")
-                for s in batch:
+                log.error(
+                    f"DeepSeek batch attempt {attempt + 1} failed: {exc} — "
+                    f"padding {len(pending)} missing translation(s) with blanks"
+                )
+                for s in pending.values():
                     with _TR_LOCK:
                         tr_map.setdefault(s["index"], {"en": "", "zh": ""})
 

@@ -6,7 +6,6 @@ Set MLX_WHISPER_MODEL to override the local model (default: mlx-community/whispe
 Files larger than the API's 25 MB limit are automatically split into chunks,
 transcribed in parallel, and merged — the caller receives a single seamless result.
 """
-import collections
 import os
 import logging
 import subprocess
@@ -19,8 +18,7 @@ log = logging.getLogger(__name__)
 _USE_API = os.environ.get("USE_LOCAL_WHISPER", "").strip() in ("", "0")
 _MLX_MODEL = os.environ.get("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-mlx")
 
-_MIN_CHARS = 3
-_LOOP_WINDOW = 4
+_MIN_CHARS = 1
 _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
 _API_AUDIO_BITRATE = os.environ.get("WHISPER_AUDIO_BITRATE", "64k")
 _MAX_CHUNK_WORKERS = max(1, int(os.environ.get("WHISPER_CHUNK_WORKERS", "3")))
@@ -42,24 +40,34 @@ def transcribe_audio(audio_path: Path) -> dict:
 # ── Hallucination filter (used by both backends) ──────────────────────────────
 
 def _has_repeating_phrase(text: str) -> bool:
-    """True if any 4–20 char substring appears 3+ times (phrase-loop hallucination)."""
+    """True only for a dominant *consecutive* phrase loop.
+
+    Repeated common Japanese phrases in different sentences are normal. The old
+    n-gram counter treated any three occurrences as a hallucination and deleted
+    the entire segment, producing long holes in podcast transcripts.
+    """
     n = len(text)
     for length in range(4, min(21, n // 3 + 1)):
-        counts: dict[str, int] = {}
-        for i in range(n - length + 1):
-            gram = text[i:i + length]
-            counts[gram] = counts.get(gram, 0) + 1
-            if counts[gram] >= 3:
+        for start in range(n - (length * 3) + 1):
+            phrase = text[start:start + length]
+            repeats = 1
+            position = start + length
+            while text[position:position + length] == phrase:
+                repeats += 1
+                position += length
+            repeated_chars = repeats * length
+            if repeats >= 3 and repeated_chars >= max(12, int(n * 0.6)):
                 return True
     return False
 
 
 def _clean_segments(raw: list[dict]) -> list[dict]:
-    """Drop hallucinated / garbage segments. Four-layer filter:
-    1. Empty / too-short  2. Single-char dominance  3. Phrase loop  4. Cross-segment loop
+    """Drop only high-confidence hallucinated / garbage segments.
+
+    Exact repeated segments and short acknowledgements are valid dialogue and
+    must be preserved. The phrase-loop check is intentionally conservative.
     """
     cleaned: list[dict] = []
-    recent: collections.deque[str] = collections.deque(maxlen=_LOOP_WINDOW)
 
     for seg in raw:
         text = seg["ja"].strip("　 \t\n\r")
@@ -71,10 +79,6 @@ def _clean_segments(raw: list[dict]) -> list[dict]:
         if _has_repeating_phrase(text):
             log.warning(f"Dropping phrase-loop [{seg['start']:.1f}s]: {text[:40]!r}")
             continue
-        if text in recent:
-            log.warning(f"Dropping cross-segment loop [{seg['start']:.1f}s]: {text!r}")
-            continue
-        recent.append(text)
         cleaned.append({**seg, "ja": text})
 
     for i, seg in enumerate(cleaned):
