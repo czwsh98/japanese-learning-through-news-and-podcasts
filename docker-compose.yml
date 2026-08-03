@@ -7,6 +7,12 @@ services:
       DATABASE_URL: "postgresql://app:${POSTGRES_PASSWORD}@db:5432/japanese"
       SOURCES_FILE: "/app/state/sources.json"
       RECENT_EPISODES_CACHE_FILE: "/app/state/recent_episodes_cache.json"
+      # DeepSeek is directly reachable from Hong Kong and is substantially
+      # faster without the general HTTPS proxy. OpenAI remains proxied.
+      NO_PROXY: "${NO_PROXY},api.deepseek.com"
+      TRANSLATION_BATCH_SIZE: "50"
+      TRANSLATION_WORKERS: "4"
+      WHISPER_CHUNK_WORKERS: "3"
     depends_on:
       db:
         condition: service_healthy

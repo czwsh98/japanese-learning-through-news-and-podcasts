@@ -12,8 +12,8 @@ from openai import OpenAI
 log = logging.getLogger(__name__)
 
 _MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-_BATCH = 25   # segments per DeepSeek call
-_MAX_WORKERS = 4
+_BATCH = max(1, int(os.environ.get("TRANSLATION_BATCH_SIZE", "50")))
+_MAX_WORKERS = max(1, int(os.environ.get("TRANSLATION_WORKERS", "4")))
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
 

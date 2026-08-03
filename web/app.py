@@ -80,7 +80,13 @@ from web.recommendations import load_catalog, normalize_url, rank_recommendation
 from sqlalchemy import delete, func, or_, select, text as sa_text, update
 from sqlalchemy.exc import IntegrityError
 
+_LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 log = logging.getLogger(__name__)
+log.setLevel(_LOG_LEVEL)
 
 app = Flask(
     __name__,
@@ -599,6 +605,19 @@ def _set_step(job_id: str, step: str, step_num: int = 0) -> None:
             log.warning("Could not persist step for job %s: %s", job_id, exc)
 
 
+def _run_timed_stage(job_id: str, slug: str, stage: str, func):
+    """Run a pipeline stage and always emit a machine-searchable duration."""
+    started = time.perf_counter()
+    try:
+        return func()
+    finally:
+        elapsed = time.perf_counter() - started
+        log.info(
+            "Pipeline stage timing job=%s slug=%s stage=%s elapsed_s=%.3f",
+            job_id, slug, stage, elapsed,
+        )
+
+
 def _persist_processing_job(job_id: str, slug: str, user_id, source_url: str,
                             level: str, total_steps: int, meta: dict,
                             usage_id=None, unlimited=False, clone_from_id=None) -> None:
@@ -860,7 +879,7 @@ def _pipeline_thread(
     clone_from_id=None,
 ) -> None:
     """Runs the full pipeline in a background thread."""
-    from lib.transcriber import transcribe_audio
+    from lib.transcriber import fetch_youtube_transcript, transcribe_audio
     from lib.translator import translate_segments
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files, _write_cards
@@ -971,7 +990,10 @@ def _pipeline_thread(
             _ovr_title   = (meta or {}).get("title", "")
             _ovr_channel = (meta or {}).get("channel", "")
             _ovr_duration = (meta or {}).get("duration", 0)
-            audio_path, meta = download_latest([source_url], ep_dir)
+            audio_path, meta = _run_timed_stage(
+                job_id, slug, "download",
+                lambda: download_latest([source_url], ep_dir),
+            )
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
             # Prefer caller-supplied metadata (e.g. RSS title/channel from the
@@ -1005,8 +1027,24 @@ def _pipeline_thread(
             _set_step(job_id, "Reusing validated transcript checkpoint…", 2)
             whisper_result = json.loads(restored_artifacts["transcription"].read_text(encoding="utf-8"))
         else:
-            _set_step(job_id, "Transcribing with Whisper…", 2)
-            whisper_result = transcribe_audio(audio_path)
+            # YouTube captions are already timestamped and avoid a costly ASR
+            # round trip. Fall back to Whisper when Japanese captions are not
+            # available or YouTube blocks the transcript request.
+            whisper_result = None
+            source_for_id = source_url or (meta or {}).get("url", "")
+            yt_match = _YT_ID_RE.search(source_for_id)
+            if yt_match:
+                _set_step(job_id, "Fetching Japanese YouTube captions…", 2)
+                whisper_result = _run_timed_stage(
+                    job_id, slug, "youtube_captions",
+                    lambda: fetch_youtube_transcript(yt_match.group(1)),
+                )
+            if whisper_result is None:
+                _set_step(job_id, "Transcribing with Whisper…", 2)
+                whisper_result = _run_timed_stage(
+                    job_id, slug, "transcription",
+                    lambda: transcribe_audio(audio_path),
+                )
             _try_checkpoint_artifact(job_id, "transcription", ep_dir / "checkpoint_transcription.json", whisper_result)
 
         # ── Step 3: Translate ────────────────────────────────────────────────
@@ -1014,8 +1052,11 @@ def _pipeline_thread(
             _set_step(job_id, "Reusing validated translation checkpoint…", 3)
             segments = json.loads(restored_artifacts["translation"].read_text(encoding="utf-8"))["segments"]
         else:
-            _set_step(job_id, "Translating EN + ZH with Gemini…", 3)
-            segments = translate_segments(whisper_result["segments"])
+            _set_step(job_id, "Translating EN + ZH with DeepSeek…", 3)
+            segments = _run_timed_stage(
+                job_id, slug, "translation",
+                lambda: translate_segments(whisper_result["segments"]),
+            )
             segments = tokenize_segments(segments)
             _try_checkpoint_artifact(job_id, "translation", ep_dir / "checkpoint_translation.json", {"segments": segments})
 
@@ -1025,12 +1066,18 @@ def _pipeline_thread(
             analysis = json.loads(restored_artifacts["analysis"].read_text(encoding="utf-8"))
         else:
             _set_step(job_id, "Analysing vocabulary and grammar…", 4)
-            analysis = analyze_transcript(segments, level=level)
+            analysis = _run_timed_stage(
+                job_id, slug, "analysis",
+                lambda: analyze_transcript(segments, level=level),
+            )
             _try_checkpoint_artifact(job_id, "analysis", ep_dir / "checkpoint_analysis.json", analysis)
 
         # ── Step 5: Write files ──────────────────────────────────────────────
         _set_step(job_id, "Writing episode files…", 5)
-        write_episode_files(ep_dir, meta, segments, analysis, whisper_result)
+        _run_timed_stage(
+            job_id, slug, "write",
+            lambda: write_episode_files(ep_dir, meta, segments, analysis, whisper_result),
+        )
         (ep_dir / f"analysis_{level}.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
         (ep_dir / f"highlights_{level}.json").write_text(json.dumps({"highlights": analysis.get("highlights", [])}, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_cards(ep_dir / f"cards_{level}.csv", analysis)
@@ -1045,7 +1092,10 @@ def _pipeline_thread(
             if _get_r2():
                 _set_step(job_id, "Saving to cloud storage…", 6)
                 r2_prefix = f"episodes/{user_id}/{slug}/"
-                _r2_upload_episode(ep_dir, r2_prefix)
+                _run_timed_stage(
+                    job_id, slug, "storage_upload",
+                    lambda: _r2_upload_episode(ep_dir, r2_prefix),
+                )
                 # Level-specific files are not in _EPISODE_UPLOAD_FILES — upload separately.
                 s3 = _get_r2()
                 bucket = _r2_bucket()

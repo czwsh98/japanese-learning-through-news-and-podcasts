@@ -11,6 +11,7 @@ import os
 import logging
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ _MLX_MODEL = os.environ.get("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3
 _MIN_CHARS = 3
 _LOOP_WINDOW = 4
 _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
+_API_AUDIO_BITRATE = os.environ.get("WHISPER_AUDIO_BITRATE", "64k")
+_MAX_CHUNK_WORKERS = max(1, int(os.environ.get("WHISPER_CHUNK_WORKERS", "3")))
 
 # Maximum audio duration for non-unlimited users.  Whisper is billed per
 # minute (~$0.006/min), so 30 min caps per-job spend at ~$0.18 of Whisper.
@@ -93,7 +96,31 @@ def _transcribe_api(audio_path: Path) -> dict:
     log.info(f"Transcribing {audio_path.name} ({size // 1024:,} KB) via OpenAI API ...")
 
     if size > _API_LIMIT:
-        return _transcribe_api_chunked(client, audio_path, size)
+        # Playback audio is often encoded at 128–320 kbps, which wastes upload
+        # time and can turn a normal podcast into multiple sequential API calls.
+        # Keep the original for playback and make a temporary speech-optimised
+        # mono copy solely for transcription.
+        with tempfile.TemporaryDirectory(prefix="whisper_audio_") as tmp:
+            compact_path = Path(tmp) / "audio.mp3"
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", str(audio_path), "-vn", "-ac", "1", "-ar", "16000",
+                "-b:a", _API_AUDIO_BITRATE, "-y", str(compact_path),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+                compact_size = compact_path.stat().st_size
+                log.info(
+                    "Prepared compact transcription audio: %.1f MB → %.1f MB",
+                    size / 1_048_576,
+                    compact_size / 1_048_576,
+                )
+                if compact_size <= _API_LIMIT:
+                    return _transcribe_api_single(client, compact_path)
+                return _transcribe_api_chunked(client, compact_path, compact_size)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                log.warning("Compact transcription audio failed (%s); using original", exc)
+                return _transcribe_api_chunked(client, audio_path, size)
     return _transcribe_api_single(client, audio_path)
 
 
@@ -252,8 +279,8 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
         language = "ja"
         total_duration = 0.0
 
-        for i, chunk_path in enumerate(chunks):
-            log.info(f"  Chunk {i+1}/{len(chunks)} (offset {offset:.0f}s) ...")
+        def _request_chunk(i: int, chunk_path: Path):
+            log.info("  Chunk %d/%d ...", i + 1, len(chunks))
             with open(chunk_path, "rb") as fh:
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
@@ -262,7 +289,28 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
                     response_format="verbose_json",
                     timestamp_granularities=["segment", "word"],
                 )
+            return i, response
 
+        workers = min(_MAX_CHUNK_WORKERS, len(chunks))
+        responses: dict[int, object] = {}
+        if workers == 1:
+            for i, chunk_path in enumerate(chunks):
+                chunk_idx, response = _request_chunk(i, chunk_path)
+                responses[chunk_idx] = response
+        else:
+            log.info("Transcribing %d chunks concurrently (%d workers)", len(chunks), workers)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(_request_chunk, i, chunk_path)
+                    for i, chunk_path in enumerate(chunks)
+                ]
+                for future in as_completed(futures):
+                    chunk_idx, response = future.result()
+                    responses[chunk_idx] = response
+
+        # Merge in source order even though requests finish out of order.
+        for i in range(len(chunks)):
+            response = responses[i]
             language = response.language
             full_text_parts.append(response.text)
             chunk_duration = float(response.duration)
@@ -306,17 +354,36 @@ def fetch_youtube_transcript(video_id: str) -> dict | None:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         log.info(f"Fetching YouTube captions for {video_id} ...")
-        snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
+        api = YouTubeTranscriptApi()
+        if hasattr(api, "fetch"):
+            snippets = api.fetch(video_id, languages=["ja"])
+        else:  # youtube-transcript-api < 1.0 compatibility
+            snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=["ja"])
+
+        def _field(snippet, name: str):
+            if isinstance(snippet, dict):
+                return snippet[name]
+            return getattr(snippet, name)
+
         raw = [
             {
                 "index": i,
-                "start": round(float(s["start"]), 3),
-                "end":   round(float(s["start"]) + float(s["duration"]), 3),
-                "ja":    s["text"].strip().replace("\n", " "),
+                "start": round(float(_field(s, "start")), 3),
+                "end":   round(float(_field(s, "start")) + float(_field(s, "duration")), 3),
+                "ja":    str(_field(s, "text")).strip().replace("\n", " "),
             }
             for i, s in enumerate(snippets)
         ]
-        segments = _clean_segments(raw)
+        # Platform captions can legitimately contain repeated phrases such as
+        # 「どんどん」 or 「はい、はい」. The aggressive Whisper hallucination
+        # filters would drop those, so captions only need basic empty/short-line
+        # cleanup and stable reindexing.
+        segments = []
+        for seg in raw:
+            text = seg["ja"].strip("　 \t\n\r")
+            if len(text) < _MIN_CHARS:
+                continue
+            segments.append({**seg, "index": len(segments), "ja": text})
         if not segments:
             log.warning("YouTube captions empty after cleaning — falling back to Whisper")
             return None
