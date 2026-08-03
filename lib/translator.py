@@ -20,6 +20,25 @@ _RETRY_BASE_DELAY = 1.0  # seconds
 
 _TR_LOCK = threading.Lock()
 
+
+class TranslationIncompleteError(RuntimeError):
+    """Raised when any source segment is missing either translation."""
+
+
+def ensure_complete_translations(segments: list[dict]) -> None:
+    """Reject artifacts that would publish blank EN or ZH transcript lines."""
+    missing = [
+        segment.get("index", position)
+        for position, segment in enumerate(segments)
+        if not str(segment.get("en", "")).strip()
+        or not str(segment.get("zh", "")).strip()
+    ]
+    if missing:
+        raise TranslationIncompleteError(
+            f"Translation incomplete: {len(missing)} of {len(segments)} segments missing "
+            f"EN or ZH output (indices {missing[:10]})"
+        )
+
 _SYSTEM = (
     "You are a professional Japanese translator. "
     "Translate each segment naturally, preserving nuance, tone, and register. "
@@ -68,6 +87,7 @@ def translate_segments(raw_segments: list[dict]) -> list[dict]:
         tr = tr_map.get(idx, {"en": "", "zh": ""})
         merged.append({**orig, "time": _fmt(orig["start"]), "en": tr["en"], "zh": tr["zh"]})
 
+    ensure_complete_translations(merged)
     return merged
 
 
@@ -107,6 +127,7 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
                 model=_MODEL,
                 max_tokens=8192,
                 response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
                 messages=[
                     {"role": "system", "content": _SYSTEM},
                     {"role": "user", "content": prompt},
@@ -158,11 +179,8 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
             else:
                 log.error(
                     f"DeepSeek batch attempt {attempt + 1} failed: {exc} — "
-                    f"padding {len(pending)} missing translation(s) with blanks"
+                    f"{len(pending)} translation(s) still missing"
                 )
-                for s in pending.values():
-                    with _TR_LOCK:
-                        tr_map.setdefault(s["index"], {"en": "", "zh": ""})
 
 
 def _fmt(seconds: float) -> str:

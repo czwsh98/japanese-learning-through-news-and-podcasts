@@ -3,8 +3,8 @@
 Japanese Learning Pipeline
 --------------------------
 Downloads the latest episode from each source in sources.json, transcribes it
-with Whisper, translates segments with Gemini Flash, identifies N1/N2 vocabulary and
-grammar with OpenAI gpt-4o-mini, writes per-episode flat files (including an Anki-importable CSV).
+with Whisper, translates segments with DeepSeek, identifies JLPT vocabulary and
+grammar, and writes per-episode flat files (including an Anki-importable CSV).
 
 Usage:
   python pipeline.py                     # process today's episode
@@ -34,7 +34,7 @@ for _var in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
 from lib.analyzer import analyze_transcript, LEVELS, DEFAULT_LEVEL
 from lib.downloader import download_latest
 from lib.transcriber import transcribe_audio
-from lib.translator import translate_segments
+from lib.translator import ensure_complete_translations, translate_segments
 from lib.writer import write_episode_files
 from lib.tokenizer import tokenize_segments
 
@@ -169,8 +169,9 @@ def run(episode_date: date, url_override: str | None, dry_run: bool,
     if _has_translations() and not dry_run:
         log.info("Step 3/5 — Translate (SKIPPED — translations already present, use --force to redo)")
         segments = json.loads(transcript_file.read_text(encoding="utf-8")).get("segments", [])
+        ensure_complete_translations(segments)
     else:
-        log.info("Step 3/5 — Translate EN + ZH (Gemini Flash)")
+        log.info("Step 3/5 — Translate EN + ZH (DeepSeek)")
         with _timed("Translate"):
             segments = _stub_segments() if dry_run else translate_segments(whisper_result["segments"])
 
@@ -182,7 +183,7 @@ def run(episode_date: date, url_override: str | None, dry_run: bool,
         log.info(f"Step 4/5 — Analyze (SKIPPED — analysis.json exists, use --force to redo)")
         analysis = json.loads(analysis_file.read_text(encoding="utf-8"))
     else:
-        log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (OpenAI gpt-4o-mini)")
+        log.info(f"Step 4/5 — Analyze {' / '.join(jlpt_tiers)} vocabulary and grammar (DeepSeek)")
         with _timed("Analyze"):
             analysis = _stub_analysis() if dry_run else analyze_transcript(segments, level=level)
 

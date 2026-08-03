@@ -882,7 +882,7 @@ def _pipeline_thread(
 ) -> None:
     """Runs the full pipeline in a background thread."""
     from lib.transcriber import fetch_youtube_transcript, transcribe_audio
-    from lib.translator import translate_segments
+    from lib.translator import ensure_complete_translations, translate_segments
     from lib.analyzer import analyze_transcript
     from lib.writer import write_episode_files, _write_cards
     from lib.tokenizer import tokenize_segments
@@ -1053,6 +1053,7 @@ def _pipeline_thread(
         if "translation" in restored_artifacts:
             _set_step(job_id, "Reusing validated translation checkpoint…", 3)
             segments = json.loads(restored_artifacts["translation"].read_text(encoding="utf-8"))["segments"]
+            ensure_complete_translations(segments)
         else:
             _set_step(job_id, "Translating EN + ZH with DeepSeek…", 3)
             segments = _run_timed_stage(
@@ -1060,6 +1061,7 @@ def _pipeline_thread(
                 lambda: translate_segments(whisper_result["segments"]),
             )
             segments = tokenize_segments(segments)
+            ensure_complete_translations(segments)
             _try_checkpoint_artifact(job_id, "translation", ep_dir / "checkpoint_translation.json", {"segments": segments})
 
         # ── Step 4: Analyse ──────────────────────────────────────────────────

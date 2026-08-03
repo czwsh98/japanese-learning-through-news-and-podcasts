@@ -49,9 +49,11 @@ class TranslationCompletenessTests(unittest.TestCase):
             ]},
         ]
         requested_indices = []
+        request_options = []
 
         class Completions:
             def create(self, **kwargs):
+                request_options.append(kwargs)
                 payload = json.loads(kwargs["messages"][1]["content"].split("\n\n", 1)[1])
                 requested_indices.append([item["index"] for item in payload])
                 body = responses.pop(0)
@@ -76,6 +78,27 @@ class TranslationCompletenessTests(unittest.TestCase):
         self.assertEqual(set(translated), {0, 1, 2})
         self.assertTrue(all(translated[index]["en"] for index in translated))
         self.assertTrue(all(translated[index]["zh"] for index in translated))
+        self.assertTrue(all(
+            call["extra_body"] == {"thinking": {"type": "disabled"}}
+            for call in request_options
+        ))
+
+    def test_failed_batches_cannot_publish_blank_translations(self):
+        class Completions:
+            def create(self, **kwargs):
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='{"translations": []}'),
+                )])
+
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=Completions())
+        )
+        segments = [{"index": 0, "start": 0.0, "end": 1.0, "ja": "文です。"}]
+
+        with patch.object(translator, "OpenAI", return_value=fake_client), \
+             patch.object(translator.time, "sleep"):
+            with self.assertRaises(translator.TranslationIncompleteError):
+                translator.translate_segments(segments)
 
 
 if __name__ == "__main__":

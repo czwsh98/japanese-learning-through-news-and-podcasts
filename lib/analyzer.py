@@ -40,6 +40,17 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0  # seconds
 
 
+class AnalysisIncompleteError(RuntimeError):
+    """Raised when structured analysis cannot be produced completely."""
+
+
+def _provider_extra_body(provider: str) -> dict | None:
+    """V4 defaults to thinking, which is unsuitable for strict JSON/tools."""
+    if provider == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    return None
+
+
 def _get_client() -> OpenAI:
     if _PROVIDER == "deepseek":
         return OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
@@ -143,6 +154,7 @@ def _curate_vocab(
     ]
 
     picked: list[dict] = []
+    completed = False
     for attempt in range(_MAX_RETRIES):
         response = None
         try:
@@ -158,6 +170,7 @@ def _curate_vocab(
                     },
                 }],
                 tool_choice={"type": "function", "function": {"name": "pick_vocab"}},
+                extra_body=_provider_extra_body(_PROVIDER),
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -171,7 +184,10 @@ def _curate_vocab(
             for tc in (response.choices[0].message.tool_calls or []):
                 if tc.function.name == "pick_vocab":
                     picked = _coerce_list_of_dicts(json.loads(tc.function.arguments).get("picked", []))
+                    completed = True
                     break
+            if not completed:
+                raise ValueError("model omitted required pick_vocab tool call")
             break
         except Exception as exc:
             if response is None:
@@ -186,6 +202,10 @@ def _curate_vocab(
                 time.sleep(delay)
             else:
                 log.error(f"Vocab curation failed after {_MAX_RETRIES} attempts: {exc}")
+
+    if not completed:
+        kind = "context vocabulary" if is_context else "JLPT vocabulary"
+        raise AnalysisIncompleteError(f"Could not complete {kind} curation")
 
     by_word = {c["word"]: c for c in candidates}
     out, seen = [], set()
@@ -349,15 +369,41 @@ def _merge_analyses(results: list[dict]) -> dict:
     }
     merged: dict[str, list] = {k: [] for k in seen}
     keys = {"highlights": "word", "grammar": "pattern", "expressions": "expression"}
+    required = {
+        "highlights": ("word", "en", "zh"),
+        "grammar": ("pattern", "meaning_en", "meaning_zh"),
+        "expressions": ("expression", "en", "zh"),
+    }
 
     for result in results:
         for section, key in keys.items():
             for item in result.get(section, []):
+                if not all(str(item.get(field, "")).strip() for field in required[section]):
+                    log.warning("Dropping incomplete %s item from model output", section)
+                    continue
                 val = item.get(key, "")
                 if val and val not in seen[section]:
                     seen[section].add(val)
                     merged[section].append(item)
     return merged
+
+
+def sanitize_analysis_result(analysis: dict) -> dict:
+    """Remove malformed model items before they reach the UI or card export."""
+    merged = _merge_analyses([analysis])
+    vocab = [
+        item for item in analysis.get("vocab", [])
+        if all(str(item.get(field, "")).strip() for field in ("word", "en", "zh"))
+    ]
+    dropped_vocab = len(analysis.get("vocab", [])) - len(vocab)
+    if dropped_vocab:
+        log.warning("Dropping %d incomplete vocab item(s) from model output", dropped_vocab)
+    return {
+        "highlights": merged["highlights"],
+        "vocab": vocab,
+        "grammar": merged["grammar"],
+        "expressions": merged["expressions"],
+    }
 
 
 def _analyze_chunk(
@@ -382,6 +428,7 @@ def _analyze_chunk(
                     },
                 }],
                 tool_choice={"type": "function", "function": {"name": "write_analysis"}},
+                extra_body=_provider_extra_body(_PROVIDER),
                 messages=[
                     {"role": "system", "content": system},
                     {
@@ -407,13 +454,14 @@ def _analyze_chunk(
                     try:
                         raw = json.loads(tc.function.arguments)
                     except json.JSONDecodeError as exc:
-                        log.warning(f"Chunk {chunk_idx + 1} JSON decode error: {exc} — skipping chunk")
-                        return _EMPTY
+                        raise ValueError(f"invalid write_analysis JSON: {exc}") from exc
                     return {
                         "highlights":  _coerce_list_of_dicts(raw.get("highlights", [])),
                         "grammar":     _coerce_list_of_dicts(raw.get("grammar", [])),
                         "expressions": _coerce_list_of_dicts(raw.get("expressions", [])),
                     }
+
+            raise ValueError("model omitted required write_analysis tool call")
 
         except Exception as exc:
             if response is None:
@@ -426,9 +474,9 @@ def _analyze_chunk(
                 log.warning(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
                 time.sleep(delay)
             else:
-                log.error(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc} — skipping chunk")
+                log.error(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc}")
 
-    return _EMPTY
+    raise AnalysisIncompleteError(f"Could not complete analysis chunk {chunk_idx + 1}/{total}")
 
 
 def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict:
@@ -486,6 +534,7 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
         # Multiple chunks — run concurrently
         log.info(f"Running {len(chunks)} analysis chunks concurrently ({_MAX_WORKERS} workers)")
         results = [_EMPTY] * len(chunks)
+        failures: list[Exception] = []
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = {}
             for i, chunk in enumerate(chunks):
@@ -497,6 +546,11 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
                     results[idx] = future.result()
                 except Exception as exc:
                     log.error(f"Analysis chunk {idx + 1} failed: {exc}")
+                    failures.append(exc)
+        if failures:
+            raise AnalysisIncompleteError(
+                f"{len(failures)} of {len(chunks)} analysis chunks failed"
+            ) from failures[0]
 
     merged = _merge_analyses(results)
     highlights += merged["highlights"]
@@ -508,12 +562,12 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
         f"{len(merged['grammar'])} grammar, "
         f"{len(merged['expressions'])} expressions"
     )
-    return {
+    return sanitize_analysis_result({
         "highlights": highlights,
         "vocab": vocab,
         "grammar": merged["grammar"],
         "expressions": merged["expressions"],
-    }
+    })
 
 
 # Hard caps for explain_sentence to prevent runaway token usage.
@@ -526,7 +580,7 @@ _EXPLAIN_MODEL = os.environ.get(
     if _EXPLAIN_PROVIDER == "deepseek"
     else os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini"),
 )
-_EXPLAIN_PROMPT_VERSION = "sentence-explain-v2"
+_EXPLAIN_PROMPT_VERSION = "sentence-explain-v3"
 _EXPLAIN_SYSTEM = (
     "You are a Japanese language expert. Provide a concise but thorough grammatical breakdown "
     "of the Japanese sentence provided by the user. Explain particles, conjugations, and "
@@ -574,6 +628,7 @@ def explain_sentence(text: str) -> str:
         response = client.chat.completions.create(
             model=_EXPLAIN_MODEL,
             max_tokens=_EXPLAIN_MAX_TOKENS,
+            extra_body=_provider_extra_body(_EXPLAIN_PROVIDER),
             messages=[
                 {"role": "system", "content": _EXPLAIN_SYSTEM},
                 {"role": "user", "content": f"Please explain this sentence: {text}"},
