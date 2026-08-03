@@ -121,9 +121,11 @@ The checked-in `.env.example` contains safe placeholders. Important settings are
 |---|---|
 | `OPENAI_API_KEY` | OpenAI Whisper transcription; also used if analysis is switched to OpenAI |
 | `DEEPSEEK_API_KEY` | English/Chinese translation and default transcript analysis |
-| `DEEPSEEK_MODEL` | DeepSeek model; defaults to `deepseek-chat` |
+| `DEEPSEEK_MODEL` | DeepSeek model; defaults to `deepseek-v4-flash` |
 | `ANALYSIS_PROVIDER` | Analysis backend; defaults to `deepseek`, or set to `openai` |
-| `OPENAI_ANALYSIS_MODEL` | OpenAI analysis/explanation model override |
+| `EXPLAIN_PROVIDER` | Sentence-explanation backend; defaults to `deepseek` |
+| `EXPLAIN_MODEL` | Sentence-explanation model; defaults to `deepseek-v4-flash` |
+| `OPENAI_ANALYSIS_MODEL` | OpenAI model used only when an OpenAI provider override is selected |
 | `USE_LOCAL_WHISPER` | Set to `1` to use local `mlx-whisper` instead of the API |
 | `MLX_WHISPER_MODEL` | Local Whisper model override |
 | `MAX_AUDIO_MINUTES` | Per-job duration cap for regular users; defaults to 30 minutes |
@@ -247,4 +249,6 @@ In production these artifacts are stored in R2 while PostgreSQL holds user, epis
 - YouTube extraction can require refreshed cookies or the optional remote downloader when a hosting provider's IP is challenged.
 - Rebuild the web image when `yt-dlp` needs upgrading.
 - Search web logs for `Pipeline stage timing` to compare download, transcription, translation, tokenization, analysis, write, and upload durations.
+- Search web logs for `API usage` to aggregate provider/model token counts, retries, cache hits, and estimated text-model cost without logging prompts or responses.
+- Sentence explanations are cached by a privacy-safe content hash; repeat requests for the same sentence, prompt version, provider, and model do not make another API call.
 - Long-audio jobs need enough temporary disk for the original audio, compact transcription audio, and chunks.

@@ -15,6 +15,7 @@ The LLM keeps two jobs it's actually suited for:
     open dataset here (Pass C, same spirit as before)
 """
 import json
+import hashlib
 import logging
 import os
 import random
@@ -25,12 +26,13 @@ from typing import Any
 from openai import OpenAI
 
 from lib import jlpt_bank
+from lib.api_usage import record_chat_failure, record_chat_usage
 
 log = logging.getLogger(__name__)
 
 _PROVIDER = os.environ.get("ANALYSIS_PROVIDER", "deepseek")
 _MODEL = (
-    os.environ.get("DEEPSEEK_MODEL", "deepseek-chat") if _PROVIDER == "deepseek"
+    os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash") if _PROVIDER == "deepseek"
     else os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
 )
 _MAX_WORKERS = 4  # concurrent LLM requests
@@ -142,6 +144,7 @@ def _curate_vocab(
 
     picked: list[dict] = []
     for attempt in range(_MAX_RETRIES):
+        response = None
         try:
             response = client.chat.completions.create(
                 model=_MODEL,
@@ -160,12 +163,23 @@ def _curate_vocab(
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
             )
+            record_chat_usage(
+                response, provider=_PROVIDER, model=_MODEL,
+                stage="vocab_context_curation" if is_context else "vocab_curation",
+                attempt=attempt + 1,
+            )
             for tc in (response.choices[0].message.tool_calls or []):
                 if tc.function.name == "pick_vocab":
                     picked = _coerce_list_of_dicts(json.loads(tc.function.arguments).get("picked", []))
                     break
             break
         except Exception as exc:
+            if response is None:
+                record_chat_failure(
+                    provider=_PROVIDER, model=_MODEL,
+                    stage="vocab_context_curation" if is_context else "vocab_curation",
+                    attempt=attempt + 1, exc=exc,
+                )
             if attempt < _MAX_RETRIES - 1:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
                 log.warning(f"Vocab curation attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
@@ -351,6 +365,7 @@ def _analyze_chunk(
     transcript: str, chunk_idx: int, total: int,
 ) -> dict:
     for attempt in range(_MAX_RETRIES):
+        response = None
         try:
             response = client.chat.completions.create(
                 model=_MODEL,
@@ -378,6 +393,10 @@ def _analyze_chunk(
                     },
                 ],
             )
+            record_chat_usage(
+                response, provider=_PROVIDER, model=_MODEL,
+                stage="grammar_analysis", attempt=attempt + 1,
+            )
 
             choice = response.choices[0]
             if choice.finish_reason == "length":
@@ -397,6 +416,11 @@ def _analyze_chunk(
                     }
 
         except Exception as exc:
+            if response is None:
+                record_chat_failure(
+                    provider=_PROVIDER, model=_MODEL, stage="grammar_analysis",
+                    attempt=attempt + 1, exc=exc,
+                )
             if attempt < _MAX_RETRIES - 1:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
                 log.warning(f"Chunk {chunk_idx + 1} attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")
@@ -495,11 +519,36 @@ def analyze_transcript(segments: list[dict], level: str = DEFAULT_LEVEL) -> dict
 # Hard caps for explain_sentence to prevent runaway token usage.
 _EXPLAIN_MAX_INPUT_CHARS = 500   # ~1-3 Japanese sentences; reject anything longer
 _EXPLAIN_MAX_TOKENS      = 600   # ~400 words — enough for a thorough breakdown
-# Unrelated to _PROVIDER/_MODEL above: this always uses the OpenAI client
-# directly (unchanged from before this file's Pass A/B/C rewrite), so it
-# needs its own OpenAI-appropriate model name rather than following
-# ANALYSIS_PROVIDER, which may point _MODEL at a DeepSeek model name.
-_EXPLAIN_MODEL = os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini")
+_EXPLAIN_PROVIDER = os.environ.get("EXPLAIN_PROVIDER", "deepseek").strip().lower()
+_EXPLAIN_MODEL = os.environ.get(
+    "EXPLAIN_MODEL",
+    os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    if _EXPLAIN_PROVIDER == "deepseek"
+    else os.environ.get("OPENAI_ANALYSIS_MODEL", "gpt-4o-mini"),
+)
+_EXPLAIN_PROMPT_VERSION = "sentence-explain-v2"
+_EXPLAIN_SYSTEM = (
+    "You are a Japanese language expert. Provide a concise but thorough grammatical breakdown "
+    "of the Japanese sentence provided by the user. Explain particles, conjugations, and "
+    "any difficult vocabulary or idioms. Use Markdown for formatting. "
+    "The tone should be helpful and educational. Keep it under 200 words."
+)
+
+
+def explanation_cache_key(text: str) -> str:
+    """Stable, privacy-safe key for a sentence explanation result."""
+    identity = "\0".join((
+        _EXPLAIN_PROMPT_VERSION,
+        _EXPLAIN_PROVIDER,
+        _EXPLAIN_MODEL,
+        text.strip(),
+    ))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def explanation_cache_metadata() -> tuple[str, str]:
+    """Provider/model identity stored alongside cached explanations."""
+    return _EXPLAIN_PROVIDER, _EXPLAIN_MODEL
 
 
 def explain_sentence(text: str) -> str:
@@ -514,23 +563,32 @@ def explain_sentence(text: str) -> str:
         text = text[:_EXPLAIN_MAX_INPUT_CHARS]
         log.warning("explain_sentence: input truncated to %d chars", _EXPLAIN_MAX_INPUT_CHARS)
 
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    system = (
-        "You are a Japanese language expert. Provide a concise but thorough grammatical breakdown "
-        "of the Japanese sentence provided by the user. Explain particles, conjugations, and "
-        "any difficult vocabulary or idioms. Use Markdown for formatting. "
-        "The tone should be helpful and educational. Keep it under 200 words."
-    )
+    if _EXPLAIN_PROVIDER == "deepseek":
+        client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    elif _EXPLAIN_PROVIDER == "openai":
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    else:
+        raise ValueError(f"Unsupported EXPLAIN_PROVIDER: {_EXPLAIN_PROVIDER}")
+    response = None
     try:
         response = client.chat.completions.create(
             model=_EXPLAIN_MODEL,
             max_tokens=_EXPLAIN_MAX_TOKENS,
             messages=[
-                {"role": "system", "content": system},
+                {"role": "system", "content": _EXPLAIN_SYSTEM},
                 {"role": "user", "content": f"Please explain this sentence: {text}"},
             ],
         )
+        record_chat_usage(
+            response, provider=_EXPLAIN_PROVIDER, model=_EXPLAIN_MODEL,
+            stage="sentence_explanation",
+        )
         return response.choices[0].message.content or "Could not generate explanation."
     except Exception as exc:
+        if response is None:
+            record_chat_failure(
+                provider=_EXPLAIN_PROVIDER, model=_EXPLAIN_MODEL,
+                stage="sentence_explanation", attempt=1, exc=exc,
+            )
         log.error(f"Explain sentence failed: {exc}")
         return f"Error: {str(exc)}"

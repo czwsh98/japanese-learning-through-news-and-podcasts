@@ -8,10 +8,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from openai import OpenAI
+from lib.api_usage import record_chat_failure, record_chat_usage
 
 log = logging.getLogger(__name__)
 
-_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 _BATCH = max(1, int(os.environ.get("TRANSLATION_BATCH_SIZE", "50")))
 _MAX_WORKERS = max(1, int(os.environ.get("TRANSLATION_WORKERS", "4")))
 _MAX_RETRIES = 3
@@ -90,6 +91,7 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
     pending = {s["index"]: s for s in batch}
 
     for attempt in range(_MAX_RETRIES):
+        response = None
         try:
             payload = [
                 {"index": segment["index"], "ja": segment["ja"]}
@@ -109,6 +111,10 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
                     {"role": "system", "content": _SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
+            )
+            record_chat_usage(
+                response, provider="deepseek", model=_MODEL,
+                stage="translation", attempt=attempt + 1,
             )
             data = json.loads(response.choices[0].message.content)
             items = _extract_items(data)
@@ -140,6 +146,11 @@ def _translate_batch(client: OpenAI, batch: list[dict], tr_map: dict) -> None:
             )
 
         except Exception as exc:
+            if response is None:
+                record_chat_failure(
+                    provider="deepseek", model=_MODEL, stage="translation",
+                    attempt=attempt + 1, exc=exc,
+                )
             if attempt < _MAX_RETRIES - 1:
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
                 log.warning(f"DeepSeek batch attempt {attempt + 1} failed: {exc} — retrying in {delay:.1f}s")

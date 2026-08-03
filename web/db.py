@@ -366,6 +366,26 @@ class PlaybackProgress(Base):
     user = relationship("User", back_populates="playback_progress")
 
 
+class SentenceExplanation(Base):
+    """Content-addressed cache for on-demand sentence explanations.
+
+    The source sentence is intentionally not stored. cache_key includes the
+    prompt version, provider, model, and normalized sentence, so changing any
+    of them naturally invalidates older entries without a destructive purge.
+    """
+    __tablename__ = "sentence_explanations"
+
+    cache_key    = Column(String(64), primary_key=True)
+    explanation  = Column(Text, nullable=False)
+    provider     = Column(String(32), nullable=False)
+    model        = Column(String(100), nullable=False)
+    hit_count    = Column(Integer, nullable=False, server_default="0")
+    created_at   = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc))
+    last_used_at = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc))
+
+
 # ── Public helpers ────────────────────────────────────────────────────────────
 
 def init_db() -> bool:

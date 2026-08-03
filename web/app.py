@@ -75,7 +75,7 @@ from web.auth import (
 )
 from web.db import (
     Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob,
-    RecommendationDismissal, TranscriptionUsage,
+    RecommendationDismissal, SentenceExplanation, TranscriptionUsage,
     ReviewLog, VocabItem, VocabOccurrence, db_available, get_db, init_db,
 )
 from web.recommendations import load_catalog, normalize_url, rank_recommendations
@@ -3529,7 +3529,12 @@ def api_upload():
 @app.route("/api/explain", methods=["POST"])
 @login_required
 def api_explain():
-    from lib.analyzer import explain_sentence, _EXPLAIN_MAX_INPUT_CHARS
+    from lib.analyzer import (
+        _EXPLAIN_MAX_INPUT_CHARS,
+        explain_sentence,
+        explanation_cache_key,
+        explanation_cache_metadata,
+    )
     data    = request.get_json(silent=True) or {}
     text    = data.get("text", "").strip()
     # Bug #5 fix: fall back to a per-user global bucket when episode is absent
@@ -3543,6 +3548,21 @@ def api_explain():
         return jsonify({
             "error": f"Text too long ({len(text)} chars). Maximum is {_EXPLAIN_MAX_INPUT_CHARS} characters."
         }), 400
+
+    # A cache hit is returned before consuming the daily API-call allowance.
+    # The key contains the prompt version/provider/model, while the original
+    # user sentence is intentionally never stored in this table.
+    cache_key = explanation_cache_key(text)
+    if db_available():
+        try:
+            with get_db() as db:
+                cached = db.get(SentenceExplanation, cache_key)
+                if cached:
+                    cached.hit_count = int(cached.hit_count or 0) + 1
+                    cached.last_used_at = datetime.now(timezone.utc)
+                    return jsonify({"explanation": cached.explanation, "cached": True})
+        except Exception as exc:
+            log.warning("Sentence explanation cache lookup failed: %s", type(exc).__name__)
 
     # Rate-limit: _EXPLAIN_LIMIT calls per user per episode (or per-session for
     # direct API calls).  Resets daily.  Admins / whitelisted users are exempt.
@@ -3569,7 +3589,30 @@ def api_explain():
             bucket["counts"][episode] = used + 1
 
     explanation = explain_sentence(text)
-    return jsonify({"explanation": explanation})
+    if db_available() and explanation and not explanation.startswith("Error:"):
+        provider, model = explanation_cache_metadata()
+        try:
+            with get_db() as db:
+                cached = db.get(SentenceExplanation, cache_key)
+                if cached:
+                    # Another request may have populated the same key while
+                    # this API call was in flight. Keep the first valid result.
+                    explanation = cached.explanation
+                    cached.hit_count = int(cached.hit_count or 0) + 1
+                    cached.last_used_at = datetime.now(timezone.utc)
+                else:
+                    db.add(SentenceExplanation(
+                        cache_key=cache_key,
+                        explanation=explanation,
+                        provider=provider,
+                        model=model,
+                    ))
+        except IntegrityError:
+            # Benign concurrent insert. The generated response is still valid.
+            log.info("Sentence explanation cache insert raced for key prefix=%s", cache_key[:8])
+        except Exception as exc:
+            log.warning("Sentence explanation cache write failed: %s", type(exc).__name__)
+    return jsonify({"explanation": explanation, "cached": False})
 
 
 @app.route("/api/episodes")

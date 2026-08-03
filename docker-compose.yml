@@ -10,6 +10,11 @@ services:
       # DeepSeek is directly reachable from Hong Kong and is substantially
       # faster without the general HTTPS proxy. OpenAI remains proxied.
       NO_PROXY: "${NO_PROXY},api.deepseek.com"
+      # Pin the production text paths to the current non-thinking DeepSeek
+      # model instead of the retired deepseek-chat compatibility alias.
+      DEEPSEEK_MODEL: "deepseek-v4-flash"
+      EXPLAIN_PROVIDER: "deepseek"
+      EXPLAIN_MODEL: "deepseek-v4-flash"
       TRANSLATION_BATCH_SIZE: "50"
       TRANSLATION_WORKERS: "4"
       WHISPER_CHUNK_WORKERS: "3"

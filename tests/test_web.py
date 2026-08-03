@@ -1,5 +1,7 @@
 import json
 import pytest
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 from web.app import app, _extract_page_image, _extract_rss_image
@@ -209,4 +211,30 @@ def test_api_explain(mock_explain, client):
     rv = client.post('/api/explain', json={'text': 'Hello'})
     assert rv.status_code == 200
     assert rv.get_json()['explanation'] == "Detailed explanation."
+    assert rv.get_json()['cached'] is False
     mock_explain.assert_called_once_with("Hello")
+
+
+@patch("lib.analyzer.explain_sentence")
+def test_api_explain_returns_persistent_cache_hit_without_api_call(mock_explain, client):
+    cached = SimpleNamespace(
+        explanation="Cached explanation.", hit_count=2, last_used_at=None,
+    )
+
+    class FakeSession:
+        def get(self, model, key):
+            return cached
+
+    @contextmanager
+    def fake_get_db():
+        yield FakeSession()
+
+    with patch("web.app.db_available", return_value=True), \
+         patch("web.app.get_db", fake_get_db):
+        rv = client.post('/api/explain', json={'text': 'これはテストです。'})
+
+    assert rv.status_code == 200
+    assert rv.get_json() == {"explanation": "Cached explanation.", "cached": True}
+    assert cached.hit_count == 3
+    assert cached.last_used_at is not None
+    mock_explain.assert_not_called()
