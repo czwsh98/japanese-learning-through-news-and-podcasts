@@ -1,358 +1,250 @@
-# Mimichan — Japanese Learning Through Listening
+# Mimichan
 
-A multi-user web app that turns Japanese YouTube videos, news broadcasts, podcast episodes, and audio files into interactive study material — automatically transcribed, translated, and analysed for vocabulary and grammar at your chosen JLPT level.
+Mimichan turns Japanese podcasts, YouTube videos, news programs, and uploaded audio into synchronized study material. It combines transcription, English and Simplified Chinese translation, furigana, JLPT-aware vocabulary and grammar, playback progress, shadowing, and spaced review in a multi-user web app.
 
 ## What it does
 
-1. **Downloads** audio from YouTube, Apple Podcasts, RSS feeds, or any yt-dlp-supported source — or accepts a direct file upload
-2. **Transcribes** the audio to Japanese text using the OpenAI Whisper API (or local mlx-whisper on Apple Silicon)
-3. **Translates** each segment into English and Simplified Chinese via **Google Gemini Flash**
-4. **Tokenises** the Japanese transcript with **janome** morphological analysis to attach hiragana readings (furigana) to every kanji-bearing word — client-side, no extra API cost
-5. **Analyses** the transcript for JLPT vocabulary, grammar patterns, set phrases, and idioms at your chosen level (N5 through N1) via **OpenAI gpt-4o-mini**
-6. **Stores** episode files in **Cloudflare R2** and metadata in **Postgres** — fully multi-user, each user sees only their own content; duplicate URLs are detected and shared across users automatically (zero re-transcription cost)
-6. **Saves** words and phrases you care about to a persistent **Vocab Bank** across all episodes
-7. **Exports** your saved vocab bank or per-episode flashcards as CSV for Anki import
+- Accepts YouTube URLs, Apple Podcasts, RSS feeds, direct media URLs, and audio uploads.
+- Maintains a personal listening inbox and source subscriptions. New subscriptions automatically resolve and save cover artwork from Apple Podcasts, RSS metadata, or page social metadata when available.
+- Uses Japanese YouTube captions when available; otherwise transcribes with OpenAI Whisper or optional local `mlx-whisper`.
+- Translates every transcript segment into English and Simplified Chinese with DeepSeek.
+- Adds furigana with Janome and finds vocabulary through a bundled JLPT word bank.
+- Uses DeepSeek by default to curate useful vocabulary and identify grammar, expressions, and context-specific terminology.
+- Presents a timestamp-synchronized player with clickable transcript lines, speed controls, translation/furigana toggles, and audio-only shadowing mode.
+- Saves vocabulary with episode and sentence context, backlinks to every occurrence, CSV export, and a daily review queue.
+- Persists listening position, completion state, episode retention, trash/restore state, processing jobs, and retry checkpoints.
+- Shares already-processed source URLs across users to avoid duplicate transcription work while keeping user libraries, progress, and vocabulary isolated.
+- Supports PostgreSQL metadata, Cloudflare R2 episode storage, authentication, quotas, an admin dashboard, and Telegram subscription digests.
 
----
+## Processing pipeline
 
-## Web UI
+```text
+URL or upload
+  -> download/extract audio and source metadata
+  -> use YouTube Japanese captions when available
+     otherwise prepare speech-optimized audio and transcribe with Whisper
+  -> translate segments to English and Chinese
+  -> attach readings and JLPT vocabulary
+  -> analyze grammar, expressions, and context vocabulary
+  -> write episode artifacts and persist/upload them
+```
+
+The long-audio path is optimized for podcasts:
+
+- Large playback files are converted to a temporary 64 kbps, mono, 16 kHz transcription copy. The original remains unchanged for listening.
+- Audio still above the Whisper upload limit is split and transcribed in parallel; timestamps are merged back into one transcript.
+- Translation runs in large parallel batches and retries only missing segment indices when a provider returns a partial response.
+- Transcript cleanup removes only high-confidence character or consecutive phrase loops. Short utterances and legitimate repeated sentences are retained.
+- Web jobs emit searchable timing logs for each pipeline stage, making bottlenecks visible in production.
+
+The concurrency and bitrate defaults can be changed with `WHISPER_CHUNK_WORKERS`, `WHISPER_AUDIO_BITRATE`, `TRANSLATION_BATCH_SIZE`, and `TRANSLATION_WORKERS`.
+
+## Main web features
+
+### Today, inbox, and library
+
+The home experience groups current listening, newly available subscription episodes, and recommendations. The full episode library supports resume state, completion tracking, retention controls, and trash/restore.
+
+### Subscriptions and recommendations
+
+Users can subscribe to podcast, YouTube, RSS, and other supported sources. Mimichan resolves source metadata and cover images when a subscription is created, and uses those images in subscription and recommendation cards. A scheduled digest can discover recent episodes and send them through Telegram.
 
 ### Episode player
-- **Embedded YouTube player** (YouTube sources) or **HTML5 audio player** (uploads/podcasts), both synced to the transcript
-- **Click any transcript line** to seek to that moment
-- **Auto-scrolling transcript** — follows playback; scroll away and a **↓ Now playing** pill snaps you back
-- **Playback speed** — 0.5× to 2×
-- **Inline JLPT highlights** — underlined in the transcript, colour-coded by level:
-  - N5 green · N4 teal · N3 blue · N2 amber · N1 rose · context-specific violet
-  - Solid underline = vocab · dashed = grammar
-- **Hover / tap tooltips** — word, reading, level badge, English and Chinese gloss
-- **Sentence explain** — click any segment for a full grammatical breakdown (gpt-4o-mini), rate-limited to 5 per episode per day
-- **Furigana toggle** — show/hide hiragana readings above kanji inline; keyboard shortcut `f`; toggles all segments at once
-- **EN / ZH translation toggles** — desktop header buttons; mobile floating CC button
-- **Vocab / Grammar / Phrases / Ctx side panel** — flashcard-style cards; save any card to your Vocab Bank with one click
 
-### Vocab Bank (`/vocab`)
-Browse, search, filter by JLPT level and type, delete, and export your saved words as CSV for Anki.
+- Embedded YouTube or HTML5 audio playback synchronized to transcript timestamps
+- Click-to-seek transcript and automatic following with a return-to-current-line control
+- 0.5x–2x playback speed
+- English, Chinese, and furigana toggles
+- JLPT-colored vocabulary and grammar highlights with readings and glosses
+- Per-sentence grammar explanations
+- Audio-only shadowing practice
+- Save-to-vocabulary actions with the original sentence and timestamp
 
-### Upload page (`/upload`)
-Paste a YouTube/podcast URL or drag-and-drop an audio file, choose your JLPT level, and track progress on a live step-by-step job page.
+### Vocabulary and review
 
-If the same URL has already been processed by any user, the episode is shared instantly (no API calls, no quota charge). If the URL exists at a different JLPT level, only the analysis step is re-run (steps 1–3 instead of 6).
+The vocabulary bank supports search, level/type filters, contextual occurrences, episode backlinks, deletion, and CSV export. Daily review uses persisted scheduling state and supports undoing the latest answer.
 
-### Subscriptions (`/subscriptions`)
-Manage the list of sources used by the scheduled CLI pipeline.
+### Durable processing jobs
 
-### Admin (`/admin`)
-Admin-only dashboard showing all registered users with:
-- Role badges (admin / unlimited / user)
-- Jobs used vs. lifetime limit
-- Total audio processed (MB) and estimated Whisper cost
-- Click any row to expand full transcription history per user
-- Delete non-admin users and all their data
+Uploads and URL submissions run as checkpointed jobs. Completed stages are reused after a failure, active and historical jobs are visible in the UI, and failed jobs can be retried without restarting successful work.
 
----
-
-## Authentication & Multi-user
-
-- Email + password accounts; registration gated by `TRANSCRIPTION_WHITELIST` env var
-- HttpOnly session cookie (90-day default); Bearer token supported for API / mobile clients
-- Each user's episodes, vocab, and usage are fully isolated
-- First registered account becomes admin automatically; set `BOOTSTRAP_ADMIN_EMAIL` to pin the admin email regardless of registration order
-
-### Roles
-
-| Role | How assigned | Transcription cap | Audio duration cap |
-|---|---|---|---|
-| **Admin** | `is_admin = true` in DB | None | None |
-| **Unlimited** | Email in `TRANSCRIPTION_WHITELIST` | None | None |
-| **Regular user** | Everyone else | 3 lifetime jobs (default) | 30 min per job |
-
----
-
-## JLPT levels
-
-| Level key | Targets |
-|---|---|
-| `beginner` | N5 |
-| `beginner-intermediate` | N4 |
-| `intermediate` | N3 |
-| `intermediate-advanced` | N2 |
-| `advanced` | N1 |
-
-A sixth **context-specific** (violet) tier captures domain terminology, advanced literary expressions, and topical jargon beyond standard JLPT — always visible regardless of chosen level.
-
----
-
-## Setup
-
-### Requirements
+## Requirements
 
 - Python 3.11+
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — `brew install yt-dlp`
-- ffmpeg — `brew install ffmpeg`
-- OpenAI API key (Whisper + gpt-4o-mini)
-- Gemini API key (translation)
-- *(Production)* PostgreSQL database and Cloudflare R2 bucket
+- `ffmpeg` and `ffprobe`
+- `yt-dlp`
+- OpenAI API key for Whisper transcription
+- DeepSeek API key for translation and the default analysis provider
+- PostgreSQL and Cloudflare R2 for the production multi-user deployment
 
-### Install
+Install system tools on macOS with:
+
+```bash
+brew install ffmpeg yt-dlp
+```
+
+## Local setup
 
 ```bash
 git clone https://github.com/czwsh98/japanese-learning-through-news-and-podcasts.git
 cd japanese-learning-through-news-and-podcasts
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### Configure
-
-```bash
 cp .env.example .env
-# Edit .env and fill in your keys
 ```
 
-#### Core keys
+Set at least these values in `.env`:
 
-```env
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=AIza...
-SECRET_KEY=<random 32+ char string>       # required in production
-DATABASE_URL=postgresql://...             # Postgres connection string
+```dotenv
+OPENAI_API_KEY=your-openai-key
+DEEPSEEK_API_KEY=your-deepseek-key
+SECRET_KEY=generate-a-long-random-value
+DATABASE_URL=postgresql://user:password@localhost:5432/japanese
 ```
 
-#### Auth & quotas
+Generate a session secret with `python -c "import secrets; print(secrets.token_hex(32))"`.
 
-```env
-TRANSCRIPTION_WHITELIST=alice@example.com,bob@example.com   # unlimited + can register
-BOOTSTRAP_ADMIN_EMAIL=you@example.com     # always admin, even if not first to register
-SESSION_DAYS=90                           # session cookie lifetime (default 90)
-MAX_AUDIO_MINUTES=30                      # cap for regular users (default 30)
-```
-
-#### Storage (optional — local filesystem fallback if unset)
-
-```env
-R2_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
-R2_ACCESS_KEY_ID=...
-R2_SECRET_ACCESS_KEY=...
-R2_BUCKET=your-bucket-name
-```
-
-#### Model overrides (optional)
-
-```env
-GEMINI_MODEL=gemini-2.5-flash
-OPENAI_ANALYSIS_MODEL=gpt-4o-mini
-USE_LOCAL_WHISPER=1                       # use local mlx-whisper (Apple Silicon)
-MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
-```
-
-### Run locally
+Then run:
 
 ```bash
 python web/app.py
-# Open http://localhost:5000
 ```
 
-> **Note:** `DATABASE_URL` is optional for local dev. Without it the app runs in no-database mode — no login required, files are served from the local `episodes/` directory, and all DB-backed features (auth, quotas, per-user vocab) are disabled.
+Open `http://localhost:5000`. `DATABASE_URL` is optional for basic local browsing and pipeline development; database-backed authentication, user isolation, quotas, progress, vocabulary, review, and job history require PostgreSQL.
 
-### Run the CLI pipeline
+## Configuration
 
-```bash
-# Process today's episodes from sources.json
-python pipeline.py
+The checked-in `.env.example` contains safe placeholders. Important settings are:
 
-# Specific date
-python pipeline.py --date 2026-05-04
-
-# Single URL
-python pipeline.py --url https://www.youtube.com/watch?v=... --level intermediate
-
-# Dry run (no API calls, writes stub files)
-python pipeline.py --dry-run
-```
-
-### Self-host on a VPS (Docker + Caddy)
-
-Architecture: `Internet → Caddy (TLS) → gunicorn :8000 → Postgres (volume)`
-
-#### 1. Server prep (Ubuntu/Debian)
-
-```bash
-apt update && apt upgrade -y
-# Docker (official convenience script)
-curl -fsSL https://get.docker.com | sh
-# Swapfile if RAM ≤ 1 GB
-fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
-# Firewall
-ufw allow OpenSSH && ufw allow 80/tcp && ufw allow 443/tcp && ufw enable
-```
-
-#### 2. DNS
-
-Point an `A` record for your domain at the VPS public IP and wait for propagation **before** first `compose up` — Caddy's Let's Encrypt HTTP-01 challenge requires it.
-
-#### 3. Deploy
-
-```bash
-git clone https://github.com/czwsh98/japanese-learning-through-news-and-podcasts.git
-cd japanese-learning-through-news-and-podcasts
-
-# Domain is already set to mimichan.ziwei-chen.com in Caddyfile
-
-# Set a strong Postgres password in docker-compose.yml (replace both CHANGE_ME)
-# Create .env with all secrets (see checklist below)
-
-docker compose up -d --build
-```
-
-Caddy fetches the TLS cert on first request. `web` logs `Database connected — all tables ensured` when ready.
-
-#### 4. Migrate data from Railway
-
-Run while Railway is still live:
-
-```bash
-pg_dump "$RAILWAY_DATABASE_URL" --no-owner --no-privileges --data-only \
-  --disable-triggers -Fc -f railway.dump
-
-# On the VPS, load into the running db container:
-docker compose exec -T db pg_restore --no-owner --data-only \
-  --disable-triggers -U app -d japanese < railway.dump
-```
-
-Verify row counts for `users`, `sessions`, `episodes`, `vocab`, `transcription_usage`.
-
-#### .env checklist
-
-| Var | Notes |
+| Variable | Purpose |
 |---|---|
-| `SECRET_KEY` | **Reuse the exact Railway value** — changing it logs out all existing sessions |
-| `OPENAI_API_KEY` | Whisper + gpt-4o-mini |
-| `GEMINI_API_KEY` | Translation |
-| `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | Unchanged — same bucket, files don't move |
-| `TRANSCRIPTION_WHITELIST`, `REGISTRATION_WHITELIST`, `BOOTSTRAP_ADMIN_EMAIL` | Auth/quota gating |
-| `GEMINI_MODEL`, `OPENAI_ANALYSIS_MODEL`, `SESSION_DAYS`, `MAX_AUDIO_MINUTES` | Optional overrides |
+| `OPENAI_API_KEY` | OpenAI Whisper transcription; also used if analysis is switched to OpenAI |
+| `DEEPSEEK_API_KEY` | English/Chinese translation and default transcript analysis |
+| `DEEPSEEK_MODEL` | DeepSeek model; defaults to `deepseek-chat` |
+| `ANALYSIS_PROVIDER` | Analysis backend; defaults to `deepseek`, or set to `openai` |
+| `OPENAI_ANALYSIS_MODEL` | OpenAI analysis/explanation model override |
+| `USE_LOCAL_WHISPER` | Set to `1` to use local `mlx-whisper` instead of the API |
+| `MLX_WHISPER_MODEL` | Local Whisper model override |
+| `MAX_AUDIO_MINUTES` | Per-job duration cap for regular users; defaults to 30 minutes |
+| `DATABASE_URL` | PostgreSQL connection URL |
+| `SECRET_KEY` | Flask session signing key; required in production |
+| `R2_ENDPOINT_URL` | Cloudflare R2/S3 endpoint |
+| `R2_ACCESS_KEY_ID` | R2 access key ID |
+| `R2_SECRET_ACCESS_KEY` | R2 secret access key |
+| `R2_BUCKET` | Episode artifact bucket |
+| `HTTPS_PROXY` | Optional proxy, including for OpenAI in restricted regions |
+| `NO_PROXY` | Hosts that should bypass the proxy; production routes DeepSeek directly |
+| `VPS_DOWNLOAD_URL` | Optional remote download service for difficult media sources |
+| `VPS_DOWNLOAD_TOKEN` | Authentication token for that download service |
 
-`DATABASE_URL` and `PORT` come from `docker-compose.yml` — do **not** set them in `.env`.
+Authentication and quota deployments can additionally set `TRANSCRIPTION_WHITELIST`, `REGISTRATION_WHITELIST`, `BOOTSTRAP_ADMIN_EMAIL`, and `SESSION_DAYS`.
 
-#### Backups
+Never commit `.env`, exported cookies, database dumps, tokens, or private keys. They are runtime configuration and are intentionally ignored by Git.
+
+## CLI pipeline
+
+Process the configured source for today:
 
 ```bash
-# Install rclone and configure an "r2" remote, then:
-crontab -e
-# add: 0 4 * * * /path/to/scripts/backup_db.sh
+python pipeline.py
 ```
 
-`scripts/backup_db.sh` dumps Postgres, gzips it, and pushes to R2. Run it once manually to verify before relying on the cron.
+Common examples:
 
-#### Gotchas
+```bash
+python pipeline.py --date 2026-08-03
+python pipeline.py --url 'https://www.youtube.com/watch?v=VIDEO_ID' --level intermediate
+python pipeline.py --dry-run
+python pipeline.py --force
+```
 
-- **YouTube IP blocks**: Tokyo VPS IPs may get bot-challenged. Set `YOUTUBE_COOKIES_B64` (exported cookie jar) and/or `VPS_DOWNLOAD_URL` if downloads start failing.
-- **yt-dlp staleness**: refresh with `docker compose build --no-cache web && docker compose up -d` when YouTube breaks extraction.
-- **Memory**: keep the swapfile; bump the plan if long-audio jobs OOM.
+Available study levels are `beginner`, `beginner-intermediate`, `intermediate`, `intermediate-advanced`, and `advanced`.
 
----
+## Docker deployment
+
+The included Compose stack is:
+
+```text
+Internet -> Caddy (TLS) -> Gunicorn/Flask -> PostgreSQL
+                                  |
+                                  +-> Cloudflare R2
+                                  +-> OpenAI / DeepSeek
+```
+
+Create `.env`, including `POSTGRES_PASSWORD` and the application/API settings, then deploy:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f web
+```
+
+The Compose file supplies `DATABASE_URL` to the web container and mounts `./state` for mutable subscription and recent-episode state. Caddy terminates HTTPS using the checked-in `Caddyfile`.
+
+For production upgrades:
+
+```bash
+git pull --ff-only
+docker compose up -d --build web
+```
+
+Back up PostgreSQL and verify R2 recovery before relying on the service. `scripts/backup_db.sh`, `scripts/restore_from_r2.py`, and the migration scripts provide the repository's operational building blocks.
+
+## Testing
+
+Install the test runner in your development environment and run the complete suite:
+
+```bash
+pip install pytest
+pytest -q
+```
+
+The tests cover the analyzer and JLPT bank, sharing, subscription recommendations and artwork, digest behavior, web workflows, transcription performance paths, and transcript/translation completeness regressions.
 
 ## Project structure
 
-```
-├── pipeline.py              # CLI orchestrator
-├── sources.json             # Sources for the scheduled CLI pipeline
-├── lib/
-│   ├── downloader.py        # yt-dlp + Apple Podcasts + direct audio
-│   ├── transcriber.py       # Whisper API or local mlx-whisper; ffprobe duration cap
-│   ├── translator.py        # Gemini Flash — EN + ZH translation
-│   ├── analyzer.py          # gpt-4o-mini — JLPT vocab & grammar analysis
-│   ├── tokenizer.py         # janome morphological analysis — furigana readings
-│   └── writer.py            # Writes flat files per episode
-├── web/
-│   ├── app.py               # Flask routes, background jobs, quota logic, R2, admin
-│   ├── auth.py              # Registration, login, session tokens
-│   ├── db.py                # SQLAlchemy models: User, Episode, VocabItem, TranscriptionUsage
-│   ├── templates/
-│   │   ├── base.html
-│   │   ├── index.html       # Episode browser
-│   │   ├── episode.html     # Player + transcript + side panel
-│   │   ├── vocab.html       # Vocab Bank
-│   │   ├── upload.html      # Upload / URL submit
-│   │   ├── subscriptions.html
-│   │   ├── job.html         # Live pipeline progress
-│   │   ├── login.html
-│   │   ├── register.html
-│   │   └── admin.html       # Admin user dashboard
-│   └── static/              # CSS, player JS
-├── scripts/
-│   ├── migrate_episodes_to_r2.py   # One-time migration of existing episodes to R2
-│   └── migrate_existing_data.py    # Seed DB from local episode files
-└── episodes/                # Local episode cache (gitignored); canonical copy is R2
+```text
+pipeline.py                     CLI pipeline orchestration
+lib/downloader.py               yt-dlp, podcast, RSS, and direct-media handling
+lib/transcriber.py              captions/local Whisper/OpenAI Whisper paths
+lib/translator.py               batched DeepSeek EN/ZH translation
+lib/tokenizer.py                Janome tokenization and furigana readings
+lib/jlpt_bank.py                bundled JLPT vocabulary lookup
+lib/analyzer.py                 vocabulary curation and grammar analysis
+lib/writer.py                   episode artifact writer
+web/app.py                      Flask routes, jobs, storage, quotas, admin
+web/auth.py                     sessions and authentication
+web/db.py                       SQLAlchemy models and database helpers
+web/recommendations.py          source recommendations and metadata/artwork lookup
+web/templates/                  server-rendered web UI
+web/static/                     player and application assets
+frontend/                       Capacitor/mobile frontend and iOS project
+data/jlpt_bank.json.gz          bundled JLPT vocabulary data
+scripts/                        migrations, backup/restore, retention, backfills
+tests/                          pytest regression suite
+state/                          mutable deployment state (mounted by Compose)
 ```
 
----
+## Episode artifacts
 
-## Episode output files
+An episode may contain:
 
 | File | Contents |
 |---|---|
-| `meta.json` | Title, channel, date, duration, source URL, JLPT level |
-| `transcript.json` | Segments: timestamps, Japanese text, EN + ZH translations, per-token furigana readings |
-| `subtitles.vtt` | WebVTT for the audio player |
-| `analysis.json` | Highlights, vocab flashcards, grammar patterns, expressions (default level) |
-| `analysis_<level>.json` | Level-specific analysis (written alongside `analysis.json` from pipeline v2+) |
-| `cards.csv` | Anki-importable CSV (default level) |
-| `cards_<level>.csv` | Level-specific Anki CSV |
+| `meta.json` | Source, title, channel, date, duration, thumbnail, and study level |
+| `transcript.json` | Timestamped Japanese segments, EN/ZH translations, and token readings |
+| `subtitles.vtt` | WebVTT subtitles |
+| `analysis.json` | Vocabulary, grammar, phrases, and context-specific items |
+| `analysis_<level>.json` | Level-specific analysis |
+| `cards.csv` | Anki-compatible flashcards |
+| `cards_<level>.csv` | Level-specific flashcards |
 
----
+In production these artifacts are stored in R2 while PostgreSQL holds user, episode, job, progress, vocabulary, and usage metadata.
 
-## API surface
+## Operational notes
 
-### Auth
-
-| Route | Method | Purpose |
-|---|---|---|
-| `/login` `/register` `/logout` | GET/POST | Web UI auth |
-| `/api/auth/login` | POST | SPA/mobile login → returns Bearer token |
-| `/api/auth/register` | POST | SPA/mobile register |
-| `/api/auth/me` | GET | Current user info |
-| `/api/quota` | GET | Transcription quota for current user |
-
-### Episodes & vocab
-
-| Route | Method | Purpose |
-|---|---|---|
-| `/upload` | POST | Submit URL or audio file |
-| `/api/upload` | POST | Same, JSON response for SPA |
-| `/api/job/<id>/status` | GET | Pipeline job progress |
-| `/api/episode/<slug>/meta` | GET | Episode metadata |
-| `/api/episode/<slug>/transcript` | GET | Full transcript JSON |
-| `/api/episode/<slug>/analysis` | GET | JLPT analysis JSON |
-| `/api/vocab` | GET/POST | List / save vocab items |
-| `/api/vocab/<id>` | DELETE | Remove a saved word |
-| `/vocab/export.csv` | GET | Download full Vocab Bank as CSV |
-| `/api/explain` | POST | Grammatical breakdown of a sentence |
-
-### Admin
-
-| Route | Method | Purpose |
-|---|---|---|
-| `/admin` | GET | User dashboard |
-| `/admin/user/<id>/delete` | POST | Delete a user and all their data |
-| `/api/admin/user/<id>/history` | GET | Transcription history for one user |
-
----
-
-## Cost reference
-
-Approximate cost per 30-minute episode:
-
-| Step | API | Cost |
-|---|---|---|
-| Transcription | OpenAI Whisper (~$0.006/min) | ~$0.18 |
-| Translation | Gemini 2.5 Flash | ~$0.02 |
-| Analysis | gpt-4o-mini | ~$0.05 |
-| **Total** | | **~$0.25** |
-
-Built-in safeguards cap per-user API spend:
-- 30-minute audio duration limit for regular users (ffprobe-based, not byte-size)
-- 40-chunk ceiling on gpt-4o-mini analysis calls per job
-- 5 sentence-explain calls per episode per day (500-char input cap)
-- Atomic Postgres advisory lock prevents quota races under concurrent requests
+- YouTube extraction can require refreshed cookies or the optional remote downloader when a hosting provider's IP is challenged.
+- Rebuild the web image when `yt-dlp` needs upgrading.
+- Search web logs for `Pipeline stage timing` to compare download, transcription, translation, tokenization, analysis, write, and upload durations.
+- Long-audio jobs need enough temporary disk for the original audio, compact transcription audio, and chunks.
