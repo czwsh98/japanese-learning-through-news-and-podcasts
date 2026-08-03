@@ -1,4 +1,10 @@
 {% extends "base.html" %}
+{% macro source_artwork(image_url, kind, initials, size_classes='w-10 h-10') -%}
+<div class="source-artwork relative {{ size_classes }} shrink-0 overflow-hidden rounded-lg border {{ 'border-red-900/70 bg-red-950/40 text-red-300' if kind == 'youtube' else 'border-violet-900/70 bg-violet-950/40 text-violet-300' }}" aria-hidden="true">
+  <span class="absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-wide">{{ '▶' if kind == 'youtube' else initials }}</span>
+  {% if image_url %}<img src="{{ image_url }}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="absolute inset-0 h-full w-full object-cover" onerror="this.remove()">{% endif %}
+</div>
+{%- endmacro %}
 {% block title %}{{ 'Sources' if show_source_manager else 'Listening inbox' }} — Mimichan{% endblock %}
 {% block main_class %}max-w-6xl{% endblock %}
 
@@ -83,9 +89,7 @@
              data-source="{{ ep.source_url }}"
              data-search="{{ (ep.title ~ ' ' ~ ep.description ~ ' ' ~ ep.source_name ~ ' ' ~ ep.channel)|lower }}">
       <div class="flex min-w-0 gap-3.5">
-        <div class="shrink-0 w-10 h-10 rounded-lg border {{ 'border-red-900/70 bg-red-950/40 text-red-300' if ep.source_kind == 'youtube' else 'border-blue-900/70 bg-blue-950/40 text-blue-300' }} flex items-center justify-center text-[11px] font-bold tracking-wide" title="{{ ep.source_kind|capitalize }}">
-          {{ '▶' if ep.source_kind == 'youtube' else ep.source_initials }}
-        </div>
+        {{ source_artwork(ep.source_image_url, ep.source_kind, ep.source_initials) }}
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500 mb-1.5">
             <span class="font-medium {{ 'text-red-400' if ep.source_kind == 'youtube' else 'text-blue-400' }}">{{ ep.source_name }}</span>
@@ -155,9 +159,7 @@
     {% for item in recommendations %}
     <article class="recommendation-card bg-gray-900 border border-gray-800 rounded-xl p-4" role="listitem">
       <div class="flex items-start justify-between gap-3">
-        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 font-bold text-sm {% if item.type == 'podcast' %}bg-violet-950 text-violet-300 border border-violet-900{% else %}bg-red-950 text-red-300 border border-red-900{% endif %}" aria-hidden="true">
-          {% if item.type == 'podcast' %}◉{% else %}▶{% endif %}
-        </div>
+        {{ source_artwork(item.image_url, item.type, item.initials, 'w-12 h-12') }}
         <span class="text-[10px] font-semibold uppercase tracking-wider rounded-full px-2 py-1 {% if item.type == 'podcast' %}bg-violet-950/70 text-violet-300{% else %}bg-red-950/70 text-red-300{% endif %}">
           {{ 'Podcast' if item.type == 'podcast' else 'YouTube' }}
         </span>
@@ -212,7 +214,7 @@
     {% for source in sources %}
     <article class="rounded-xl border {{ 'border-gray-800 bg-gray-900/45' if source.enabled else 'border-gray-800/70 bg-gray-950 opacity-75' }} p-4">
       <div class="flex items-start gap-3">
-        <div class="w-9 h-9 shrink-0 rounded-lg border {{ 'border-red-900 bg-red-950/40 text-red-300' if source.kind == 'youtube' else 'border-blue-900 bg-blue-950/40 text-blue-300' }} flex items-center justify-center text-[10px] font-bold">{{ '▶' if source.kind == 'youtube' else source.initials }}</div>
+        {{ source_artwork(source.image_url, source.kind, source.initials, 'w-9 h-9') }}
         <div class="min-w-0 flex-1"><h3 class="truncate text-sm font-semibold text-gray-100">{{ source.name }}</h3><div class="mt-1 flex flex-wrap gap-1.5 text-[10px]"><span class="rounded border border-gray-700 px-1.5 py-.5 text-gray-400">{{ source.kind|capitalize }}</span><span class="rounded border {{ 'border-emerald-900 text-emerald-400' if source.enabled else 'border-amber-900 text-amber-400' }} px-1.5 py-.5">{{ 'Active' if source.enabled else 'Paused' }}</span></div></div>
       </div>
       {% if source.description %}<p class="sub-clamp mt-3 min-h-[2.5rem] text-xs leading-relaxed text-gray-500">{{ source.description }}</p>{% endif %}

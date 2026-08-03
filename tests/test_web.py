@@ -2,7 +2,7 @@ import json
 import pytest
 from unittest.mock import patch
 from pathlib import Path
-from web.app import app
+from web.app import app, _extract_page_image, _extract_rss_image
 
 @pytest.fixture
 def client():
@@ -89,7 +89,11 @@ def test_subscriptions_add(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": []}))
     
-    with patch("web.app.SOURCES_FILE", mock_sources):
+    with patch("web.app.SOURCES_FILE", mock_sources), \
+         patch("web.app._resolve_source_metadata", return_value={
+             "rss_url": "https://feeds.example/new.xml",
+             "image_url": "https://images.example/new.jpg",
+         }):
         rv = client.post('/subscriptions/add', data={
             'name': 'New Source',
             'url': 'http://new.com',
@@ -102,6 +106,8 @@ def test_subscriptions_add(client, tmp_path):
         data = json.loads(mock_sources.read_text())
         assert len(data['sources']) == 1
         assert data['sources'][0]['name'] == 'New Source'
+        assert data['sources'][0]['rss_url'] == 'https://feeds.example/new.xml'
+        assert data['sources'][0]['image_url'] == 'https://images.example/new.jpg'
 
 def test_subscriptions_delete(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
@@ -122,7 +128,10 @@ def test_subscriptions_delete(client, tmp_path):
 def test_recommendation_subscribe_uses_catalog_values_and_defaults(client, tmp_path):
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": []}))
-    with patch("web.app.SOURCES_FILE", mock_sources):
+    with patch("web.app.SOURCES_FILE", mock_sources), \
+         patch("web.app._resolve_source_metadata", return_value={
+             "image_url": "https://images.example/yuru.jpg",
+         }):
         rv = client.post("/subscriptions/recommendations/subscribe", data={
             "candidate_id": "yt-yuru-language",
             "name": "Injected name",
@@ -134,6 +143,34 @@ def test_recommendation_subscribe_uses_catalog_values_and_defaults(client, tmp_p
         assert source["url"] == "https://www.youtube.com/@yurugengogaku"
         assert source["enabled"] is True
         assert source["digest_enabled"] is True
+        assert source["image_url"] == "https://images.example/yuru.jpg"
+
+
+def test_source_artwork_extractors_accept_page_and_rss_metadata():
+    assert _extract_page_image(
+        '<meta property="og:image" content="https://images.example/channel.jpg">'
+    ) == "https://images.example/channel.jpg"
+    rss = b'''<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+      <channel><itunes:image href="https://images.example/show.jpg" /></channel>
+    </rss>'''
+    assert _extract_rss_image(rss) == "https://images.example/show.jpg"
+
+
+def test_recommendation_card_renders_cover_with_icon_fallback(client, tmp_path):
+    mock_sources = tmp_path / "sources.json"
+    mock_sources.write_text(json.dumps({"sources": []}))
+    recommendation = {
+        "id": "cover-test", "name": "Cover Test", "type": "podcast",
+        "url": "https://example.com/show", "description": "Description",
+        "tags": ["news", "culture"], "reason": "A useful source",
+        "initials": "CT", "image_url": "https://images.example/cover.jpg",
+    }
+    with patch("web.app.SOURCES_FILE", mock_sources), \
+         patch("web.app._recommendations_for_user", return_value=([recommendation], True)):
+        body = client.get("/subscriptions").get_data(as_text=True)
+    assert 'src="https://images.example/cover.jpg"' in body
+    assert 'class="source-artwork ' in body
+    assert 'onerror="this.remove()"' in body
 
 
 def test_recommendation_subscribe_rejects_duplicate_and_unknown(client, tmp_path):

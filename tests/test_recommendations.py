@@ -30,6 +30,12 @@ def test_catalog_is_versioned_valid_and_balanced():
     assert sum(c["type"] == "youtube" for c in catalog) == 12
     assert len({c["id"] for c in catalog}) == len(catalog)
     assert len({normalize_url(c["url"]) for c in catalog}) == len(catalog)
+    by_id = {candidate["id"]: candidate for candidate in catalog}
+    for candidate_id in ("pod-nikkei", "pod-news-connect", "yt-nikkei", "yt-tvtokyo-biz"):
+        assert by_id[candidate_id]["image_url"].startswith("https://")
+    assert by_id["pod-nikkei"]["url"].endswith("id1627014612")
+    assert by_id["pod-nikkei"]["rss_url"] == "https://feeds.megaphone.fm/nagara"
+    assert by_id["pod-news-connect"]["rss_url"] == "https://anchor.fm/s/81fb5eec/podcast/rss"
 
 
 def test_loader_skips_malformed_and_duplicate_records(tmp_path):

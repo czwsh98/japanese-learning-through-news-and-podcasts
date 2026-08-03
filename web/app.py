@@ -1,5 +1,6 @@
 """Flask web UI for the Japanese Learning Pipeline — localhost:5000."""
 import hashlib
+import html as html_lib
 import json
 import logging
 import mimetypes
@@ -12,6 +13,7 @@ import time
 import traceback
 import urllib.parse
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1703,6 +1705,120 @@ def _source_initials(name: str) -> str:
     return (words[0][0] + words[1][0]).upper()
 
 
+def _valid_image_url(value: str | None) -> str:
+    """Return a browser-safe remote artwork URL or an empty string."""
+    value = html_lib.unescape(str(value or "").strip())[:2048]
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ""
+    return value if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
+def _extract_page_image(markup: str) -> str:
+    """Extract Open Graph/Twitter artwork without depending on HTML parsers."""
+    patterns = (
+        r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, markup, re.IGNORECASE)
+        if match:
+            return _valid_image_url(match.group(1))
+    return ""
+
+
+def _extract_rss_image(content: bytes) -> str:
+    """Extract show-level artwork from common RSS and iTunes elements."""
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return ""
+    channel = root.find("channel") or root.find("./channel")
+    if channel is None:
+        channel = root
+    itunes_image = channel.find("{http://www.itunes.com/dtds/podcast-1.0.dtd}image")
+    candidates = [
+        itunes_image.get("href") if itunes_image is not None else "",
+        channel.findtext("image/url", default=""),
+    ]
+    for candidate in candidates:
+        image_url = _valid_image_url(candidate)
+        if image_url:
+            return image_url
+    return ""
+
+
+def _resolve_source_metadata(url: str, rss_url: str | None = None) -> dict:
+    """Resolve stable feed and cover metadata once, when a source is saved.
+
+    Page rendering remains network-free. Failures are non-fatal and retain the
+    existing icon fallback; a later URL edit or re-subscribe can try again.
+    """
+    import requests
+
+    metadata: dict[str, str] = {}
+    apple_match = _APPLE_PODCAST_ID_RE.search(url)
+    if apple_match:
+        try:
+            response = requests.get(
+                "https://itunes.apple.com/lookup",
+                params={"id": apple_match.group(1)},
+                timeout=8,
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+            result = results[0] if results else {}
+            resolved_feed = str(result.get("feedUrl") or "").strip()
+            image_url = _valid_image_url(
+                result.get("artworkUrl600") or result.get("artworkUrl100")
+            )
+            if resolved_feed:
+                metadata["rss_url"] = resolved_feed
+            if image_url:
+                metadata["image_url"] = image_url
+        except Exception as exc:
+            log.warning("Apple Podcasts metadata lookup failed for %s: %s", url, exc)
+
+    feed_url = metadata.get("rss_url") or str(rss_url or "").strip()
+    if feed_url and "image_url" not in metadata:
+        try:
+            response = requests.get(
+                feed_url,
+                headers={"User-Agent": "Mimichan/1.0 (+podcast artwork lookup)"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            image_url = _extract_rss_image(response.content[:2_000_000])
+            if image_url:
+                metadata["image_url"] = image_url
+        except Exception as exc:
+            log.warning("RSS artwork lookup failed for %s: %s", feed_url, exc)
+
+    if "image_url" not in metadata:
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; Mimichan/1.0)"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.content[:2_000_000]
+            image_url = _extract_page_image(payload.decode(response.encoding or "utf-8", errors="replace"))
+            if not image_url:
+                image_url = _extract_rss_image(payload)
+                if image_url:
+                    metadata.setdefault("rss_url", url)
+            if image_url:
+                metadata["image_url"] = image_url
+        except Exception as exc:
+            log.warning("Source artwork lookup failed for %s: %s", url, exc)
+
+    if feed_url:
+        metadata.setdefault("rss_url", feed_url)
+    return metadata
+
+
 def _build_subscription_view(sources: list[dict], recent_cache: dict, user) -> tuple[list[dict], list[dict], dict]:
     """Join the feed cache to this user's live episode and job state."""
     db_rows = []
@@ -1786,6 +1902,7 @@ def _build_subscription_view(sources: list[dict], recent_cache: dict, user) -> t
                 "source_url": source_url,
                 "source_kind": view["kind"],
                 "source_initials": view["initials"],
+                "source_image_url": view.get("image_url", ""),
                 "source_order": source_order,
                 "feed_order": feed_order,
                 "item_order": item_order,
@@ -1926,23 +2043,7 @@ def _resolve_apple_podcast_rss(url: str) -> str | None:
     same as before this existed. yt-dlp has no extractor for podcasts.apple.com
     itself, so without this, subscriptions added via this form silently never
     surface new episodes (bot/preview both rely on rss_url as the fast path)."""
-    m = _APPLE_PODCAST_ID_RE.search(url)
-    if not m:
-        return None
-    try:
-        import requests
-        resp = requests.get(
-            "https://itunes.apple.com/lookup",
-            params={"id": m.group(1)},
-            timeout=8,
-        )
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        feed_url = results[0].get("feedUrl") if results else None
-        return feed_url or None
-    except Exception as exc:
-        log.warning(f"Apple Podcasts RSS lookup failed for {url}: {exc}")
-        return None
+    return _resolve_source_metadata(url).get("rss_url")
 
 
 @app.route("/subscriptions/add", methods=["POST"])
@@ -1955,11 +2056,22 @@ def subscriptions_add():
     if not name or not url:
         return redirect(url_for("sources_page", error="Name and URL are required."))
 
+    with _sources_lock:
+        sources_data = _load_sources()
+        if "sources" not in sources_data: sources_data["sources"] = []
+        existing_urls = {
+            normalize_url(candidate)
+            for source in sources_data["sources"]
+            for candidate in (source.get("url", ""), source.get("rss_url", ""))
+            if candidate
+        }
+        if normalize_url(url) in existing_urls:
+            return jsonify({"error": "That source is already subscribed."}), 409
+
+    resolved = _resolve_source_metadata(url)
     new_source = {"name": name, "url": url, "description": desc,
-                  "enabled": True, "digest_enabled": True}
-    rss_url = _resolve_apple_podcast_rss(url)
-    if rss_url:
-        new_source["rss_url"] = rss_url
+                  "enabled": True, "digest_enabled": True, **resolved}
+    rss_url = resolved.get("rss_url")
 
     with _sources_lock:
         sources_data = _load_sources()
@@ -1988,20 +2100,20 @@ def subscriptions_update():
         abort(400)
     enabled = request.form.get("enabled") in ("1", "true", "on")
     digest_enabled = request.form.get("digest_enabled") in ("1", "true", "on")
+    url_changed = url != original_url
+    resolved = _resolve_source_metadata(url) if url_changed else {}
     with _sources_lock:
         data = _load_sources()
         match = next((source for source in data.get("sources", [])
                       if source.get("url") == original_url), None)
         if match is None:
             abort(404)
-        url_changed = url != original_url
         match.update(name=name, url=url, description=description,
                      enabled=enabled, digest_enabled=digest_enabled)
         if url_changed:
             match.pop("rss_url", None)
-            rss_url = _resolve_apple_podcast_rss(url)
-            if rss_url:
-                match["rss_url"] = rss_url
+            match.pop("image_url", None)
+            match.update(resolved)
         _atomic_write_json(SOURCES_FILE, data)
     return redirect(url_for("sources_page"))
 
@@ -2022,6 +2134,25 @@ def _catalog_candidate_from_request() -> dict:
 def recommendation_subscribe():
     candidate = _catalog_candidate_from_request()
     rss_url = candidate.get("rss_url")
+    catalog_image = _valid_image_url(candidate.get("image_url"))
+
+    with _sources_lock:
+        data = _load_sources()
+        existing = {
+            normalize_url(value)
+            for source in data["sources"]
+            for value in (source.get("url", ""), source.get("rss_url", ""))
+            if value
+        }
+        known_candidate_urls = {normalize_url(candidate["url"])}
+        if rss_url:
+            known_candidate_urls.add(normalize_url(rss_url))
+        if existing & known_candidate_urls:
+            return jsonify({"error": "That source is already subscribed."}), 409
+
+    needs_lookup = not catalog_image or (candidate["type"] == "podcast" and not rss_url)
+    resolved = _resolve_source_metadata(candidate["url"], rss_url) if needs_lookup else {}
+    rss_url = resolved.get("rss_url") or rss_url
     if candidate["type"] == "podcast" and not rss_url:
         rss_url = _resolve_apple_podcast_rss(candidate["url"])
         if not rss_url:
@@ -2035,6 +2166,9 @@ def recommendation_subscribe():
     }
     if rss_url:
         new_source["rss_url"] = rss_url
+    image_url = catalog_image or resolved.get("image_url", "")
+    if image_url:
+        new_source["image_url"] = image_url
 
     with _sources_lock:
         data = _load_sources()
