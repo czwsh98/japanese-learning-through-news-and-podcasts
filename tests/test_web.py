@@ -18,7 +18,7 @@ def test_subscriptions_page(client, tmp_path):
     # Mock SOURCES_FILE
     mock_sources = tmp_path / "sources.json"
     mock_sources.write_text(json.dumps({"sources": [{"name": "Test", "url": "http://test.com"}]}))
-    
+
     with patch("web.app.SOURCES_FILE", mock_sources):
         rv = client.get('/subscriptions')
         assert rv.status_code == 200
@@ -92,6 +92,7 @@ def test_subscriptions_add(client, tmp_path):
     mock_sources.write_text(json.dumps({"sources": []}))
     
     with patch("web.app.SOURCES_FILE", mock_sources), \
+         patch("web.app.validate_public_url", side_effect=lambda url: url), \
          patch("web.app._resolve_source_metadata", return_value={
              "rss_url": "https://feeds.example/new.xml",
              "image_url": "https://images.example/new.jpg",
@@ -101,15 +102,26 @@ def test_subscriptions_add(client, tmp_path):
             'url': 'http://new.com',
             'description': 'Description'
         }, follow_redirects=True)
-        
+
         assert rv.status_code == 200
         assert b"New Source" in rv.data
-        
+
         data = json.loads(mock_sources.read_text())
         assert len(data['sources']) == 1
         assert data['sources'][0]['name'] == 'New Source'
         assert data['sources'][0]['rss_url'] == 'https://feeds.example/new.xml'
         assert data['sources'][0]['image_url'] == 'https://images.example/new.jpg'
+
+
+def test_subscriptions_reject_private_source_urls(client, tmp_path):
+    mock_sources = tmp_path / "sources.json"
+    mock_sources.write_text(json.dumps({"sources": []}))
+    with patch("web.app.SOURCES_FILE", mock_sources):
+        response = client.post("/subscriptions/add", data={
+            "name": "Internal service", "url": "http://127.0.0.1:5000/admin",
+        })
+    assert response.status_code == 302
+    assert json.loads(mock_sources.read_text())["sources"] == []
 
 def test_subscriptions_delete(client, tmp_path):
     mock_sources = tmp_path / "sources.json"

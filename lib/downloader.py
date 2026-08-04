@@ -19,11 +19,14 @@ from pathlib import Path
 
 import requests as _req
 
+from lib.url_safety import DownloadTooLargeError, safe_download, validate_public_url
+
 log = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", 600))
+_MAX_REMOTE_BYTES = 512 * 1024 * 1024
 _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", ".webm"}
 
 # ── VPS download proxy ────────────────────────────────────────────────────────
@@ -117,7 +120,8 @@ def _resolve_apple_podcast_episode(url: str) -> tuple[str, dict] | None:
 
 # ── Direct audio download ─────────────────────────────────────────────────────
 
-def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Path, dict]:
+def _download_direct(audio_url: str, episode_dir: Path, meta: dict,
+                     max_bytes: int) -> tuple[Path, dict]:
     """Stream a direct audio URL to episode_dir/audio.<ext>."""
     ext = Path(urllib.parse.urlparse(audio_url).path).suffix.lower()
     if ext not in _DIRECT_AUDIO_EXTS:
@@ -129,11 +133,7 @@ def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Pat
         return audio_path, meta
 
     log.info(f"Streaming audio from {audio_url[:80]}…")
-    with _req.get(audio_url, stream=True, timeout=_TIMEOUT) as resp:
-        resp.raise_for_status()
-        with open(audio_path, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=65_536):
-                fh.write(chunk)
+    safe_download(audio_url, audio_path, max_bytes=max_bytes, timeout=_TIMEOUT)
 
     size_kb = audio_path.stat().st_size // 1024
     log.info(f"Downloaded {size_kb:,} KB → {audio_path}")
@@ -142,7 +142,7 @@ def _download_direct(audio_url: str, episode_dir: Path, meta: dict) -> tuple[Pat
 
 # ── VPS proxy download (YouTube) ─────────────────────────────────────────────
 
-def _download_vps(url: str, episode_dir: Path) -> tuple[Path, dict]:
+def _download_vps(url: str, episode_dir: Path, max_bytes: int) -> tuple[Path, dict]:
     """Stream YouTube audio from the Japan VPS proxy, then fetch meta via oEmbed."""
     audio_path = episode_dir / "audio.mp3"
 
@@ -161,8 +161,19 @@ def _download_vps(url: str, episode_dir: Path) -> tuple[Path, dict]:
         stream=True,
     ) as resp:
         resp.raise_for_status()
+        try:
+            expected = int(resp.headers.get("Content-Length", ""))
+        except (TypeError, ValueError):
+            expected = 0
+        if expected > max_bytes:
+            raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
+        total = 0
         with open(audio_path, "wb") as fh:
             for chunk in resp.iter_content(chunk_size=65_536):
+                total += len(chunk)
+                if total > max_bytes:
+                    audio_path.unlink(missing_ok=True)
+                    raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
                 fh.write(chunk)
 
     size_kb = audio_path.stat().st_size // 1024
@@ -172,7 +183,7 @@ def _download_vps(url: str, episode_dir: Path) -> tuple[Path, dict]:
 
 # ── yt-dlp download ───────────────────────────────────────────────────────────
 
-def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
+def _download_ytdlp(url: str, episode_dir: Path, max_bytes: int) -> tuple[Path, dict]:
     """Use yt-dlp to download the first item from *url*."""
     audio_path = episode_dir / "audio.mp3"
 
@@ -207,6 +218,7 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
     dl_cmd = [
         "yt-dlp", "--playlist-items", "1",
         "-x", "--audio-format", "mp3", "--audio-quality", "0",
+        "--max-filesize", str(max_bytes),
         "--no-warnings", "--quiet",
         "-o", str(episode_dir / "audio.%(ext)s"),
         *yt_args,
@@ -219,6 +231,9 @@ def _download_ytdlp(url: str, episode_dir: Path) -> tuple[Path, dict]:
 
     if not audio_path.exists():
         raise RuntimeError("Download finished but audio.mp3 not found")
+    if audio_path.stat().st_size > max_bytes:
+        audio_path.unlink(missing_ok=True)
+        raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
 
     size_kb = audio_path.stat().st_size // 1024
     log.info(f"Downloaded {size_kb:,} KB → {audio_path}")
@@ -260,12 +275,13 @@ def fetch_youtube_meta_oembed(url: str) -> dict:
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def download_latest(
-    urls: list[str], episode_dir: Path, dry_run: bool = False
+    urls: list[str], episode_dir: Path, dry_run: bool = False,
+    max_bytes: int = _MAX_REMOTE_BYTES,
 ) -> tuple[Path | None, dict]:
     """Try each URL in order; return first successful (audio_path, meta)."""
     for url in urls:
         try:
-            audio_path, meta = _download(url, episode_dir, dry_run)
+            audio_path, meta = _download(url, episode_dir, dry_run, max_bytes)
             if audio_path:
                 return audio_path, meta
         except Exception as exc:
@@ -273,12 +289,15 @@ def download_latest(
     return None, {}
 
 
-def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, dict]:
+def _download(url: str, episode_dir: Path, dry_run: bool,
+              max_bytes: int) -> tuple[Path | None, dict]:
     if dry_run:
         log.info(f"[DRY RUN] Would download from {url}")
         p = episode_dir / "audio.mp3"
         p.touch()
         return p, _stub_meta()
+
+    url = validate_public_url(url)
 
     # ── Direct audio file URL ────────────────────────────────────────────────
     if _is_direct_audio(url):
@@ -286,7 +305,7 @@ def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, 
                 "channel": "", "upload_date": date.today().strftime("%Y%m%d"),
                 "duration": 0, "url": url, "thumbnail": "", "description": "",
                 "video_id": ""}
-        return _download_direct(url, episode_dir, meta)
+        return _download_direct(url, episode_dir, meta, max_bytes)
 
     # ── Apple Podcasts: resolve via iTunes Lookup API instead of scraping
     #    the (unreliable) podcasts.apple.com webpage ──────────────────────────
@@ -294,14 +313,14 @@ def _download(url: str, episode_dir: Path, dry_run: bool) -> tuple[Path | None, 
     if apple_result:
         audio_url, meta = apple_result
         log.info(f"Resolved Apple Podcasts episode via iTunes Lookup: {meta['title']!r}")
-        return _download_direct(audio_url, episode_dir, meta)
+        return _download_direct(audio_url, episode_dir, meta, max_bytes)
 
     # ── YouTube: use VPS proxy if configured ─────────────────────────────────
     if _VPS_URL and _VPS_TOKEN and _YT_RE.search(url):
-        return _download_vps(url, episode_dir)
+        return _download_vps(url, episode_dir, max_bytes)
 
     # ── yt-dlp (RSS feeds, SoundCloud, NHK, …) ──────────────────────────────
-    return _download_ytdlp(url, episode_dir)
+    return _download_ytdlp(url, episode_dir, max_bytes)
 
 
 # ── Meta helpers ──────────────────────────────────────────────────────────────

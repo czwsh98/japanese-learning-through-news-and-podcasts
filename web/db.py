@@ -66,6 +66,7 @@ class User(Base):
     is_admin         = Column(Boolean, nullable=False, server_default="false")
     # Hard cap on lifetime transcription jobs; admins are treated as unlimited in code.
     transcription_limit = Column(Integer, nullable=False, server_default="3")
+    subscriptions_initialized = Column(Boolean, nullable=False, default=False, server_default="false")
     created_at       = Column(
         DateTime(timezone=True), nullable=False,
         default=lambda: datetime.now(timezone.utc),
@@ -78,6 +79,7 @@ class User(Base):
     recommendation_dismissals = relationship("RecommendationDismissal", back_populates="user", cascade="all, delete-orphan")
     playback_progress     = relationship("PlaybackProgress", back_populates="user", cascade="all, delete-orphan")
     processing_jobs       = relationship("ProcessingJob", back_populates="user", cascade="all, delete-orphan")
+    subscriptions         = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserSession(Base):
@@ -366,6 +368,30 @@ class PlaybackProgress(Base):
     user = relationship("User", back_populates="playback_progress")
 
 
+class Subscription(Base):
+    """One user's saved podcast, channel, or feed subscription."""
+    __tablename__ = "subscriptions"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id         = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name            = Column(Text, nullable=False)
+    url             = Column(Text, nullable=False)
+    description     = Column(Text, nullable=False, server_default="")
+    rss_url         = Column(Text, nullable=False, server_default="")
+    image_url       = Column(Text, nullable=False, server_default="")
+    enabled         = Column(Boolean, nullable=False, default=True, server_default="true")
+    digest_enabled  = Column(Boolean, nullable=False, default=True, server_default="true")
+    recent_episodes = Column(JSON, nullable=False, default=list)
+    recent_fetched_at = Column(Text, nullable=False, server_default="")
+    created_at      = Column(DateTime(timezone=True), nullable=False,
+                             default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "url", name="uq_subscription_user_url"),
+    )
+    user = relationship("User", back_populates="subscriptions")
+
+
 class SentenceExplanation(Base):
     """Content-addressed cache for on-demand sentence explanations.
 
@@ -432,6 +458,7 @@ def init_db() -> bool:
             conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS lapses INTEGER NOT NULL DEFAULT 0;"))
             conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE;"))
             conn.execute(sa_text("ALTER TABLE vocab ADD COLUMN IF NOT EXISTS last_reviewed_at TIMESTAMPTZ;"))
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN IF NOT EXISTS subscriptions_initialized BOOLEAN NOT NULL DEFAULT FALSE;"))
             conn.execute(sa_text(
                 "UPDATE episodes SET delete_after = completed_at + INTERVAL '30 days' "
                 "WHERE completed_at IS NOT NULL AND delete_after IS NULL "
@@ -474,10 +501,19 @@ def init_db() -> bool:
             log.info("Database migration: backfilled %d vocab occurrences", len(legacy_items))
     except Exception as e:
         log.warning(f"Could not backfill vocab occurrences: {e}")
-    # A process restart terminates all background pipeline threads. Persist
-    # that fact instead of leaving browsers polling a permanently "running"
-    # job. The production container intentionally uses one Gunicorn worker;
-    # a future external worker queue should replace this reconciliation.
+    log.info("Database connected — all tables ensured")
+    return True
+
+
+def reconcile_worker_restart() -> int:
+    """Fail jobs orphaned by an actual web-worker restart.
+
+    This must be called by the process manager after a worker starts, never by
+    ``init_db``: maintenance scripts import the database and application modules
+    while the real worker may still be processing a job.
+    """
+    if _SessionFactory is None:
+        return 0
     try:
         with _SessionFactory() as session:
             interrupted_jobs = session.query(ProcessingJob).filter(
@@ -497,13 +533,44 @@ def init_db() -> bool:
                 job.retry_from = retry_after.get(highest, "download")
                 job.finished_at = now
                 job.artifacts_expire_at = now + timedelta(days=7)
+                if job.usage_id:
+                    usage = session.get(TranscriptionUsage, job.usage_id)
+                    if usage and usage.status == "started":
+                        usage.status = "failed"
             session.commit()
         if interrupted_jobs:
             log.warning("Database recovery: marked %d interrupted processing jobs failed", len(interrupted_jobs))
+        return len(interrupted_jobs)
     except Exception as e:
         log.warning(f"Could not reconcile interrupted processing jobs: {e}")
-    log.info("Database connected — all tables ensured")
-    return True
+        return 0
+
+
+def reconcile_stale_usage(minutes: int = 30) -> int:
+    """Release genuinely orphaned usage rows, preserving active long jobs."""
+    if _SessionFactory is None:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    try:
+        with _SessionFactory() as session:
+            active_usage_ids = session.query(ProcessingJob.usage_id).filter(
+                ProcessingJob.status.in_(["queued", "running", "retrying"]),
+                ProcessingJob.usage_id.is_not(None),
+            )
+            rows = session.query(TranscriptionUsage).filter(
+                TranscriptionUsage.status == "started",
+                TranscriptionUsage.created_at < cutoff,
+                ~TranscriptionUsage.id.in_(active_usage_ids),
+            ).all()
+            for row in rows:
+                row.status = "failed"
+            session.commit()
+        if rows:
+            log.warning("Database recovery: released %d orphaned usage rows", len(rows))
+        return len(rows)
+    except Exception as e:
+        log.warning("Could not reconcile stale usage rows: %s", e)
+        return 0
 
 
 def db_available() -> bool:

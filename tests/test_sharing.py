@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import pytest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 from sqlalchemy import select
@@ -25,7 +26,7 @@ from web.app import (
 )
 from web.db import (
     get_db, User, Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob,
-    RecommendationDismissal, TranscriptionUsage, VocabItem, VocabOccurrence,
+    RecommendationDismissal, Subscription, TranscriptionUsage, VocabItem, VocabOccurrence,
 )
 
 @pytest.fixture(autouse=True)
@@ -620,3 +621,152 @@ def test_upload_duplicate_different_user_different_level(
             job = _jobs.get(job_id)
             assert job["status"] == "done"
             assert job["step_num"] == 3
+
+
+def test_init_db_has_no_job_recovery_side_effect(test_users):
+    from web.db import init_db, reconcile_stale_usage, reconcile_worker_restart
+
+    user_id, _ = test_users
+    usage_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    with get_db() as db:
+        db.add(TranscriptionUsage(
+            id=usage_id, user_id=user_id, status="started",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        ))
+        db.add(ProcessingJob(
+            id=job_id, user_id=user_id, usage_id=usage_id,
+            slug="2026-08-04", status="running",
+        ))
+
+    init_db()
+    assert reconcile_stale_usage(minutes=30) == 0
+    with get_db() as db:
+        assert db.get(ProcessingJob, job_id).status == "running"
+        assert db.get(TranscriptionUsage, usage_id).status == "started"
+
+    assert reconcile_worker_restart() == 1
+    with get_db() as db:
+        assert db.get(ProcessingJob, job_id).status == "failed"
+        assert db.get(TranscriptionUsage, usage_id).status == "failed"
+
+
+def test_stale_usage_reconciliation_releases_only_orphans(test_users):
+    from web.db import reconcile_stale_usage
+
+    user_id, _ = test_users
+    usage_id = uuid.uuid4()
+    with get_db() as db:
+        db.add(TranscriptionUsage(
+            id=usage_id, user_id=user_id, status="started",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        ))
+    assert reconcile_stale_usage(minutes=30) == 1
+    with get_db() as db:
+        assert db.get(TranscriptionUsage, usage_id).status == "failed"
+
+
+def test_subscriptions_are_isolated_per_user(client, test_users):
+    user_a_id, user_b_id = test_users
+    with get_db() as db:
+        user_a = db.get(User, user_a_id)
+        user_b = db.get(User, user_b_id)
+        user_a.subscriptions_initialized = True
+        user_b.subscriptions_initialized = True
+        db.expunge(user_a)
+        db.expunge(user_b)
+
+    with patch("web.auth.get_current_user", return_value=user_a), \
+         patch("web.app.get_current_user", return_value=user_a), \
+         patch("web.app.validate_public_url", side_effect=lambda url: url), \
+         patch("web.app._resolve_source_metadata", return_value={}):
+        response = client.post("/subscriptions/add", data={
+            "name": "User A podcast",
+            "url": "https://feeds.example/a.xml",
+        })
+        assert response.status_code == 302
+
+    with patch("web.auth.get_current_user", return_value=user_b), \
+         patch("web.app.get_current_user", return_value=user_b):
+        assert b"User A podcast" not in client.get("/sources").data
+        assert client.post("/subscriptions/delete", data={
+            "url": "https://feeds.example/a.xml",
+        }).status_code == 302
+
+    with get_db() as db:
+        rows = db.execute(select(Subscription).where(
+            Subscription.user_id == user_a_id
+        )).scalars().all()
+        assert [row.name for row in rows] == ["User A podcast"]
+
+
+def test_admin_legacy_subscription_and_cache_migrate_once(test_users, tmp_path):
+    from web.app import _load_recent_cache, _load_sources
+
+    user_id, _ = test_users
+    sources_file = tmp_path / "sources.json"
+    cache_file = tmp_path / "recent.json"
+    sources_file.write_text(json.dumps({"sources": [{
+        "name": "Legacy podcast", "url": "https://feeds.example/legacy.xml",
+        "enabled": True,
+    }]}))
+    cache_file.write_text(json.dumps({
+        "https://feeds.example/legacy.xml": {
+            "fetched_at": "2026-08-04T01:00:00",
+            "episodes": [{"title": "Episode one", "url": "https://cdn.example/1.mp3"}],
+        }
+    }))
+    with get_db() as db:
+        user = db.get(User, user_id)
+        user.is_admin = True
+        user.subscriptions_initialized = False
+        db.flush()
+        db.expunge(user)
+
+    with patch("web.app.SOURCES_FILE", sources_file), \
+         patch("web.app.RECENT_EPISODES_CACHE_FILE", cache_file):
+        assert _load_sources(user)["sources"][0]["name"] == "Legacy podcast"
+        assert _load_recent_cache(user)["https://feeds.example/legacy.xml"]["episodes"][0]["title"] == "Episode one"
+        assert len(_load_sources(user)["sources"]) == 1
+
+
+def test_job_status_does_not_fall_back_to_another_users_memory(client, test_users):
+    user_a_id, user_b_id = test_users
+    with get_db() as db:
+        user_b = db.get(User, user_b_id)
+        db.expunge(user_b)
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "processing", "slug": "2026-08-04",
+            "user_id": str(user_a_id), "step": "Secret step",
+        }
+    try:
+        with patch("web.auth.get_current_user", return_value=user_b), \
+             patch("web.app.get_current_user", return_value=user_b):
+            response = client.get(f"/api/job/{job_id}/status")
+        assert response.status_code == 404
+    finally:
+        with _jobs_lock:
+            _jobs.pop(job_id, None)
+
+
+def test_r2_publication_fails_when_any_required_artifact_upload_fails(tmp_path):
+    from web.app import _r2_upload_episode
+
+    for filename in (
+        "meta.json", "transcript.json", "analysis.json", "highlights.json",
+        "subtitles.vtt", "cards.csv", "audio.mp3",
+    ):
+        (tmp_path / filename).write_bytes(b"data")
+
+    s3 = MagicMock()
+    def fail_transcript(_path, _bucket, key, **_kwargs):
+        if key.endswith("transcript.json"):
+            raise RuntimeError("temporary R2 failure")
+    s3.upload_file.side_effect = fail_transcript
+
+    with patch("web.app._get_r2", return_value=s3), \
+         patch("web.app._r2_bucket", return_value="bucket"):
+        with pytest.raises(RuntimeError, match="required episode artifact"):
+            _r2_upload_episode(tmp_path, "episodes/test/")

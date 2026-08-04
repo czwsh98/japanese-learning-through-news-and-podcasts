@@ -74,11 +74,12 @@ from web.auth import (
     set_auth_cookie,
 )
 from web.db import (
-    Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob,
+    Episode, PlaybackProgress, ProcessingArtifact, ProcessingJob, Subscription,
     RecommendationDismissal, SentenceExplanation, TranscriptionUsage,
-    ReviewLog, VocabItem, VocabOccurrence, db_available, get_db, init_db,
+    ReviewLog, User, VocabItem, VocabOccurrence, db_available, get_db, init_db,
 )
 from web.recommendations import load_catalog, normalize_url, rank_recommendations
+from lib.url_safety import safe_get_bytes, validate_public_url
 from sqlalchemy import delete, func, or_, select, text as sa_text, update
 from sqlalchemy.exc import IntegrityError
 
@@ -129,28 +130,6 @@ if db_available() and app.config["SECRET_KEY"] == _SK_DEFAULT:
         "SECRET_KEY env var is not set or uses the insecure default. "
         "Set a strong random value before running in production."
     )
-
-# Bug #5 fix: reconcile stale 'started' usage rows left by a previous worker
-# crash / restart.  Any row older than 30 minutes that is still 'started' will
-# never be completed — flip them to 'failed' so they don't consume quota.
-if db_available():
-    try:
-        from datetime import timedelta
-        from sqlalchemy import update as _sa_update
-        _stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
-        with get_db() as _db:
-            _db.execute(
-                _sa_update(TranscriptionUsage)
-                .where(
-                    TranscriptionUsage.status == "started",
-                    TranscriptionUsage.created_at < _stale_cutoff,
-                )
-                .values(status="failed")
-            )
-        log.info("Reconciled stale 'started' transcription usage rows on startup")
-    except Exception as _e:
-        log.warning("Could not reconcile stale usage rows: %s", _e)
-
 
 @app.context_processor
 def _inject_auth():
@@ -344,7 +323,7 @@ _EPISODE_UPLOAD_FILES = [
     "meta.json", "transcript.json", "analysis.json", "highlights.json",
     "subtitles.vtt", "cards.csv",
     "audio.mp3", "audio.m4a", "audio.wav", "audio.ogg",
-    "audio.webm", "audio.flac", "audio.aac", "audio.opus",
+    "audio.webm", "audio.flac", "audio.aac", "audio.opus", "audio.mp4",
 ]
 
 
@@ -432,11 +411,20 @@ def _r2_find_audio(r2_prefix: str) -> "tuple[str, str] | None":
 def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
     """Upload all known episode files from ep_dir to R2 at r2_prefix.
 
-    Bug #3 fix: raises RuntimeError if the audio file (the only truly required
-    file) fails to upload.  Other files log a warning and continue.
+    Publication is all-or-nothing from the database's perspective: every local
+    episode artifact must upload successfully before the Episode row is marked
+    complete and the local working directory is removed.
     """
     mimetypes.add_type("text/vtt", ".vtt")
     mimetypes.add_type("text/csv", ".csv")
+    required = {"meta.json", "transcript.json", "analysis.json", "highlights.json",
+                "subtitles.vtt", "cards.csv"}
+    missing = sorted(filename for filename in required if not (ep_dir / filename).is_file())
+    if not any((ep_dir / f"audio{ext}").is_file() for ext in
+               (".mp3", ".m4a", ".wav", ".ogg", ".webm", ".flac", ".aac", ".opus", ".mp4")):
+        missing.append("audio.*")
+    if missing:
+        raise RuntimeError(f"Episode artifacts missing before R2 upload: {', '.join(missing)}")
     s3     = _get_r2()
     bucket = _r2_bucket()
     for filename in _EPISODE_UPLOAD_FILES:
@@ -445,16 +433,11 @@ def _r2_upload_episode(ep_dir: Path, r2_prefix: str) -> None:
             continue
         key = f"{r2_prefix}{filename}"
         mt  = mimetypes.guess_type(str(fpath))[0] or "application/octet-stream"
-        is_audio = filename.startswith("audio.")
         try:
             s3.upload_file(str(fpath), bucket, key, ExtraArgs={"ContentType": mt})
             log.info(f"R2 uploaded: {key}")
         except Exception as exc:
-            if is_audio:
-                raise RuntimeError(
-                    f"Failed to upload audio to R2 ({key}): {exc}"
-                ) from exc
-            log.warning(f"R2 upload failed (non-critical) for {key}: {exc}")
+            raise RuntimeError(f"Failed to upload required episode artifact ({key}): {exc}") from exc
 
 
 # ── Transcription quota helpers ───────────────────────────────────────────────
@@ -994,7 +977,10 @@ def _pipeline_thread(
             _ovr_duration = (meta or {}).get("duration", 0)
             audio_path, meta = _run_timed_stage(
                 job_id, slug, "download",
-                lambda: download_latest([source_url], ep_dir),
+                lambda: download_latest(
+                    [source_url], ep_dir,
+                    max_bytes=(512 * 1024 * 1024 if unlimited else _TRANSCRIPTION_MAX_BYTES),
+                ),
             )
             if not audio_path:
                 raise RuntimeError("Could not download audio — check the URL")
@@ -1437,9 +1423,9 @@ def index():
                 ).order_by(ProcessingJob.updated_at.desc()).limit(3)
             ).scalars().all()
             jobs = [_job_to_dict(row) for row in job_rows]
-        sources_data = _load_sources()
+        sources_data = _load_sources(user)
         _, subscription_inbox, _ = _build_subscription_view(
-            sources_data.get("sources", []), _load_recent_cache(), user)
+            sources_data.get("sources", []), _load_recent_cache(user), user)
         inbox = [item for item in subscription_inbox if not item["processed"] and not item["active"]][:3]
     return render_template(
         "today.html", resume_episode=resume_episode, recent_episodes=recent_episodes,
@@ -1639,14 +1625,31 @@ def episode_delete(date_str: str):
     return redirect(url_for("library"))
 
 
-def _load_recent_cache() -> dict:
-    """Recent-episodes-per-source map written by the bot; {} if absent/broken."""
+def _load_recent_cache_file() -> dict:
     try:
         if RECENT_EPISODES_CACHE_FILE.exists():
             return json.loads(RECENT_EPISODES_CACHE_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
     return {}
+
+
+def _load_recent_cache(user=None) -> dict:
+    """Load recent episodes for one user, with a no-database file fallback."""
+    if db_available() and user is not None:
+        _ensure_user_subscriptions(user)
+        with get_db() as db:
+            rows = db.execute(select(Subscription).where(
+                Subscription.user_id == user.id
+            )).scalars().all()
+        return {
+            row.url: {
+                "fetched_at": row.recent_fetched_at,
+                "episodes": list(row.recent_episodes or []),
+            }
+            for row in rows if row.recent_fetched_at or row.recent_episodes
+        }
+    return _load_recent_cache_file()
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -1663,8 +1666,8 @@ def _atomic_write_json(path: Path, data: dict) -> None:
             pass
 
 
-def _load_sources() -> dict:
-    """Load sources with backward-compatible subscription settings."""
+def _load_sources_file() -> dict:
+    """Load the legacy source file used in no-database mode and by the bot."""
     try:
         data = json.loads(SOURCES_FILE.read_text(encoding="utf-8")) if SOURCES_FILE.exists() else {"sources": []}
     except (OSError, json.JSONDecodeError):
@@ -1679,6 +1682,150 @@ def _load_sources() -> dict:
         normalized["digest_enabled"] = source.get("digest_enabled", True) is not False
         sources.append(normalized)
     return {**(data if isinstance(data, dict) else {}), "sources": sources}
+
+
+def _subscription_dict(row: Subscription) -> dict:
+    return {
+        "name": row.name,
+        "url": row.url,
+        "description": row.description,
+        "rss_url": row.rss_url,
+        "image_url": row.image_url,
+        "enabled": bool(row.enabled),
+        "digest_enabled": bool(row.digest_enabled),
+    }
+
+
+def _ensure_user_subscriptions(user) -> None:
+    """Migrate legacy global sources once, assigning them to the admin owner."""
+    if not db_available() or user is None:
+        return
+    with get_db() as db:
+        db_user = db.execute(
+            select(User).where(User.id == user.id).with_for_update()
+        ).scalar_one_or_none()
+        if db_user is None or db_user.subscriptions_initialized:
+            return
+        if db_user.is_admin:
+            recent_cache = _load_recent_cache_file()
+            existing = set(db.execute(select(Subscription.url).where(
+                Subscription.user_id == db_user.id
+            )).scalars())
+            for source in _load_sources_file().get("sources", []):
+                if (not source.get("name") or not source.get("url")
+                        or source["url"] in existing):
+                    continue
+                recent = recent_cache.get(source["url"], {})
+                db.add(Subscription(
+                    user_id=db_user.id,
+                    name=str(source["name"]),
+                    url=str(source["url"]),
+                    description=str(source.get("description", "")),
+                    rss_url=str(source.get("rss_url", "")),
+                    image_url=str(source.get("image_url", "")),
+                    enabled=source.get("enabled", True) is not False,
+                    digest_enabled=source.get("digest_enabled", True) is not False,
+                    recent_episodes=(recent.get("episodes", [])
+                                     if isinstance(recent, dict) else []),
+                    recent_fetched_at=(str(recent.get("fetched_at", ""))
+                                       if isinstance(recent, dict) else ""),
+                ))
+                existing.add(source["url"])
+        db_user.subscriptions_initialized = True
+
+
+def _load_sources(user=None) -> dict:
+    """Load isolated subscriptions for ``user`` or the legacy file fallback."""
+    if db_available() and user is not None:
+        _ensure_user_subscriptions(user)
+        with get_db() as db:
+            rows = db.execute(
+                select(Subscription).where(Subscription.user_id == user.id)
+                .order_by(Subscription.created_at, Subscription.name)
+            ).scalars().all()
+        return {"sources": [_subscription_dict(row) for row in rows]}
+    return _load_sources_file()
+
+
+def _sync_admin_sources_file(user) -> None:
+    """Keep the owner bot's legacy input file aligned during DB migration."""
+    if user is not None and user.is_admin:
+        _atomic_write_json(SOURCES_FILE, _load_sources(user))
+
+
+def _source_urls(sources: list[dict]) -> set[str]:
+    return {
+        normalize_url(value)
+        for source in sources
+        for value in (source.get("url", ""), source.get("rss_url", ""))
+        if value
+    }
+
+
+def _append_user_source(user, source: dict) -> bool:
+    """Append one isolated source; return False when it already exists."""
+    with _sources_lock:
+        data = _load_sources(user)
+        candidates = _source_urls([source])
+        if _source_urls(data.get("sources", [])) & candidates:
+            return False
+        if db_available() and user is not None:
+            with get_db() as db:
+                db.add(Subscription(
+                    user_id=user.id,
+                    name=source["name"],
+                    url=source["url"],
+                    description=source.get("description", ""),
+                    rss_url=source.get("rss_url", ""),
+                    image_url=source.get("image_url", ""),
+                    enabled=source.get("enabled", True),
+                    digest_enabled=source.get("digest_enabled", True),
+                ))
+            _sync_admin_sources_file(user)
+        else:
+            data.setdefault("sources", []).append(source)
+            _atomic_write_json(SOURCES_FILE, data)
+    return True
+
+
+def _update_user_source(user, original_url: str, values: dict) -> bool:
+    with _sources_lock:
+        if db_available() and user is not None:
+            with get_db() as db:
+                row = db.execute(select(Subscription).where(
+                    Subscription.user_id == user.id,
+                    Subscription.url == original_url,
+                )).scalar_one_or_none()
+                if row is None:
+                    return False
+                for key, value in values.items():
+                    setattr(row, key, value)
+            _sync_admin_sources_file(user)
+            return True
+        data = _load_sources_file()
+        match = next((source for source in data.get("sources", [])
+                      if source.get("url") == original_url), None)
+        if match is None:
+            return False
+        match.update(values)
+        _atomic_write_json(SOURCES_FILE, data)
+        return True
+
+
+def _delete_user_source(user, url: str) -> None:
+    with _sources_lock:
+        if db_available() and user is not None:
+            with get_db() as db:
+                db.execute(delete(Subscription).where(
+                    Subscription.user_id == user.id,
+                    Subscription.url == url,
+                ))
+            _sync_admin_sources_file(user)
+            return
+        data = _load_sources_file()
+        data["sources"] = [source for source in data.get("sources", [])
+                           if source.get("url") != url]
+        _atomic_write_json(SOURCES_FILE, data)
 
 
 def _parse_cached_datetime(value) -> datetime | None:
@@ -1759,6 +1906,9 @@ def _resolve_source_metadata(url: str, rss_url: str | None = None) -> dict:
     """
     import requests
 
+    url = validate_public_url(url)
+    if rss_url:
+        rss_url = validate_public_url(rss_url)
     metadata: dict[str, str] = {}
     apple_match = _APPLE_PODCAST_ID_RE.search(url)
     if apple_match:
@@ -1776,7 +1926,10 @@ def _resolve_source_metadata(url: str, rss_url: str | None = None) -> dict:
                 result.get("artworkUrl600") or result.get("artworkUrl100")
             )
             if resolved_feed:
-                metadata["rss_url"] = resolved_feed
+                try:
+                    metadata["rss_url"] = validate_public_url(resolved_feed)
+                except ValueError:
+                    log.warning("Apple Podcasts returned a non-public feed URL for %s", url)
             if image_url:
                 metadata["image_url"] = image_url
         except Exception as exc:
@@ -1785,13 +1938,12 @@ def _resolve_source_metadata(url: str, rss_url: str | None = None) -> dict:
     feed_url = metadata.get("rss_url") or str(rss_url or "").strip()
     if feed_url and "image_url" not in metadata:
         try:
-            response = requests.get(
-                feed_url,
+            payload = safe_get_bytes(
+                feed_url, max_bytes=2_000_000,
                 headers={"User-Agent": "Mimichan/1.0 (+podcast artwork lookup)"},
                 timeout=10,
             )
-            response.raise_for_status()
-            image_url = _extract_rss_image(response.content[:2_000_000])
+            image_url = _extract_rss_image(payload)
             if image_url:
                 metadata["image_url"] = image_url
         except Exception as exc:
@@ -1799,14 +1951,12 @@ def _resolve_source_metadata(url: str, rss_url: str | None = None) -> dict:
 
     if "image_url" not in metadata:
         try:
-            response = requests.get(
-                url,
+            payload = safe_get_bytes(
+                url, max_bytes=2_000_000,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; Mimichan/1.0)"},
                 timeout=10,
             )
-            response.raise_for_status()
-            payload = response.content[:2_000_000]
-            image_url = _extract_page_image(payload.decode(response.encoding or "utf-8", errors="replace"))
+            image_url = _extract_page_image(payload.decode("utf-8", errors="replace"))
             if not image_url:
                 image_url = _extract_rss_image(payload)
                 if image_url:
@@ -1965,9 +2115,10 @@ def _recommendations_for_user(sources: list[dict]) -> tuple[list[dict], bool]:
 @app.route("/subscriptions", methods=["GET"])
 @login_required
 def subscriptions_page():
-    sources_data = _load_sources()
+    user = get_current_user()
+    sources_data = _load_sources(user)
     sources, inbox, metrics = _build_subscription_view(
-        sources_data.get("sources", []), _load_recent_cache(), get_current_user())
+        sources_data.get("sources", []), _load_recent_cache(user), user)
     recommendations, catalog_available = _recommendations_for_user(sources)
     return render_template(
         "subscriptions.html", sources=sources, inbox=inbox, metrics=metrics,
@@ -1979,9 +2130,10 @@ def subscriptions_page():
 @app.route("/sources", methods=["GET"])
 @login_required
 def sources_page():
-    sources_data = _load_sources()
+    user = get_current_user()
+    sources_data = _load_sources(user)
     sources, _, metrics = _build_subscription_view(
-        sources_data.get("sources", []), _load_recent_cache(), get_current_user())
+        sources_data.get("sources", []), _load_recent_cache(user), user)
     return render_template(
         "subscriptions.html", sources=sources, inbox=[], metrics=metrics,
         recommendations=[], catalog_available=True, show_source_manager=True,
@@ -2030,6 +2182,22 @@ def api_subscriptions_recent():
             "episodes":   episodes,
         }
 
+    user = get_current_user()
+    if db_available() and user is not None:
+        _ensure_user_subscriptions(user)
+        updated = 0
+        with get_db() as db:
+            rows = db.execute(select(Subscription).where(
+                Subscription.user_id == user.id
+            )).scalars().all()
+            for row in rows:
+                entry = clean.get(row.url) or (clean.get(row.rss_url) if row.rss_url else None)
+                if entry is None:
+                    continue
+                row.recent_fetched_at = entry["fetched_at"]
+                row.recent_episodes = entry["episodes"]
+                updated += 1
+        return jsonify({"ok": True, "sources": updated})
     with _recent_lock:
         _atomic_write_json(RECENT_EPISODES_CACHE_FILE, clean)
     return jsonify({"ok": True, "sources": len(clean)})
@@ -2058,36 +2226,16 @@ def subscriptions_add():
     if not name or not url:
         return redirect(url_for("sources_page", error="Name and URL are required."))
 
-    with _sources_lock:
-        sources_data = _load_sources()
-        if "sources" not in sources_data: sources_data["sources"] = []
-        existing_urls = {
-            normalize_url(candidate)
-            for source in sources_data["sources"]
-            for candidate in (source.get("url", ""), source.get("rss_url", ""))
-            if candidate
-        }
-        if normalize_url(url) in existing_urls:
-            return jsonify({"error": "That source is already subscribed."}), 409
-
-    resolved = _resolve_source_metadata(url)
+    user = get_current_user()
+    try:
+        url = validate_public_url(url)
+        resolved = _resolve_source_metadata(url)
+    except ValueError as exc:
+        return redirect(url_for("sources_page", error=str(exc)))
     new_source = {"name": name, "url": url, "description": desc,
                   "enabled": True, "digest_enabled": True, **resolved}
-    rss_url = resolved.get("rss_url")
-
-    with _sources_lock:
-        sources_data = _load_sources()
-        if "sources" not in sources_data: sources_data["sources"] = []
-        existing_urls = {
-            normalize_url(candidate)
-            for source in sources_data["sources"]
-            for candidate in (source.get("url", ""), source.get("rss_url", ""))
-            if candidate
-        }
-        if normalize_url(url) in existing_urls or (rss_url and normalize_url(rss_url) in existing_urls):
-            return jsonify({"error": "That source is already subscribed."}), 409
-        sources_data["sources"].append(new_source)
-        _atomic_write_json(SOURCES_FILE, sources_data)
+    if not _append_user_source(user, new_source):
+        return jsonify({"error": "That source is already subscribed."}), 409
     return redirect(url_for("sources_page"))
 
 
@@ -2102,21 +2250,24 @@ def subscriptions_update():
         abort(400)
     enabled = request.form.get("enabled") in ("1", "true", "on")
     digest_enabled = request.form.get("digest_enabled") in ("1", "true", "on")
+    user = get_current_user()
     url_changed = url != original_url
-    resolved = _resolve_source_metadata(url) if url_changed else {}
-    with _sources_lock:
-        data = _load_sources()
-        match = next((source for source in data.get("sources", [])
-                      if source.get("url") == original_url), None)
-        if match is None:
-            abort(404)
-        match.update(name=name, url=url, description=description,
-                     enabled=enabled, digest_enabled=digest_enabled)
-        if url_changed:
-            match.pop("rss_url", None)
-            match.pop("image_url", None)
-            match.update(resolved)
-        _atomic_write_json(SOURCES_FILE, data)
+    try:
+        url = validate_public_url(url)
+        resolved = _resolve_source_metadata(url) if url_changed else {}
+    except ValueError as exc:
+        return redirect(url_for("sources_page", error=str(exc)))
+    if url_changed:
+        other_sources = [source for source in _load_sources(user).get("sources", [])
+                         if source.get("url") != original_url]
+        if _source_urls(other_sources) & _source_urls([{"url": url, **resolved}]):
+            return jsonify({"error": "That source is already subscribed."}), 409
+    values = dict(name=name, url=url, description=description,
+                  enabled=enabled, digest_enabled=digest_enabled)
+    if url_changed:
+        values.update(rss_url=resolved.get("rss_url", ""), image_url=resolved.get("image_url", ""))
+    if not _update_user_source(user, original_url, values):
+        abort(404)
     return redirect(url_for("sources_page"))
 
 
@@ -2135,17 +2286,13 @@ def _catalog_candidate_from_request() -> dict:
 @login_required
 def recommendation_subscribe():
     candidate = _catalog_candidate_from_request()
+    user = get_current_user()
     rss_url = candidate.get("rss_url")
     catalog_image = _valid_image_url(candidate.get("image_url"))
 
     with _sources_lock:
-        data = _load_sources()
-        existing = {
-            normalize_url(value)
-            for source in data["sources"]
-            for value in (source.get("url", ""), source.get("rss_url", ""))
-            if value
-        }
+        data = _load_sources(user)
+        existing = _source_urls(data["sources"])
         known_candidate_urls = {normalize_url(candidate["url"])}
         if rss_url:
             known_candidate_urls.add(normalize_url(rss_url))
@@ -2172,21 +2319,8 @@ def recommendation_subscribe():
     if image_url:
         new_source["image_url"] = image_url
 
-    with _sources_lock:
-        data = _load_sources()
-        existing = {
-            normalize_url(value)
-            for source in data["sources"]
-            for value in (source.get("url", ""), source.get("rss_url", ""))
-            if value
-        }
-        candidate_urls = {normalize_url(candidate["url"])}
-        if rss_url:
-            candidate_urls.add(normalize_url(rss_url))
-        if existing & candidate_urls:
-            return jsonify({"error": "That source is already subscribed."}), 409
-        data["sources"].append(new_source)
-        _atomic_write_json(SOURCES_FILE, data)
+    if not _append_user_source(user, new_source):
+        return jsonify({"error": "That source is already subscribed."}), 409
     return redirect(url_for("subscriptions_page"))
 
 
@@ -2214,10 +2348,7 @@ def subscriptions_delete():
     if not url:
         abort(400)
 
-    with _sources_lock:
-        sources_data = _load_sources()
-        sources_data["sources"] = [s for s in sources_data.get("sources", []) if s.get("url") != url]
-        _atomic_write_json(SOURCES_FILE, sources_data)
+    _delete_user_source(get_current_user(), url)
     return redirect(url_for("sources_page"))
 
 
@@ -2987,6 +3118,8 @@ def job_page(job_id: str):
     durable = _owned_processing_job(job_id)
     if durable is not None:
         return render_template("job.html", job_id=job_id, slug=durable.slug)
+    if db_available():
+        abort(404)
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
@@ -3000,6 +3133,8 @@ def api_job_status(job_id: str):
     durable = _owned_processing_job(job_id)
     if durable is not None:
         return jsonify(_job_to_dict(durable))
+    if db_available():
+        return jsonify({"error": "Job not found"}), 404
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:

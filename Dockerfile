@@ -13,4 +13,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-CMD gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 600 web.app:app
+CMD gunicorn --config web/gunicorn.conf.py --bind 0.0.0.0:$PORT --workers 1 --timeout 600 web.app:app

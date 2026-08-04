@@ -22,6 +22,7 @@ _MIN_CHARS = 1
 _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB cap
 _API_AUDIO_BITRATE = os.environ.get("WHISPER_AUDIO_BITRATE", "64k")
 _MAX_CHUNK_WORKERS = max(1, int(os.environ.get("WHISPER_CHUNK_WORKERS", "3")))
+_CHUNK_OVERLAP_SECONDS = 2.0
 
 # Maximum audio duration for non-unlimited users.  Whisper is billed per
 # minute (~$0.006/min), so 30 min caps per-job spend at ~$0.18 of Whisper.
@@ -245,9 +246,15 @@ def _audio_bitrate_bps(audio_path: Path) -> int:
 
 
 def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
-    """Split audio into chunks sized to stay under _API_LIMIT, transcribe each, merge."""
+    """Transcribe overlapping chunks and reconcile their shared boundaries."""
     bitrate = _audio_bitrate_bps(audio_path)
-    chunk_secs = int(_API_LIMIT / (bitrate / 8))
+    # Leave room for the overlap and container overhead below the API byte cap.
+    chunk_secs = max(30, int(_API_LIMIT / (bitrate / 8)) - 10)
+    step_secs = chunk_secs - _CHUNK_OVERLAP_SECONDS
+    detected_duration = get_audio_duration_seconds(audio_path)
+    total_source_duration = (
+        detected_duration if detected_duration > 0 else size / (bitrate / 8)
+    )
     n_chunks = -(-size // _API_LIMIT)   # ceiling estimate for logging
     log.info(
         f"File is {size // 1_048_576} MB at {bitrate // 1000} kbps — "
@@ -255,33 +262,34 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
     )
 
     with tempfile.TemporaryDirectory(prefix="whisper_chunks_") as tmp:
-        chunk_pattern = str(Path(tmp) / "chunk_%03d.mp3")
+        chunks: list[Path] = []
+        chunk_starts: list[float] = []
+        start = 0.0
+        while start < total_source_duration:
+            output = Path(tmp) / f"chunk_{len(chunks):03d}.mp3"
+            duration = min(float(chunk_secs), total_source_duration - start)
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-ss", str(start), "-i", str(audio_path),
+                "-t", str(duration), "-c", "copy", "-y", str(output),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, text=True, check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"ffmpeg split failed: {e.stderr.strip()}")
+            if not output.is_file() or output.stat().st_size == 0:
+                raise RuntimeError(f"ffmpeg did not produce chunk {len(chunks) + 1}")
+            chunks.append(output)
+            chunk_starts.append(start)
+            start += step_secs
 
-        # Split with ffmpeg — copy stream (no re-encode, fast, lossless)
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-i", str(audio_path),
-            "-f", "segment",
-            "-segment_time", str(chunk_secs),
-            "-c", "copy",
-            "-y", chunk_pattern,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"ffmpeg split failed: {e.stderr.strip()}")
-
-        chunks = sorted(Path(tmp).glob("chunk_*.mp3"))
         if not chunks:
             raise RuntimeError("ffmpeg produced no chunks")
 
         log.info(f"Split into {len(chunks)} chunk(s), transcribing ...")
 
         all_raw: list[dict] = []
-        offset = 0.0
-        full_text_parts: list[str] = []
         language = "ja"
-        total_duration = 0.0
 
         def _request_chunk(i: int, chunk_path: Path):
             log.info("  Chunk %d/%d ...", i + 1, len(chunks))
@@ -316,16 +324,17 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
         for i in range(len(chunks)):
             response = responses[i]
             language = response.language
-            full_text_parts.append(response.text)
-            chunk_duration = float(response.duration)
+            offset = chunk_starts[i]
             chunk_words = [
                 {"start": round(float(word.start) + offset, 3),
                  "end": round(float(word.end) + offset, 3), "word": word.word}
                 for word in (getattr(response, "words", []) or [])
             ]
 
+            boundary = offset + (_CHUNK_OVERLAP_SECONDS / 2) if i else None
+            incoming = []
             for seg in response.segments:
-                all_raw.append({
+                item = {
                     "index": len(all_raw),
                     "start": round(float(seg.start) + offset, 3),
                     "end":   round(float(seg.end)   + offset, 3),
@@ -333,20 +342,28 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
                     "words": [word for word in chunk_words
                               if word["end"] > float(seg.start) + offset
                               and word["start"] < float(seg.end) + offset],
-                })
-
-            offset += chunk_duration
-            total_duration = offset
+                }
+                midpoint = (item["start"] + item["end"]) / 2
+                spans_boundary = bool(boundary is not None and
+                                      item["start"] < boundary <= item["end"])
+                if boundary is None or midpoint >= boundary or spans_boundary:
+                    incoming.append(item)
+            if boundary is not None and incoming:
+                all_raw = [previous for previous in all_raw if not any(
+                    previous["start"] < item["end"] and item["start"] < previous["end"]
+                    for item in incoming
+                )]
+            all_raw.extend(incoming)
 
         segments = _clean_segments(all_raw)
         log.info(
             f"Transcription complete: {len(segments)} segments across "
-            f"{len(chunks)} chunks, total duration {total_duration:.1f}s"
+            f"{len(chunks)} chunks, total duration {total_source_duration:.1f}s"
         )
         return {
             "language": language,
-            "duration": total_duration,
-            "text":     " ".join(full_text_parts),
+            "duration": total_source_duration,
+            "text":     " ".join(segment["ja"] for segment in segments),
             "segments": segments,
         }
 

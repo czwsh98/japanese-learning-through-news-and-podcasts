@@ -51,15 +51,14 @@ class ParallelChunkTests(unittest.TestCase):
         )
 
         def fake_run(cmd, **_kwargs):
-            pattern = Path(cmd[-1])
-            for index in range(2):
-                Path(str(pattern).replace("%03d", f"{index:03d}")).write_bytes(b"audio")
+            Path(cmd[-1]).write_bytes(b"audio")
             return types.SimpleNamespace(stdout="", stderr="", returncode=0)
 
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "source.mp3"
             audio.write_bytes(b"source")
             with patch.object(transcriber, "_audio_bitrate_bps", return_value=64_000), \
+                 patch.object(transcriber, "get_audio_duration_seconds", return_value=3_010.0), \
                  patch.object(transcriber.subprocess, "run", side_effect=fake_run):
                 result = transcriber._transcribe_api_chunked(
                     client, audio, transcriber._API_LIMIT + 1,
@@ -68,8 +67,43 @@ class ParallelChunkTests(unittest.TestCase):
         self.assertEqual([s["ja"] for s in result["segments"]], [
             "チャンク0の文章です。", "チャンク1の文章です。",
         ])
-        self.assertEqual(result["segments"][1]["start"], 10.0)
-        self.assertEqual(result["duration"], 20.0)
+        self.assertEqual(result["segments"][1]["start"], 3002.0)
+        self.assertEqual(result["duration"], 3_010.0)
+
+    def test_overlap_prefers_boundary_segment_with_following_context(self):
+        class Transcriptions:
+            def create(self, *, file, **_kwargs):
+                index = int(Path(file.name).stem.split("_")[-1])
+                if index == 0:
+                    segment = types.SimpleNamespace(start=3001.0, end=3003.5, text="前半だけ")
+                else:
+                    segment = types.SimpleNamespace(start=0.0, end=2.0, text="境界をまたぐ完全な文です。")
+                return types.SimpleNamespace(
+                    language="ja", text=segment.text, duration=10.0,
+                    segments=[segment], words=[],
+                )
+
+        client = types.SimpleNamespace(
+            audio=types.SimpleNamespace(transcriptions=Transcriptions())
+        )
+
+        def fake_run(cmd, **_kwargs):
+            Path(cmd[-1]).write_bytes(b"audio")
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "source.mp3"
+            audio.write_bytes(b"source")
+            with patch.object(transcriber, "_audio_bitrate_bps", return_value=64_000), \
+                 patch.object(transcriber, "get_audio_duration_seconds", return_value=3_010.0), \
+                 patch.object(transcriber.subprocess, "run", side_effect=fake_run):
+                result = transcriber._transcribe_api_chunked(
+                    client, audio, transcriber._API_LIMIT + 1,
+                )
+
+        self.assertEqual([segment["ja"] for segment in result["segments"]], [
+            "境界をまたぐ完全な文です。",
+        ])
 
 
 if __name__ == "__main__":
