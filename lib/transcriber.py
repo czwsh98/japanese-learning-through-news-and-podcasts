@@ -404,12 +404,15 @@ def _merge_caption_cues(raw: list[dict]) -> list[dict]:
     if current is not None:
         merged.append(current)
 
-    # Cue timing estimates can still leave a merged segment's end past the
-    # next segment's start — clamp so playback highlighting never straddles
-    # two lines at once.
+    # A caption cue's stated duration is frequently much shorter than how
+    # long that speech actually took, and the next cue often doesn't start
+    # until well after the speaker has already moved on — inspection of real
+    # transcripts shows "gaps" of 15-20s mid-sentence with no actual pause.
+    # Stretch every segment to touch the next one's start (never overlapping,
+    # never leaving a blank gap) so the active-line highlight tracks
+    # continuous speech instead of going dark while the cue timing catches up.
     for i in range(len(merged) - 1):
-        if merged[i]["end"] > merged[i + 1]["start"]:
-            merged[i]["end"] = merged[i + 1]["start"]
+        merged[i]["end"] = merged[i + 1]["start"]
 
     for i, seg in enumerate(merged):
         seg["index"] = i
