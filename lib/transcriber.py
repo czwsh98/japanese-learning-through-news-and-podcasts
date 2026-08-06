@@ -370,6 +370,52 @@ def _transcribe_api_chunked(client, audio_path: Path, size: int) -> dict:
 
 # ── YouTube transcript API ────────────────────────────────────────────────────
 
+_JA_SENTENCE_END = "。！？"
+_CAPTION_MAX_GAP = 1.5     # seconds of silence that forces a new segment
+_CAPTION_MAX_SPAN = 12.0   # seconds — cap segment length when no punctuation ends it
+
+
+def _merge_caption_cues(raw: list[dict]) -> list[dict]:
+    """Merge individual auto-caption cues into sentence-level segments.
+
+    YouTube's auto-generated captions are phrase/word-level cues whose
+    'duration' is a rough per-cue estimate, not a real speech boundary — as a
+    result consecutive cues routinely overlap by 1-3s and a lone cue is often
+    just a single word. Whisper doesn't have this problem (its segments are
+    already sentence-level with real timestamps), so only the caption path
+    needs this merge+clamp step.
+    """
+    merged: list[dict] = []
+    current: dict | None = None
+
+    for cue in raw:
+        if current is None:
+            current = {"start": cue["start"], "end": cue["end"], "ja": cue["ja"]}
+            continue
+        gap = cue["start"] - current["end"]
+        ends_sentence = current["ja"][-1:] in _JA_SENTENCE_END
+        too_long = (cue["end"] - current["start"]) > _CAPTION_MAX_SPAN
+        if ends_sentence or gap > _CAPTION_MAX_GAP or too_long:
+            merged.append(current)
+            current = {"start": cue["start"], "end": cue["end"], "ja": cue["ja"]}
+        else:
+            current["end"] = cue["end"]
+            current["ja"] += cue["ja"]
+    if current is not None:
+        merged.append(current)
+
+    # Cue timing estimates can still leave a merged segment's end past the
+    # next segment's start — clamp so playback highlighting never straddles
+    # two lines at once.
+    for i in range(len(merged) - 1):
+        if merged[i]["end"] > merged[i + 1]["start"]:
+            merged[i]["end"] = merged[i + 1]["start"]
+
+    for i, seg in enumerate(merged):
+        seg["index"] = i
+    return merged
+
+
 def fetch_youtube_transcript(video_id: str) -> dict | None:
     """Fetch YouTube captions via transcript API. Returns whisper-format dict or None."""
     try:
@@ -394,13 +440,16 @@ def fetch_youtube_transcript(video_id: str) -> dict | None:
                 "ja":    str(_field(s, "text")).strip().replace("\n", " "),
             }
             for i, s in enumerate(snippets)
+            if str(_field(s, "text")).strip()
         ]
+        merged = _merge_caption_cues(raw)
+
         # Platform captions can legitimately contain repeated phrases such as
         # 「どんどん」 or 「はい、はい」. The aggressive Whisper hallucination
         # filters would drop those, so captions only need basic empty/short-line
         # cleanup and stable reindexing.
         segments = []
-        for seg in raw:
+        for seg in merged:
             text = seg["ja"].strip("　 \t\n\r")
             if len(text) < _MIN_CHARS:
                 continue
@@ -409,7 +458,7 @@ def fetch_youtube_transcript(video_id: str) -> dict | None:
             log.warning("YouTube captions empty after cleaning — falling back to Whisper")
             return None
         duration = segments[-1]["end"]
-        log.info(f"YouTube captions: {len(segments)} segments, {duration:.1f}s")
+        log.info(f"YouTube captions: {len(segments)} segments (from {len(raw)} caption cues), {duration:.1f}s")
         return {
             "language": "ja",
             "duration": duration,
