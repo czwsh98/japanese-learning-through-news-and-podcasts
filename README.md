@@ -129,6 +129,7 @@ The checked-in `.env.example` contains safe placeholders. Important settings are
 | `USE_LOCAL_WHISPER` | Set to `1` to use local `mlx-whisper` instead of the API |
 | `MLX_WHISPER_MODEL` | Local Whisper model override |
 | `MAX_AUDIO_MINUTES` | Per-job duration cap for regular users; defaults to 30 minutes |
+| `MAX_SEGMENT_STRETCH_GAP_SECONDS` | Caption timing-gap bridge limit; defaults to 12 seconds |
 | `DATABASE_URL` | PostgreSQL connection URL |
 | `SECRET_KEY` | Flask session signing key; required in production |
 | `R2_ENDPOINT_URL` | Cloudflare R2/S3 endpoint |

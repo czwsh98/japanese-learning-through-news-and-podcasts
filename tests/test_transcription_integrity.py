@@ -38,6 +38,16 @@ class TranscriptCleanupTests(unittest.TestCase):
         ])
         self.assertEqual([segment["index"] for segment in cleaned], [0, 1, 2])
 
+    def test_segment_stretch_is_capped_to_short_caption_lag(self):
+        raw = [
+            {"index": 0, "start": 0.0, "end": 2.0, "ja": "短い遅延"},
+            {"index": 1, "start": 8.0, "end": 9.0, "ja": "次の字幕"},
+            {"index": 2, "start": 25.0, "end": 26.0, "ja": "長い無音後"},
+        ]
+        cleaned = transcriber._clean_segments(raw)
+        self.assertEqual(cleaned[0]["end"], 8.0)
+        self.assertEqual(cleaned[1]["end"], 9.0)
+
 
 class TranslationCompletenessTests(unittest.TestCase):
     def test_partial_response_retries_only_missing_indices(self):

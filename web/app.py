@@ -60,7 +60,10 @@ _SLUG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 
 # YouTube video id (matches lib/downloader.py). The DB Episode model does not
 # store video_id, so it is re-derived from the stored URL at render time.
-_YT_ID_RE = re.compile(r"(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})")
+_YT_ID_RE = re.compile(
+    r"(?:watch\?.*v=|youtu\.be/|(?:www\.|m\.)?youtube\.com/shorts/)"
+    r"([a-zA-Z0-9_-]{11})"
+)
 
 from flask_cors import CORS
 
@@ -1883,7 +1886,7 @@ def _extract_rss_image(content: bytes) -> str:
         root = ET.fromstring(content)
     except ET.ParseError:
         return ""
-    channel = root.find("channel") or root.find("./channel")
+    channel = root.find("channel")
     if channel is None:
         channel = root
     itunes_image = channel.find("{http://www.itunes.com/dtds/podcast-1.0.dtd}image")
@@ -2187,9 +2190,10 @@ def api_subscriptions_recent():
         _ensure_user_subscriptions(user)
         updated = 0
         with get_db() as db:
-            rows = db.execute(select(Subscription).where(
-                Subscription.user_id == user.id
-            )).scalars().all()
+            # The scheduled bot authenticates as one fixed owner, but the
+            # cache is source-level data shared by every user's subscription.
+            # Updating only ``user.id`` leaves other users' inboxes stale.
+            rows = db.execute(select(Subscription)).scalars().all()
             for row in rows:
                 entry = clean.get(row.url) or (clean.get(row.rss_url) if row.rss_url else None)
                 if entry is None:

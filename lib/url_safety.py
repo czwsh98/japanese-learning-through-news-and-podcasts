@@ -85,6 +85,28 @@ def _content_length(response) -> int | None:
         return None
 
 
+def write_bounded_response(response, destination: Path, *, max_bytes: int,
+                           label: str = "Remote response") -> int:
+    """Write an already-open response with one consistent size/error policy."""
+    expected = _content_length(response)
+    if expected is not None and expected > max_bytes:
+        raise DownloadTooLargeError(f"{label} exceeds {max_bytes} bytes")
+    total = 0
+    try:
+        with open(destination, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=65_536):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise DownloadTooLargeError(f"{label} exceeds {max_bytes} bytes")
+                handle.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return total
+
+
 def safe_get_bytes(url: str, *, max_bytes: int, timeout: int | float,
                    headers: dict | None = None) -> bytes:
     with safe_response(url, timeout=timeout, headers=headers) as response:
@@ -104,21 +126,7 @@ def safe_get_bytes(url: str, *, max_bytes: int, timeout: int | float,
 def safe_download(url: str, destination: Path, *, max_bytes: int,
                   timeout: int | float, headers: dict | None = None) -> int:
     """Stream a public URL to disk, aborting before it exceeds ``max_bytes``."""
-    total = 0
-    try:
-        with safe_response(url, timeout=timeout, headers=headers) as response:
-            expected = _content_length(response)
-            if expected is not None and expected > max_bytes:
-                raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
-            with open(destination, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=65_536):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
-                    handle.write(chunk)
-        return total
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
+    with safe_response(url, timeout=timeout, headers=headers) as response:
+        return write_bounded_response(
+            response, destination, max_bytes=max_bytes, label="Remote audio"
+        )

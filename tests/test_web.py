@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
-from web.app import app, _extract_page_image, _extract_rss_image
+from web.app import app, _extract_page_image, _extract_rss_image, _YT_ID_RE
 
 @pytest.fixture
 def client():
@@ -168,6 +168,12 @@ def test_source_artwork_extractors_accept_page_and_rss_metadata():
       <channel><itunes:image href="https://images.example/show.jpg" /></channel>
     </rss>'''
     assert _extract_rss_image(rss) == "https://images.example/show.jpg"
+
+
+def test_youtube_id_extractor_accepts_shorts_urls():
+    assert _YT_ID_RE.search(
+        "https://www.youtube.com/shorts/dQw4w9WgXcQ"
+    ).group(1) == "dQw4w9WgXcQ"
 
 
 def test_recommendation_card_renders_cover_with_icon_fallback(client, tmp_path):

@@ -23,6 +23,11 @@ _API_LIMIT = 23 * 1024 * 1024   # 23 MB — leave 2 MB headroom below the 25 MB 
 _API_AUDIO_BITRATE = os.environ.get("WHISPER_AUDIO_BITRATE", "64k")
 _MAX_CHUNK_WORKERS = max(1, int(os.environ.get("WHISPER_CHUNK_WORKERS", "3")))
 _CHUNK_OVERLAP_SECONDS = 2.0
+# Caption/transcription boundaries can lag the spoken audio by a few seconds.
+# Do not bridge longer pauses (ad breaks, intros, or other genuine silence).
+_MAX_SEGMENT_STRETCH_GAP_SECONDS = float(
+    os.environ.get("MAX_SEGMENT_STRETCH_GAP_SECONDS", "12")
+)
 
 # Maximum audio duration for non-unlimited users.  Whisper is billed per
 # minute (~$0.006/min), so 30 min caps per-job spend at ~$0.18 of Whisper.
@@ -62,6 +67,14 @@ def _has_repeating_phrase(text: str) -> bool:
     return False
 
 
+def _stretch_segment_ends(segments: list[dict]) -> None:
+    """Bridge only short timing gaps between adjacent caption segments."""
+    for current, following in zip(segments, segments[1:]):
+        gap = float(following["start"]) - float(current["end"])
+        if 0 < gap <= _MAX_SEGMENT_STRETCH_GAP_SECONDS:
+            current["end"] = round(float(following["start"]), 3)
+
+
 def _clean_segments(raw: list[dict]) -> list[dict]:
     """Drop only high-confidence hallucinated / garbage segments.
 
@@ -84,6 +97,11 @@ def _clean_segments(raw: list[dict]) -> list[dict]:
 
     for i, seg in enumerate(cleaned):
         seg["index"] = i
+
+    # Some caption providers end a line early even though the next caption
+    # starts shortly afterward. Keep the active line lit through that small
+    # synchronization lag, but preserve real silences.
+    _stretch_segment_ends(cleaned)
 
     dropped = len(raw) - len(cleaned)
     if dropped:
@@ -404,15 +422,10 @@ def _merge_caption_cues(raw: list[dict]) -> list[dict]:
     if current is not None:
         merged.append(current)
 
-    # A caption cue's stated duration is frequently much shorter than how
-    # long that speech actually took, and the next cue often doesn't start
-    # until well after the speaker has already moved on — inspection of real
-    # transcripts shows "gaps" of 15-20s mid-sentence with no actual pause.
-    # Stretch every segment to touch the next one's start (never overlapping,
-    # never leaving a blank gap) so the active-line highlight tracks
-    # continuous speech instead of going dark while the cue timing catches up.
-    for i in range(len(merged) - 1):
-        merged[i]["end"] = merged[i + 1]["start"]
+    # A caption cue's stated duration can be shorter than the speech, but a
+    # long gap may also be a real ad break or intro. Bridge only the bounded
+    # synchronization lag; leave genuine silence visible to the player.
+    _stretch_segment_ends(merged)
 
     for i, seg in enumerate(merged):
         seg["index"] = i
@@ -457,6 +470,7 @@ def fetch_youtube_transcript(video_id: str) -> dict | None:
             if len(text) < _MIN_CHARS:
                 continue
             segments.append({**seg, "index": len(segments), "ja": text})
+        _stretch_segment_ends(segments)
         if not segments:
             log.warning("YouTube captions empty after cleaning — falling back to Whisper")
             return None

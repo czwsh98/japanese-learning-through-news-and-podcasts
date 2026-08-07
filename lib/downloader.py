@@ -19,7 +19,12 @@ from pathlib import Path
 
 import requests as _req
 
-from lib.url_safety import DownloadTooLargeError, safe_download, validate_public_url
+from lib.url_safety import (
+    DownloadTooLargeError,
+    safe_download,
+    validate_public_url,
+    write_bounded_response,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +38,10 @@ _DIRECT_AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus", 
 
 _VPS_URL   = os.environ.get("VPS_DOWNLOAD_URL", "").rstrip("/")
 _VPS_TOKEN = os.environ.get("VPS_DOWNLOAD_TOKEN", "")
-_YT_RE     = re.compile(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})')
+_YT_RE     = re.compile(
+    r'(?:watch\?.*v=|youtu\.be/|(?:www\.|m\.)?youtube\.com/shorts/)'
+    r'([a-zA-Z0-9_-]{11})'
+)
 
 # ── YouTube cookies ───────────────────────────────────────────────────────────
 
@@ -161,20 +169,9 @@ def _download_vps(url: str, episode_dir: Path, max_bytes: int) -> tuple[Path, di
         stream=True,
     ) as resp:
         resp.raise_for_status()
-        try:
-            expected = int(resp.headers.get("Content-Length", ""))
-        except (TypeError, ValueError):
-            expected = 0
-        if expected > max_bytes:
-            raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
-        total = 0
-        with open(audio_path, "wb") as fh:
-            for chunk in resp.iter_content(chunk_size=65_536):
-                total += len(chunk)
-                if total > max_bytes:
-                    audio_path.unlink(missing_ok=True)
-                    raise DownloadTooLargeError(f"Remote audio exceeds {max_bytes} bytes")
-                fh.write(chunk)
+        total = write_bounded_response(
+            resp, audio_path, max_bytes=max_bytes, label="Remote audio"
+        )
 
     size_kb = audio_path.stat().st_size // 1024
     log.info(f"VPS download complete: {size_kb:,} KB → {audio_path}")
@@ -242,7 +239,10 @@ def _download_ytdlp(url: str, episode_dir: Path, max_bytes: int) -> tuple[Path, 
 
 # ── YouTube oEmbed metadata ───────────────────────────────────────────────────
 
-_YT_ID_RE = re.compile(r'(?:watch\?.*v=|youtu\.be/)([a-zA-Z0-9_-]{11})')
+_YT_ID_RE = re.compile(
+    r'(?:watch\?.*v=|youtu\.be/|(?:www\.|m\.)?youtube\.com/shorts/)'
+    r'([a-zA-Z0-9_-]{11})'
+)
 
 
 def fetch_youtube_meta_oembed(url: str) -> dict:

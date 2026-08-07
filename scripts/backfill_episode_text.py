@@ -123,15 +123,42 @@ def run(slug: str, *, clean_only: bool = False) -> None:
                 ExtraArgs={"ContentType": content_type},
             )
 
-        for path in generated:
-            staging_key = f"{staging_prefix}{path.name}"
-            s3.copy_object(
-                Bucket=bucket,
-                CopySource={"Bucket": bucket, "Key": staging_key},
-                Key=f"{prefix}{path.name}",
-                ContentType=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                MetadataDirective="REPLACE",
-            )
+        promoted = []
+        try:
+            for path in generated:
+                staging_key = f"{staging_prefix}{path.name}"
+                # Record before the request: a client-side timeout can happen
+                # after R2 has already completed the copy.
+                promoted.append(path.name)
+                s3.copy_object(
+                    Bucket=bucket,
+                    CopySource={"Bucket": bucket, "Key": staging_key},
+                    Key=f"{prefix}{path.name}",
+                    ContentType=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                    MetadataDirective="REPLACE",
+                )
+        except Exception:
+            # R2 has no atomic multi-object rename. Restore every live object
+            # already promoted before surfacing the error, so a failed repair
+            # cannot publish a mixed transcript/analysis set. Objects that did
+            # not exist before the repair are removed again.
+            for filename in promoted:
+                original_key = f"{backup_prefix}{filename}"
+                live_key = f"{prefix}{filename}"
+                try:
+                    s3.copy_object(
+                        Bucket=bucket,
+                        CopySource={"Bucket": bucket, "Key": original_key},
+                        Key=live_key,
+                        MetadataDirective="COPY",
+                    )
+                except ClientError as exc:
+                    code = str(exc.response.get("Error", {}).get("Code", ""))
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        s3.delete_object(Bucket=bucket, Key=live_key)
+                    else:
+                        raise
+            raise
 
         s3.delete_objects(Bucket=bucket, Delete={
             "Objects": [{"Key": f"{staging_prefix}{path.name}"} for path in generated],
